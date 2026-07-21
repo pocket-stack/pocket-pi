@@ -163,6 +163,14 @@ and nothing to `npm install` at the destination.
 - ✅ Coalesced 2 Hz+ frame scheduler; tools round-trip through native Rust.
 - ✅ Agent-authored **TypeScript plugins** loaded at runtime (oxc transpiler),
   including agent self-extension via `define_plugin`.
+- 🚧 **Node-compat runtime (in progress)** — the path to running *unmodified*
+  `pi-coding-agent` and its real extensions. Milestone 1 shipped: a Node module
+  system (rquickjs resolver/loader) that resolves relative paths, `node_modules`
+  packages, and `node:` builtins, transpiles `.ts` on the fly, and serves
+  builtins (`path`/`os`/`fs`/`events`/`util`/`buffer`/`process`) over native ops.
+  Next: CommonJS interop, `crypto`/`child_process`/`stream`/`url`, real Web
+  globals (`fetch`→`Response`/`ReadableStream`), then loading pi-ai and
+  pi-coding-agent unmodified, then disk-loaded extensions.
 - ⛔ Not hardened: two providers, permissive tool-arg validation, no session
   persistence/compaction, and the plugin API is a lean subset of pi's
   `ExtensionAPI` (single-file plugins, no value imports). A PoC substrate, not

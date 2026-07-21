@@ -27,6 +27,7 @@
 //! ```
 
 mod http;
+mod node;
 mod transpile;
 
 use rquickjs::{CatchResultExt, Context, Ctx, Function, Object, Runtime};
@@ -108,6 +109,10 @@ impl PiRuntime {
         let rt = Runtime::new().map_err(|e| e.to_string())?;
         let ctx = Context::full(&rt).map_err(|e| e.to_string())?;
 
+        // Node-flavored module resolution + loading (relative, node_modules,
+        // node: builtins, on-the-fly TS transpile).
+        rt.set_loader(node::NodeResolver, node::NodeLoader);
+
         let state = Rc::new(RefCell::new(HostState {
             tools: HashMap::new(),
             emitted: Vec::new(),
@@ -127,6 +132,10 @@ impl PiRuntime {
             ctx.eval::<(), _>(PRELUDE.as_bytes())
                 .catch(&ctx)
                 .map_err(|e| format!("prelude eval: {e}"))?;
+            // Node globals (process, Buffer, __node fs ops) before the bundle.
+            node::install_node(&ctx)
+                .catch(&ctx)
+                .map_err(|e| format!("install_node: {e}"))?;
             ctx.eval::<(), _>(AGENT_BUNDLE.as_bytes())
                 .catch(&ctx)
                 .map_err(|e| format!("agent bundle eval: {e}"))?;
@@ -217,6 +226,35 @@ impl PiRuntime {
         self.drain_jobs();
         self.flush_events();
         Ok(())
+    }
+
+    /// Import and evaluate an ES module by specifier (absolute path, or a
+    /// `node:` builtin), driving the Node resolver/loader — relative imports,
+    /// `node_modules` packages, and `.ts` transpile all work. Milestone toward
+    /// running unmodified pi-coding-agent. Returns after the module settles.
+    pub fn run_module(&mut self, specifier: &str) -> Result<(), String> {
+        let spec = specifier.to_string();
+        self.ctx.with(|ctx| -> Result<(), String> {
+            let promise = rquickjs::module::Module::import(&ctx, spec)
+                .catch(&ctx)
+                .map_err(|e| format!("import: {e}"))?;
+            promise
+                .finish::<rquickjs::Value>()
+                .catch(&ctx)
+                .map_err(|e| format!("module eval: {e}"))?;
+            Ok(())
+        })?;
+        self.drain_jobs();
+        Ok(())
+    }
+
+    /// Read a global (JSON-serialized) — for tests/introspection.
+    pub fn get_global_json(&self, name: &str) -> Option<serde_json::Value> {
+        self.ctx.with(|ctx| {
+            let v: rquickjs::Value = ctx.globals().get(name).ok()?;
+            let s = ctx.json_stringify(v).ok()??;
+            serde_json::from_str(&s.to_string().ok()?).ok()
+        })
     }
 
     /// Abort the in-flight turn, if any.

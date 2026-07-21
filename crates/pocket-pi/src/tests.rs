@@ -204,6 +204,66 @@ export default (api: any) => {
     assert!(shouted, "self-authored tool didn't run correctly: {kinds:?}");
 }
 
+/// Milestone 1 of the Node-compat runtime: the module system resolves + loads
+/// real modules — a relative `.ts` file (transpiled), `node:` builtins, and a
+/// bare package from `node_modules` — and they run correctly.
+#[test]
+fn node_module_system_loads_ts_builtins_and_a_bare_package() {
+    use std::fs;
+    let dir = std::env::temp_dir().join(format!("pocketpi-node-test-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("node_modules/greet")).unwrap();
+    fs::write(
+        dir.join("node_modules/greet/package.json"),
+        r#"{"name":"greet","version":"1.0.0","module":"index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("node_modules/greet/index.js"),
+        "export default (who) => \"hello \" + who;",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("entry.ts"),
+        r#"
+import { join } from "node:path";
+import { EventEmitter } from "node:events";
+import { Buffer } from "node:buffer";
+import { homedir } from "node:os";
+import greet from "greet";
+
+type Result = { path: string; ee: boolean; b64: string; greet: string; hasHome: boolean };
+const ee = new EventEmitter();
+let fired = false;
+ee.on("x", () => { fired = true; });
+ee.emit("x");
+
+const out: Result = {
+    path: join("a", "b", "..", "c"),
+    ee: fired,
+    b64: Buffer.from("hi").toString("base64"),
+    greet: greet("cat"),
+    hasHome: typeof homedir() === "string",
+};
+(globalThis as any).__nodeTest = out;
+"#,
+    )
+    .unwrap();
+
+    let mut rt = PiRuntime::new().expect("runtime");
+    rt.run_module(dir.join("entry.ts").to_str().unwrap())
+        .expect("run module");
+
+    let out = rt.get_global_json("__nodeTest").expect("__nodeTest set");
+    assert_eq!(out["path"], "a/c", "path.join wrong: {out}");
+    assert_eq!(out["ee"], true, "EventEmitter didn't fire: {out}");
+    assert_eq!(out["b64"], "aGk=", "Buffer base64 wrong: {out}");
+    assert_eq!(out["greet"], "hello cat", "bare package import wrong: {out}");
+    assert_eq!(out["hasHome"], true, "os.homedir wrong: {out}");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// Live end-to-end against OpenAI. Skipped unless OPENAI_API_KEY is set.
 #[test]
 fn live_openai_turn() {
