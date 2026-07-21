@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["crates/pocket-pi"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/pocket-stack/pocket-pi"
+
+[profile.release]
+opt-level = 2

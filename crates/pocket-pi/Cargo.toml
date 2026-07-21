@@ -1,0 +1,16 @@
+[package]
+name = "pocket-pi"
+version = "0.1.0"
+description = "A QuickJS runtime that runs the pi coding-agent core with no Node and no bun, on a PocketJS-style coalesced frame scheduler"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rquickjs = { version = "0.12", features = ["full-async"] }
+serde_json = "1"
+ureq = { version = "2", features = ["tls"] }
+log = "0.4"
+
+[dev-dependencies]
+env_logger = "0.11"
