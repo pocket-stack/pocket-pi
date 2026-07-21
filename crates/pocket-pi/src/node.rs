@@ -263,6 +263,9 @@ impl Loader for NodeLoader {
         name: &str,
         _attrs: Option<ImportAttributes<'js>>,
     ) -> Result<Module<'js, Declared>> {
+        if std::env::var("POCKET_PI_DEBUG_MODULES").is_ok() {
+            eprintln!("LOAD {name}");
+        }
         if let Some(src) = builtin_source(name) {
             return Module::declare(ctx.clone(), name, src);
         }
@@ -270,7 +273,8 @@ impl Loader for NodeLoader {
             .map_err(|e| Error::new_loading_message(name.to_string(), e.to_string()))?;
         let is_ts = name.ends_with(".ts") || name.ends_with(".tsx") || name.ends_with(".mts") || name.ends_with(".cts");
         let js = if is_ts {
-            transpile_ts(name, &source).map_err(|e| Error::new_loading_message(name.to_string(), e))?
+            let t = transpile_ts(name, &source).map_err(|e| Error::new_loading_message(name.to_string(), e))?;
+            rewrite_reexports(&t)
         } else if name.ends_with(".json") {
             format!("export default {source};")
         } else if name.ends_with(".cjs") || (!name.ends_with(".mjs") && is_cjs(&source)) {
@@ -278,10 +282,55 @@ impl Loader for NodeLoader {
             // its own `require(...)` to the synchronous native require.
             wrap_cjs(name, &source)
         } else {
-            source
+            rewrite_reexports(&source)
         };
         Module::declare(ctx.clone(), name, js)
     }
+}
+
+/// Rewrite indirect named re-exports into an import + a local export:
+///   `export { a, b as c } from "./y"`  →  `import { a, b as c } from "./y";
+///    export { a, c };`
+/// QuickJS resolves an indirect export by chaining through modules, which trips
+/// "circular reference" inside dependency cycles (pi-coding-agent's sdk.js). A
+/// local export sidesteps that chain. Semantically identical outside cycles.
+fn rewrite_reexports(src: &str) -> String {
+    use regex::Regex;
+    use std::sync::OnceLock;
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r#"(?m)^\s*export\s*\{([^}]*)\}\s*from\s*(["'][^"']+["'])\s*;?"#).unwrap()
+    });
+    let counter = std::cell::Cell::new(0usize);
+    re.replace_all(src, |caps: &regex::Captures| {
+        let list = &caps[1];
+        let spec = &caps[2];
+        let mut imports = Vec::new();
+        let mut exports = Vec::new();
+        for item in list.split(',') {
+            let item = item.trim();
+            if item.is_empty() {
+                continue;
+            }
+            // `orig` is the name in the target module, `exported` the outer name.
+            let (orig, exported) = match item.split_once(" as ") {
+                Some((a, b)) => (a.trim(), b.trim()),
+                None => (item, item),
+            };
+            // Unique local avoids clashing with an existing `import { orig }`.
+            let n = counter.get();
+            counter.set(n + 1);
+            let local = format!("__rx{n}_{}", exported.replace(|c: char| !c.is_alphanumeric(), "_"));
+            imports.push(format!("{orig} as {local}"));
+            exports.push(format!("{local} as {exported}"));
+        }
+        format!(
+            "import {{ {} }} from {spec}; export {{ {} }};",
+            imports.join(", "),
+            exports.join(", ")
+        )
+    })
+    .into_owned()
 }
 
 /// Heuristic CJS detection: has `require(`/`module.exports`/`exports.` and no

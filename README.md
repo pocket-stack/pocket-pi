@@ -181,9 +181,17 @@ and nothing to `npm install` at the destination.
     `readline`/`perf_hooks`/`tty`/`fs/promises`/`stream/promises` and a broad `fs`
     surface; subpath (`exports["./x"]`) and internal (`#x`) resolution. The loader
     now clears the *entire* Node + CJS dependency surface of pi-coding-agent.
-  - **Now blocked on:** a QuickJS ESM **indirect-re-export cycle** inside
-    pi-coding-agent's own `sdk.js` (`export *` + re-exported imports) — the next
-    thing to crack. Then `createAgentSession`, then disk extensions + persistence.
+  - **M4 — ESM cycle rewrite:** indirect re-exports (`export { x } from "./y"`)
+    are rewritten to `import { x as _local } from "./y"; export { _local as x }`,
+    which sidesteps QuickJS's "circular reference" on pi-coding-agent's cyclic
+    graph. This lets it link *hundreds* of real pi modules.
+  - **Now blocked on:** importing `createAgentSession` pulls pi-coding-agent's
+    entire ~500-module graph (including the interactive TUI), and QuickJS's module
+    linker **null-derefs** (`js_inner_module_linking`, `quickjs.c:30806`) on a
+    circular structure that large — an engine-level bug. Two paths under
+    evaluation: patch/upgrade the bundled QuickJS, or **build-time bundle** the
+    unmodified pi source into one module (sidesteps the multi-module linker,
+    reuses this whole Node-compat runtime), with extensions still runtime-loaded.
 - ⛔ Not hardened: two providers, permissive tool-arg validation, no session
   persistence/compaction, and the plugin API is a lean subset of pi's
   `ExtensionAPI` (single-file plugins, no value imports). A PoC substrate, not

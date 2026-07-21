@@ -1217,6 +1217,7 @@ dependencies = [
  "oxc_semantic",
  "oxc_span",
  "oxc_transformer",
+ "regex",
  "rquickjs",
  "serde_json",
  "ureq",
