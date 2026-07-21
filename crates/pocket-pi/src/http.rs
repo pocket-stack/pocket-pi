@@ -47,47 +47,48 @@ impl HttpHub {
         }
     }
 
-    /// Begin a streaming request described by `{url, apiKey, body}` JSON.
-    /// Returns the turn id, or an error string the caller turns into a JS throw.
+    /// Begin a request. Two shapes share this path:
+    /// - provider streaming: `{url, apiKey, auth, body}` → POST, SSE `data:` lines.
+    /// - WHATWG fetch: `{url, method, headers, body, raw:true}` → a meta line then
+    ///   base64 body chunks (backing `Response`/`ReadableStream`).
     pub fn start(&self, request_json: &str) -> Result<u64, String> {
-        let req: serde_json::Value =
+        let v: serde_json::Value =
             serde_json::from_str(request_json).map_err(|e| format!("bad request json: {e}"))?;
-        let url = req
-            .get("url")
-            .and_then(|v| v.as_str())
-            .ok_or("missing url")?
-            .to_string();
-        let api_key = req
-            .get("apiKey")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let body = req.get("body").cloned().unwrap_or(serde_json::json!({}));
-        let body_str = serde_json::to_string(&body).map_err(|e| e.to_string())?;
-        // "bearer" (OpenAI-style) vs "x-api-key" (Anthropic, default).
-        let auth = req
-            .get("auth")
-            .and_then(|v| v.as_str())
-            .unwrap_or("x-api-key")
-            .to_string();
+        let url = v.get("url").and_then(|x| x.as_str()).ok_or("missing url")?.to_string();
+        let raw = v.get("raw").and_then(|x| x.as_bool()).unwrap_or(false);
+        let method = v
+            .get("method")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_uppercase())
+            .unwrap_or_else(|| "POST".into());
+        let api_key = v.get("apiKey").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let auth = v.get("auth").and_then(|x| x.as_str()).unwrap_or("x-api-key").to_string();
+        // Body: fetch passes a string; providers pass a JSON object to serialize.
+        let body = match v.get("body") {
+            Some(serde_json::Value::String(s)) => Some(s.clone()),
+            Some(other) if !other.is_null() => Some(other.to_string()),
+            _ => None,
+        };
+        let mut headers: Vec<(String, String)> = Vec::new();
+        if let Some(serde_json::Value::Object(h)) = v.get("headers") {
+            for (k, val) in h {
+                if let Some(s) = val.as_str() {
+                    headers.push((k.clone(), s.to_string()));
+                }
+            }
+        }
+        let req = Req { url, method, headers, body, api_key, auth, raw };
 
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let cancel = Arc::new(AtomicBool::new(false));
         {
             let mut inner = self.inner.lock().unwrap();
-            inner.turns.insert(
-                id,
-                Turn {
-                    cancel: cancel.clone(),
-                    ..Default::default()
-                },
-            );
+            inner.turns.insert(id, Turn { cancel: cancel.clone(), ..Default::default() });
         }
-
         let hub = self.inner.clone();
         std::thread::Builder::new()
             .name(format!("pocket-pi-http-{id}"))
-            .spawn(move || run_request(hub, id, url, api_key, auth, body_str, cancel))
+            .spawn(move || run_request(hub, id, req, cancel))
             .map_err(|e| format!("spawn failed: {e}"))?;
         Ok(id)
     }
@@ -147,19 +148,20 @@ fn finish(hub: &Arc<Mutex<Inner>>, id: u64, error: Option<String>) {
     }
 }
 
-fn run_request(
-    hub: Arc<Mutex<Inner>>,
-    id: u64,
+struct Req {
     url: String,
+    method: String,
+    headers: Vec<(String, String)>,
+    body: Option<String>,
     api_key: String,
     auth: String,
-    body: String,
-    cancel: Arc<AtomicBool>,
-) {
+    raw: bool,
+}
+
+fn run_request(hub: Arc<Mutex<Inner>>, id: u64, req: Req, cancel: Arc<AtomicBool>) {
     let mut builder =
         ureq::AgentBuilder::new().timeout_connect(std::time::Duration::from_secs(20));
-    // Respect a system proxy (Clash/mihomo, corporate egress, …) the way curl
-    // does — many desktops route all external HTTP through one.
+    // Respect a system proxy (Clash/mihomo, corporate egress, …) like curl does.
     if let Some(proxy_url) = std::env::var("HTTPS_PROXY")
         .or_else(|_| std::env::var("https_proxy"))
         .or_else(|_| std::env::var("ALL_PROXY"))
@@ -173,29 +175,39 @@ fn run_request(
     }
     let agent = builder.build();
 
-    let mut req = agent.post(&url).set("content-type", "application/json");
-    if auth == "bearer" {
-        // OpenAI-style: Authorization: Bearer <key>.
-        req = req.set("authorization", &format!("Bearer {api_key}"));
-    } else if api_key.starts_with("sk-ant-oat") {
-        // Anthropic OAuth token → Bearer + Claude Code identity beta.
-        req = req
-            .set("anthropic-version", "2023-06-01")
-            .set("authorization", &format!("Bearer {api_key}"))
-            .set("anthropic-beta", "oauth-2025-04-20");
-    } else {
-        // Anthropic API key.
-        req = req
-            .set("anthropic-version", "2023-06-01")
-            .set("x-api-key", &api_key);
+    let mut r = agent.request(&req.method, &req.url);
+    let has_ct = req.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
+    if req.body.is_some() && !has_ct {
+        r = r.set("content-type", "application/json");
+    }
+    for (k, v) in &req.headers {
+        r = r.set(k, v);
+    }
+    // Provider auth convenience (skipped for a plain fetch that sets its own).
+    if !req.api_key.is_empty() {
+        if req.auth == "bearer" {
+            r = r.set("authorization", &format!("Bearer {}", req.api_key));
+        } else if req.api_key.starts_with("sk-ant-oat") {
+            r = r
+                .set("anthropic-version", "2023-06-01")
+                .set("authorization", &format!("Bearer {}", req.api_key))
+                .set("anthropic-beta", "oauth-2025-04-20");
+        } else {
+            r = r.set("anthropic-version", "2023-06-01").set("x-api-key", &req.api_key);
+        }
     }
 
-    let resp = match req.send_string(&body) {
+    let send = match &req.body {
+        Some(b) => r.send_string(b),
+        None => r.call(),
+    };
+    let resp = match send {
         Ok(r) => r,
+        // For raw fetch we forward non-2xx as a real Response (fetch doesn't
+        // throw on 4xx/5xx); for SSE providers, surface it as an error.
+        Err(ureq::Error::Status(code, r)) if req.raw => r_or_status(r, code),
         Err(ureq::Error::Status(code, r)) => {
-            let msg = r
-                .into_string()
-                .unwrap_or_else(|_| String::from("(no body)"));
+            let msg = r.into_string().unwrap_or_else(|_| String::from("(no body)"));
             finish(&hub, id, Some(format!("http {code}: {}", truncate(&msg, 400))));
             return;
         }
@@ -205,6 +217,42 @@ fn run_request(
         }
     };
 
+    if req.raw {
+        // Deliver a meta line (status/headers) then base64 body chunks.
+        let mut headers = serde_json::Map::new();
+        for name in resp.headers_names() {
+            if let Some(val) = resp.header(&name) {
+                headers.insert(name.to_lowercase(), serde_json::Value::String(val.to_string()));
+            }
+        }
+        let meta = serde_json::json!({ "__meta": {
+            "status": resp.status(), "statusText": resp.status_text(), "headers": headers,
+        }});
+        push_line(&hub, id, meta.to_string());
+        let mut reader = resp.into_reader();
+        let mut chunk = [0u8; 8192];
+        loop {
+            if cancel.load(Ordering::SeqCst) {
+                finish(&hub, id, Some("aborted".into()));
+                return;
+            }
+            match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let msg = serde_json::json!({ "__chunk": base64_encode(&chunk[..n]) });
+                    push_line(&hub, id, msg.to_string());
+                }
+                Err(e) => {
+                    finish(&hub, id, Some(format!("read error: {e}")));
+                    return;
+                }
+            }
+        }
+        finish(&hub, id, None);
+        return;
+    }
+
+    // SSE mode: forward `data:` payloads line by line.
     let mut reader = resp.into_reader();
     let mut buf: Vec<u8> = Vec::with_capacity(8192);
     let mut chunk = [0u8; 4096];
@@ -222,13 +270,10 @@ fn run_request(
             }
         };
         buf.extend_from_slice(&chunk[..n]);
-        // Emit complete lines; keep the trailing partial in the buffer.
         while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
             let line: Vec<u8> = buf.drain(..=pos).collect();
             let line = String::from_utf8_lossy(&line);
             let line = line.trim_end_matches(['\r', '\n']);
-            // Anthropic SSE: `event: <type>` then `data: <json>`. The JSON
-            // carries its own `type`, so we forward only `data:` payloads.
             if let Some(rest) = line.strip_prefix("data:") {
                 let payload = rest.trim();
                 if payload.is_empty() || payload == "[DONE]" {
@@ -242,6 +287,26 @@ fn run_request(
         }
     }
     finish(&hub, id, None);
+}
+
+/// ureq consumes the Response in the Status error; return it unchanged for the
+/// raw path (fetch surfaces non-2xx as a normal Response).
+fn r_or_status(resp: ureq::Response, _code: u16) -> ureq::Response {
+    resp
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    for c in bytes.chunks(3) {
+        let b = [c[0], *c.get(1).unwrap_or(&0), *c.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(A[(n >> 18 & 63) as usize] as char);
+        out.push(A[(n >> 12 & 63) as usize] as char);
+        out.push(if c.len() > 1 { A[(n >> 6 & 63) as usize] as char } else { '=' });
+        out.push(if c.len() > 2 { A[(n & 63) as usize] as char } else { '=' });
+    }
+    out
 }
 
 fn truncate(s: &str, max: usize) -> String {

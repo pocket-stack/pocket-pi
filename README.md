@@ -164,13 +164,21 @@ and nothing to `npm install` at the destination.
 - ✅ Agent-authored **TypeScript plugins** loaded at runtime (oxc transpiler),
   including agent self-extension via `define_plugin`.
 - 🚧 **Node-compat runtime (in progress)** — the path to running *unmodified*
-  `pi-coding-agent` and its real extensions. Milestone 1 shipped: a Node module
-  system (rquickjs resolver/loader) that resolves relative paths, `node_modules`
-  packages, and `node:` builtins, transpiles `.ts` on the fly, and serves
-  builtins (`path`/`os`/`fs`/`events`/`util`/`buffer`/`process`) over native ops.
-  Next: CommonJS interop, `crypto`/`child_process`/`stream`/`url`, real Web
-  globals (`fetch`→`Response`/`ReadableStream`), then loading pi-ai and
-  pi-coding-agent unmodified, then disk-loaded extensions.
+  `pi-coding-agent` and its real extensions.
+  - **M1 — module system:** rquickjs resolver/loader; relative + `node_modules`
+    (exports/module/main) + `node:` builtins; on-the-fly `.ts` transpile;
+    builtins `path`/`os`/`fs`/`events`/`util`/`buffer`/`process` over native ops.
+  - **M2 — Web globals + real pi code:** WHATWG `fetch`→`Response`→`ReadableStream`
+    (native raw-HTTP backing, driven by the frame pump), `Headers`, `URL`,
+    `TextEncoder`/`TextDecoder`, `atob`/`btoa`, `crypto.getRandomValues` — proven
+    against a live endpoint. And **real, unmodified pi-ai code loads and runs**
+    from `node_modules` through the loader.
+  - **CJS decision:** *skip* general CommonJS interop. Prefer ESM builds (the
+    resolver picks `exports.import`/`module`); the one CJS-only provider SDK is
+    replaced by the native streamFn; any remaining CJS-only straggler is
+    codemodded to ESM + synced — cheaper than a `cjs-module-lexer`.
+  - **Next:** `crypto`/`child_process`/`stream`/`url` builtins as pi needs them,
+    then `createAgentSession` unmodified, then disk-loaded extensions + persistence.
 - ⛔ Not hardened: two providers, permissive tool-arg validation, no session
   persistence/compaction, and the plugin API is a lean subset of pi's
   `ExtensionAPI` (single-file plugins, no value imports). A PoC substrate, not

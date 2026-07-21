@@ -38,6 +38,7 @@ use std::rc::Rc;
 pub use http::HttpHub;
 
 const PRELUDE: &str = include_str!("../js/prelude.js");
+const WEB_GLOBALS: &str = include_str!("../js/web-globals.js");
 const AGENT_BUNDLE: &str = include_str!("../js/agent.bundle.js");
 
 /// One event surfaced from the agent to the host, already decoded from the
@@ -136,6 +137,10 @@ impl PiRuntime {
             node::install_node(&ctx)
                 .catch(&ctx)
                 .map_err(|e| format!("install_node: {e}"))?;
+            // Web globals (fetch/Response/ReadableStream/Headers/URL/…).
+            ctx.eval::<(), _>(WEB_GLOBALS.as_bytes())
+                .catch(&ctx)
+                .map_err(|e| format!("web-globals eval: {e}"))?;
             ctx.eval::<(), _>(AGENT_BUNDLE.as_bytes())
                 .catch(&ctx)
                 .map_err(|e| format!("agent bundle eval: {e}"))?;
@@ -248,6 +253,19 @@ impl PiRuntime {
         Ok(())
     }
 
+    /// Evaluate a script in the realm (advanced/tests).
+    pub fn eval_script(&mut self, source: &str) -> Result<(), String> {
+        let src = source.to_string();
+        self.ctx.with(|ctx| -> Result<(), String> {
+            ctx.eval::<(), _>(src.as_bytes())
+                .catch(&ctx)
+                .map_err(|e| format!("eval: {e}"))?;
+            Ok(())
+        })?;
+        self.drain_jobs();
+        Ok(())
+    }
+
     /// Read a global (JSON-serialized) — for tests/introspection.
     pub fn get_global_json(&self, name: &str) -> Option<serde_json::Value> {
         self.ctx.with(|ctx| {
@@ -273,6 +291,7 @@ impl PiRuntime {
         self.ctx.with(|ctx| -> Result<(), String> {
             call_global_void(&ctx, "__catpiTimers")?;
             call_global_void(&ctx, "__catpiPump")?;
+            call_global_void(&ctx, "__catpiFetchPump")?;
             Ok(())
         })?;
         self.drain_jobs();

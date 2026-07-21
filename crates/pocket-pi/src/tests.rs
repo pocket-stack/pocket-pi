@@ -264,6 +264,104 @@ const out: Result = {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// Load a piece of the REAL, unmodified pi-ai (`utils/event-stream.js`) straight
+/// from node_modules through the Node loader and exercise its actual class. This
+/// is the "run unmodified pi" thesis, proven on real pi code — and validates the
+/// ESM-first (no-CJS) decision. Skipped if node_modules isn't installed.
+#[test]
+fn runs_real_unmodified_pi_ai_module() {
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let real = format!(
+        "{manifest}/../../js/node_modules/@mariozechner/pi-ai/dist/utils/event-stream.js"
+    );
+    if !std::path::Path::new(&real).exists() {
+        eprintln!("skipping runs_real_unmodified_pi_ai_module: run `npm install` in js/ first");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!("pocketpi-piai-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("entry.ts"),
+        format!(
+            r#"
+import {{ AssistantMessageEventStream }} from "{real}";
+const s = new AssistantMessageEventStream();
+const msg = {{ role: "assistant", content: [{{ type: "text", text: "hi" }}] }};
+// The real stream completes on a "done" event and resolves result() to its message.
+s.push({{ type: "text_delta", delta: "hi", partial: msg }});
+s.push({{ type: "done", message: msg }});
+s.result().then((m: any) => {{
+    (globalThis as any).__piAi = {{ resolvedText: m.content[0].text, isReal: true }};
+}});
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut rt = PiRuntime::new().expect("runtime");
+    rt.run_module(dir.join("entry.ts").to_str().unwrap())
+        .expect("run real pi-ai module");
+    // Drain so the result() promise settles.
+    for _ in 0..5 {
+        rt.pump().ok();
+    }
+
+    let out = rt.get_global_json("__piAi").expect("real pi-ai class ran");
+    assert_eq!(out["resolvedText"], "hi", "real pi-ai EventStream misbehaved: {out}");
+    assert_eq!(out["isReal"], true);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// WHATWG `fetch` → `Response` → `ReadableStream` → `json()`, end to end over the
+/// native HTTP hub. Hits a real endpoint (needs network/proxy); skips if
+/// unreachable. A 401 is fine — fetch doesn't throw on it, which is the point.
+#[test]
+fn whatwg_fetch_returns_a_readable_response() {
+    let mut rt = PiRuntime::new().expect("runtime");
+    rt.eval_script(
+        r#"
+        globalThis.__f = { done: false };
+        fetch("https://api.anthropic.com/v1/models")
+          .then(async (r) => {
+            const body = await r.text();
+            let parsed = null; try { parsed = JSON.parse(body); } catch {}
+            globalThis.__f = {
+              done: true, status: r.status, ok: r.ok,
+              ct: r.headers.get("content-type"),
+              len: body.length, isObject: parsed !== null && typeof parsed === "object",
+            };
+          })
+          .catch((e) => { globalThis.__f = { done: true, err: String(e && e.message ? e.message : e) }; });
+        "#,
+    )
+    .expect("eval fetch");
+
+    let start = std::time::Instant::now();
+    loop {
+        rt.pump().unwrap();
+        let f = rt.get_global_json("__f").unwrap_or(serde_json::Value::Null);
+        if f.get("done").and_then(|v| v.as_bool()) == Some(true) {
+            if let Some(err) = f.get("err").and_then(|v| v.as_str()) {
+                eprintln!("skipping whatwg_fetch: endpoint unreachable ({err})");
+                return;
+            }
+            eprintln!("fetch result: {f}");
+            let status = f["status"].as_i64().unwrap_or(0);
+            assert!(status > 0, "no status: {f}");
+            assert!(f["len"].as_i64().unwrap_or(0) > 0, "empty body: {f}");
+            assert_eq!(f["isObject"], true, "body wasn't JSON: {f}");
+            assert!(f["ct"].as_str().unwrap_or("").contains("json"), "content-type header missing: {f}");
+            return;
+        }
+        if start.elapsed().as_secs() > 30 {
+            panic!("fetch never completed: {f}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+}
+
 /// Live end-to-end against OpenAI. Skipped unless OPENAI_API_KEY is set.
 #[test]
 fn live_openai_turn() {
