@@ -434,3 +434,27 @@ fn live_anthropic_turn() {
     eprintln!("live model said: {text:?}");
     assert!(!text.is_empty(), "no assistant text");
 }
+
+/// WIP integration probe toward loading unmodified pi-coding-agent. Run with
+/// `cargo test -- --ignored probe_pi_coding_agent --nocapture`. Currently clears
+/// the whole Node-builtin + CJS dependency surface and reaches pi-coding-agent's
+/// own modules (blocked on a QuickJS ESM indirect-re-export cycle).
+#[ignore]
+#[test]
+fn probe_pi_coding_agent() {
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let sdk = format!("{manifest}/../../js/node_modules/@mariozechner/pi-coding-agent/dist/core/sdk.js");
+    if !std::path::Path::new(&sdk).exists() { eprintln!("skip: not installed"); return; }
+    let dir = std::env::temp_dir().join(format!("pca-probe-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("e.ts"), format!(
+        "import {{ createAgentSession }} from \"{sdk}\";\n(globalThis as any).__pca = typeof createAgentSession;\n"
+    )).unwrap();
+    let mut rt = PiRuntime::new().expect("rt");
+    match rt.run_module(dir.join("e.ts").to_str().unwrap()) {
+        Ok(()) => eprintln!("PROBE OK: createAgentSession = {:?}", rt.get_global_json("__pca")),
+        Err(e) => eprintln!("PROBE ERR: {e}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

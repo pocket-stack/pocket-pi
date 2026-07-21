@@ -129,6 +129,8 @@ export function parse(path) {
 }
 
 export const posix = { sep, delimiter: ":", normalize, isAbsolute, join, resolve, dirname, basename, extname, relative, parse };
+// We only implement POSIX semantics; win32 is a passthrough so imports resolve.
+export const win32 = { ...posix, sep: "\\", delimiter: ";" };
 export { sep };
 export const delimiter = ":";
-export default { sep, delimiter, normalize, isAbsolute, join, resolve, dirname, basename, extname, relative, parse, posix };
+export default { sep, delimiter, normalize, isAbsolute, join, resolve, dirname, basename, extname, relative, parse, posix, win32 };

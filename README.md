@@ -173,12 +173,17 @@ and nothing to `npm install` at the destination.
     `TextEncoder`/`TextDecoder`, `atob`/`btoa`, `crypto.getRandomValues` — proven
     against a live endpoint. And **real, unmodified pi-ai code loads and runs**
     from `node_modules` through the loader.
-  - **CJS decision:** *skip* general CommonJS interop. Prefer ESM builds (the
-    resolver picks `exports.import`/`module`); the one CJS-only provider SDK is
-    replaced by the native streamFn; any remaining CJS-only straggler is
-    codemodded to ESM + synced — cheaper than a `cjs-module-lexer`.
-  - **Next:** `crypto`/`child_process`/`stream`/`url` builtins as pi needs them,
-    then `createAgentSession` unmodified, then disk-loaded extensions + persistence.
+  - **M3 — CommonJS interop + full builtin surface.** The transitive tree has
+    ~90 CJS-only packages (chalk's `ansi-styles`/`color-convert`, `debug`, `yaml`,
+    `cli-highlight`, …), so CJS *is* required: a synchronous `require`, a
+    cjs-module-lexer for named exports, and an ESM bridge (CJS wrapped as ESM).
+    Plus `child_process`/`crypto`/`url`/`module`/`stream`/`string_decoder`/
+    `readline`/`perf_hooks`/`tty`/`fs/promises`/`stream/promises` and a broad `fs`
+    surface; subpath (`exports["./x"]`) and internal (`#x`) resolution. The loader
+    now clears the *entire* Node + CJS dependency surface of pi-coding-agent.
+  - **Now blocked on:** a QuickJS ESM **indirect-re-export cycle** inside
+    pi-coding-agent's own `sdk.js` (`export *` + re-exported imports) — the next
+    thing to crack. Then `createAgentSession`, then disk extensions + persistence.
 - ⛔ Not hardened: two providers, permissive tool-arg validation, no session
   persistence/compaction, and the plugin API is a lean subset of pi's
   `ExtensionAPI` (single-file plugins, no value imports). A PoC substrate, not

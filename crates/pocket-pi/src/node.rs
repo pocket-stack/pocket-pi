@@ -28,17 +28,34 @@ const BUILTINS: &[(&str, &str)] = &[
     ("buffer", include_str!("../js/node/buffer.js")),
     ("process", include_str!("../js/node/process.js")),
     ("fs", include_str!("../js/node/fs.js")),
+    ("fs/promises", include_str!("../js/node/fs-promises.js")),
+    ("child_process", include_str!("../js/node/child_process.js")),
+    ("crypto", include_str!("../js/node/crypto.js")),
+    ("url", include_str!("../js/node/url.js")),
+    ("module", include_str!("../js/node/module.js")),
+    ("stream", include_str!("../js/node/stream.js")),
+    ("stream/promises", include_str!("../js/node/stream-promises.js")),
+    ("string_decoder", include_str!("../js/node/string_decoder.js")),
+    ("readline", include_str!("../js/node/readline.js")),
+    ("perf_hooks", include_str!("../js/node/perf_hooks.js")),
+    ("tty", include_str!("../js/node/tty.js")),
 ];
 
 fn builtin_source(name: &str) -> Option<&'static str> {
     let bare = name.strip_prefix("node:").unwrap_or(name);
-    // `fs/promises` etc. map onto their parent for now.
+    // Exact match first (so `fs/promises` gets its own module), then the root.
+    if let Some((_, s)) = BUILTINS.iter().find(|(n, _)| *n == bare) {
+        return Some(s);
+    }
     let root = bare.split('/').next().unwrap_or(bare);
     BUILTINS.iter().find(|(n, _)| *n == root).map(|(_, s)| *s)
 }
 
 fn is_builtin(name: &str) -> bool {
     let bare = name.strip_prefix("node:").unwrap_or(name);
+    if BUILTINS.iter().any(|(n, _)| *n == bare) {
+        return true;
+    }
     let root = bare.split('/').next().unwrap_or(bare);
     BUILTINS.iter().any(|(n, _)| *n == root)
 }
@@ -55,19 +72,26 @@ impl Resolver for NodeResolver {
         name: &str,
         _attributes: Option<ImportAttributes<'js>>,
     ) -> Result<String> {
-        if is_builtin(name) {
-            let bare = name.strip_prefix("node:").unwrap_or(name);
-            return Ok(format!("node:{bare}"));
-        }
-        if name.starts_with("./") || name.starts_with("../") || name.starts_with('/') {
-            let base_dir = Path::new(base).parent().unwrap_or_else(|| Path::new("/"));
-            let joined = normalize(&base_dir.join(name));
-            return probe(&joined)
-                .ok_or_else(|| Error::new_resolving(base.to_string(), name.to_string()));
-        }
-        // Bare specifier: walk up node_modules from the importer.
-        resolve_bare(base, name).ok_or_else(|| Error::new_resolving(base.to_string(), name.to_string()))
+        resolve_spec(base, name)
+            .ok_or_else(|| Error::new_resolving(base.to_string(), name.to_string()))
     }
+}
+
+/// The core Node resolution, shared by the rquickjs `Resolver` and the native
+/// `require` op. Returns the canonical module name (`node:X` or an abs path).
+pub fn resolve_spec(base: &str, name: &str) -> Option<String> {
+    if is_builtin(name) {
+        let bare = name.strip_prefix("node:").unwrap_or(name);
+        return Some(format!("node:{bare}"));
+    }
+    if name.starts_with('#') {
+        return resolve_internal(base, name);
+    }
+    if name.starts_with("./") || name.starts_with("../") || name.starts_with('/') {
+        let base_dir = Path::new(base).parent().unwrap_or_else(|| Path::new("/"));
+        return probe(&normalize(&base_dir.join(name)));
+    }
+    resolve_bare(base, name)
 }
 
 /// Probe a path for the file that actually exists (extensions, index).
@@ -96,12 +120,106 @@ fn resolve_bare(base: &str, name: &str) -> Option<String> {
     while let Some(d) = dir {
         let pkg_dir = d.join("node_modules").join(&pkg);
         if pkg_dir.is_dir() {
-            if let Some(sub) = &subpath {
-                return probe(&pkg_dir.join(sub));
-            }
-            return resolve_package_entry(&pkg_dir);
+            return resolve_in_package(&pkg_dir, subpath.as_deref());
         }
         dir = d.parent().map(|p| p.to_path_buf());
+    }
+    None
+}
+
+/// Resolve a `#internal` import via the nearest package.json's `imports` map.
+fn resolve_internal(base: &str, name: &str) -> Option<String> {
+    let mut dir = Path::new(base).parent();
+    while let Some(d) = dir {
+        let pj = d.join("package.json");
+        if pj.is_file() {
+            let text = std::fs::read_to_string(&pj).ok()?;
+            let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+            let imports = json.get("imports")?;
+            // Exact match, then `*` wildcard.
+            if let Some(v) = imports.get(name) {
+                let target = resolve_conditions(v)?;
+                return probe(&normalize(&d.join(target)));
+            }
+            if let Some(obj) = imports.as_object() {
+                for (pat, target) in obj {
+                    if let Some(pre) = pat.strip_suffix('*') {
+                        if let Some(rest) = name.strip_prefix(pre) {
+                            let tgt = resolve_conditions(target)?.replace('*', rest);
+                            return probe(&normalize(&d.join(tgt)));
+                        }
+                    }
+                }
+            }
+            return None; // nearest package.json is the resolution boundary
+        }
+        dir = d.parent();
+    }
+    None
+}
+
+/// Resolve a specifier within a package dir, honoring the `exports` map (exact,
+/// conditional, and `*` wildcard subpaths), then falling back to module/main or
+/// a literal probe.
+fn resolve_in_package(pkg_dir: &Path, subpath: Option<&str>) -> Option<String> {
+    let manifest = pkg_dir.join("package.json");
+    if let Ok(text) = std::fs::read_to_string(&manifest) {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+            let key = match subpath {
+                None => ".".to_string(),
+                Some(s) => format!("./{s}"),
+            };
+            if let Some(target) = resolve_export(&json, &key) {
+                return probe(&normalize(&pkg_dir.join(target)));
+            }
+            // No exports match: use module/main for the root, else literal probe.
+            if subpath.is_none() {
+                let entry = json
+                    .get("module")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| json.get("main").and_then(|v| v.as_str()))
+                    .unwrap_or("index.js");
+                return probe(&normalize(&pkg_dir.join(entry)));
+            }
+        }
+    }
+    probe(&normalize(&pkg_dir.join(subpath.unwrap_or("index.js"))))
+}
+
+/// Look up `key` (`.` or `./sub`) in a package's `exports`, resolving conditions
+/// and `*` wildcards. Returns the target path relative to the package dir.
+fn resolve_export(json: &serde_json::Value, key: &str) -> Option<String> {
+    let exports = json.get("exports")?;
+    // `"exports": "./x.js"` — only valid for the root.
+    if let Some(s) = exports.as_str() {
+        return if key == "." { Some(s.to_string()) } else { None };
+    }
+    let obj = exports.as_object()?;
+    if let Some(v) = obj.get(key) {
+        return resolve_conditions(v);
+    }
+    // Wildcard: a key like "./*" or "./dist/*" mapping to "./build/*.js".
+    for (pat, target) in obj {
+        if let (Some(pre), Some(_post)) = (pat.strip_suffix('*'), Some("")) {
+            if let Some(rest) = key.strip_prefix(pre) {
+                let tgt = resolve_conditions(target)?;
+                return Some(tgt.replace('*', rest));
+            }
+        }
+    }
+    None
+}
+
+fn resolve_conditions(value: &serde_json::Value) -> Option<String> {
+    if let Some(s) = value.as_str() {
+        return Some(s.to_string());
+    }
+    for cond in ["import", "module", "default", "node", "require"] {
+        if let Some(v) = value.get(cond) {
+            if let Some(s) = resolve_conditions(v) {
+                return Some(s);
+            }
+        }
     }
     None
 }
@@ -117,39 +235,6 @@ fn split_package(name: &str) -> (String, Option<String>) {
     } else {
         (name.to_string(), None)
     }
-}
-
-fn resolve_package_entry(pkg_dir: &Path) -> Option<String> {
-    let manifest = pkg_dir.join("package.json");
-    let text = std::fs::read_to_string(&manifest).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
-    // Prefer exports["."] (import/default), then module, then main.
-    let entry = exports_main(&json)
-        .or_else(|| json.get("module").and_then(|v| v.as_str()).map(String::from))
-        .or_else(|| json.get("main").and_then(|v| v.as_str()).map(String::from))
-        .unwrap_or_else(|| "index.js".to_string());
-    probe(&normalize(&pkg_dir.join(entry)))
-}
-
-fn exports_main(json: &serde_json::Value) -> Option<String> {
-    let exports = json.get("exports")?;
-    let dot = match exports {
-        serde_json::Value::String(s) => return Some(s.clone()),
-        serde_json::Value::Object(o) => o.get(".").or(Some(exports)).unwrap_or(exports),
-        _ => return None,
-    };
-    // Conditional: import > default > require.
-    for key in ["import", "default", "node", "require"] {
-        if let Some(v) = dot.get(key) {
-            if let Some(s) = v.as_str() {
-                return Some(s.to_string());
-            }
-            if let Some(s) = v.get("default").and_then(|x| x.as_str()) {
-                return Some(s.to_string());
-            }
-        }
-    }
-    dot.as_str().map(String::from)
 }
 
 fn normalize(p: &Path) -> PathBuf {
@@ -188,11 +273,100 @@ impl Loader for NodeLoader {
             transpile_ts(name, &source).map_err(|e| Error::new_loading_message(name.to_string(), e))?
         } else if name.ends_with(".json") {
             format!("export default {source};")
+        } else if name.ends_with(".cjs") || (!name.ends_with(".mjs") && is_cjs(&source)) {
+            // CommonJS: wrap as an ESM module so `import {x}` works, and route
+            // its own `require(...)` to the synchronous native require.
+            wrap_cjs(name, &source)
         } else {
             source
         };
         Module::declare(ctx.clone(), name, js)
     }
+}
+
+/// Heuristic CJS detection: has `require(`/`module.exports`/`exports.` and no
+/// top-level ESM `import`/`export` statements.
+fn is_cjs(src: &str) -> bool {
+    // Any top-level ESM statement → treat as ESM. `import(` (dynamic) is fine in
+    // CJS and deliberately not matched here.
+    for l in src.lines() {
+        let t = l.trim_start();
+        if t.starts_with("import ")
+            || t.starts_with("import{")
+            || t.starts_with("import *")
+            || t.starts_with("import*")
+            || t.starts_with("export ")
+            || t.starts_with("export{")
+            || t.starts_with("export*")
+            || t.starts_with("export default")
+        {
+            return false;
+        }
+    }
+    src.contains("require(") || src.contains("module.exports") || src.contains("exports.") || src.contains("exports[")
+}
+
+/// Wrap a CommonJS module as an ES module: run its body with module/exports/
+/// require, cache the result, and re-export `default` plus the named exports we
+/// can detect (a lightweight cjs-module-lexer).
+fn wrap_cjs(name: &str, src: &str) -> String {
+    let dir = Path::new(name).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+    let names = cjs_named_exports(src);
+    let mut named = String::new();
+    for n in &names {
+        named.push_str(&format!("export const {n} = __m[{:?}];\n", n));
+    }
+    // The body runs inside a function so its `var`/`function` decls don't leak
+    // and `return` is legal; JSON.stringify keeps the source intact as a string
+    // is unnecessary — we inline it directly.
+    format!(
+        "const module = {{ exports: {{}} }};\n\
+         let exports = module.exports;\n\
+         const __filename = {name:?};\n\
+         const __dirname = {dir:?};\n\
+         const require = (s) => globalThis.__cjsRequire(__filename, s);\n\
+         globalThis.__cjsCache = globalThis.__cjsCache || new Map();\n\
+         globalThis.__cjsCache.set(__filename, module.exports);\n\
+         (function (module, exports, require, __filename, __dirname) {{\n{src}\n}})(module, exports, require, __filename, __dirname);\n\
+         const __m = module.exports;\n\
+         globalThis.__cjsCache.set(__filename, __m);\n\
+         export default __m;\n{named}"
+    )
+}
+
+/// Scan CJS source for its named exports (best-effort, covers TS-compiled CJS).
+/// Uses `match_indices` so slicing always lands on char boundaries.
+fn cjs_named_exports(src: &str) -> Vec<String> {
+    fn ident(s: &str) -> String {
+        s.chars().take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$').collect()
+    }
+    let mut set: Vec<String> = Vec::new();
+    let mut push = |n: String| {
+        if n != "default" && n != "__esModule" && !n.is_empty() && !set.iter().any(|x| *x == n) {
+            set.push(n);
+        }
+    };
+    // `exports.NAME =` / `exports.NAME[`
+    for (idx, _) in src.match_indices("exports.") {
+        let rest = &src[idx + 8..];
+        let name = ident(rest);
+        if !name.is_empty() {
+            let after = rest[name.len()..].trim_start();
+            if after.starts_with('=') || after.starts_with('[') {
+                push(name);
+            }
+        }
+    }
+    // `Object.defineProperty(exports, "NAME"` and `__createBinding(exports, …, "NAME"`
+    for pat in ["defineProperty(exports,", "__createBinding(exports,"] {
+        for (idx, _) in src.match_indices(pat) {
+            let rest = &src[idx + pat.len()..];
+            if let Some(q) = rest.find(['"', '\'']) {
+                push(ident(&rest[q + 1..]));
+            }
+        }
+    }
+    set
 }
 
 // --- Native ops + process global (installed onto the realm) ---
@@ -209,6 +383,19 @@ pub fn install_node(ctx: &Ctx) -> rquickjs::Result<()> {
         std::env::temp_dir().to_string_lossy().to_string()
     })?)?;
     node.set("hostname", Function::new(ctx.clone(), || -> String { "localhost".into() })?)?;
+    // Resolution + file read for the synchronous CJS `require`.
+    node.set("resolve", Function::new(ctx.clone(), |from: String, spec: String| -> String {
+        match resolve_spec(&from, &spec) {
+            Some(r) if r.starts_with("node:") => {
+                serde_json::json!({ "builtin": r.strip_prefix("node:").unwrap() }).to_string()
+            }
+            Some(path) => serde_json::json!({ "path": path }).to_string(),
+            None => serde_json::json!({ "err": "not found" }).to_string(),
+        }
+    })?)?;
+    node.set("readText", Function::new(ctx.clone(), |path: String| -> String {
+        std::fs::read_to_string(&path).unwrap_or_default()
+    })?)?;
 
     // node.fs.* — each returns a JSON string the JS shim parses (avoids tying
     // rquickjs Object lifetimes through closures).
@@ -257,6 +444,25 @@ pub fn install_node(ctx: &Ctx) -> rquickjs::Result<()> {
     })?)?;
     fs.set("unlink", Function::new(ctx.clone(), |path: String| { let _ = std::fs::remove_file(&path); })?)?;
     node.set("fs", fs)?;
+
+    // node.spawnSync(cmd, argsJson, optsJson) -> JSON {stdout, stderr, status, error?}.
+    node.set("spawnSync", Function::new(ctx.clone(), |cmd: String, args_json: String, opts_json: String| -> String {
+        let args: Vec<String> = serde_json::from_str(&args_json).unwrap_or_default();
+        let opts: serde_json::Value = serde_json::from_str(&opts_json).unwrap_or(serde_json::Value::Null);
+        let mut command = std::process::Command::new(&cmd);
+        command.args(&args);
+        if let Some(cwd) = opts.get("cwd").and_then(|v| v.as_str()) {
+            command.current_dir(cwd);
+        }
+        match command.output() {
+            Ok(o) => serde_json::json!({
+                "stdout": String::from_utf8_lossy(&o.stdout),
+                "stderr": String::from_utf8_lossy(&o.stderr),
+                "status": o.status.code(),
+            }).to_string(),
+            Err(e) => serde_json::json!({ "error": e.to_string(), "status": serde_json::Value::Null }).to_string(),
+        }
+    })?)?;
     ctx.globals().set("__node", node)?;
 
     // process global.
@@ -277,6 +483,27 @@ pub fn install_node(ctx: &Ctx) -> rquickjs::Result<()> {
     process.set("versions", versions)?;
     process.set("argv", vec!["node".to_string(), "pocket-pi".to_string()])?;
     process.set("exit", Function::new(ctx.clone(), |_code: Option<i32>| {})?)?;
+    // Minimal stdout/stderr so the TUI + logging code can write() headlessly.
+    for (name, is_err) in [("stdout", false), ("stderr", true)] {
+        let stream = Object::new(ctx.clone())?;
+        stream.set("isTTY", false)?;
+        stream.set("columns", 80)?;
+        stream.set("rows", 24)?;
+        stream.set(
+            "write",
+            Function::new(ctx.clone(), move |s: String| -> bool {
+                if is_err {
+                    eprint!("{s}");
+                } else {
+                    print!("{s}");
+                }
+                true
+            })?,
+        )?;
+        stream.set("on", Function::new(ctx.clone(), || {})?)?;
+        stream.set("end", Function::new(ctx.clone(), || {})?)?;
+        process.set(name, stream)?;
+    }
     ctx.globals().set("process", process)?;
 
     // Bootstrap (JS): hoist Buffer to a global (many packages assume it) and
@@ -288,5 +515,56 @@ pub fn install_node(ctx: &Ctx) -> rquickjs::Result<()> {
         globalThis.process.nextTick = (fn, ...args) => queueMicrotask(() => fn(...args));
     "#;
     Module::evaluate(ctx.clone(), "pocket-pi:node-bootstrap", boot)?.finish::<()>()?;
+
+    // CJS bridge: capture each builtin's exports for the synchronous `require`,
+    // and define __cjsRequire (used by CJS modules wrapped by the loader).
+    let cjs_boot = r#"
+        import * as _fs from "node:fs";
+        import * as _path from "node:path";
+        import * as _os from "node:os";
+        import * as _events from "node:events";
+        import * as _util from "node:util";
+        import * as _buffer from "node:buffer";
+        import * as _process from "node:process";
+        import * as _crypto from "node:crypto";
+        import * as _url from "node:url";
+        import * as _module from "node:module";
+        import * as _stream from "node:stream";
+        import * as _sd from "node:string_decoder";
+        import * as _readline from "node:readline";
+        import * as _fsp from "node:fs/promises";
+        import * as _perf from "node:perf_hooks";
+        import * as _tty from "node:tty";
+        const pick = (ns) => (ns && ns.default !== undefined ? ns.default : ns);
+        globalThis.__builtinExports = {
+            fs: pick(_fs), path: pick(_path), os: pick(_os), events: pick(_events),
+            util: pick(_util), buffer: pick(_buffer), process: pick(_process),
+            crypto: pick(_crypto), url: pick(_url), module: pick(_module), stream: pick(_stream),
+            string_decoder: pick(_sd), readline: pick(_readline),
+            "fs/promises": pick(_fsp), perf_hooks: pick(_perf), tty: pick(_tty),
+        };
+        globalThis.__cjsCache = globalThis.__cjsCache || new Map();
+        globalThis.__cjsRequire = function (fromFile, spec) {
+            const r = JSON.parse(globalThis.__node.resolve(fromFile, spec));
+            if (r.builtin != null) {
+                const b = globalThis.__builtinExports[r.builtin] ?? globalThis.__builtinExports[r.builtin.split("/")[0]];
+                if (b === undefined) throw new Error("builtin not available: " + r.builtin);
+                return b;
+            }
+            if (r.err) throw new Error("Cannot find module '" + spec + "' from '" + fromFile + "'");
+            const p = r.path;
+            if (globalThis.__cjsCache.has(p)) return globalThis.__cjsCache.get(p);
+            let src = globalThis.__node.readText(p);
+            if (p.endsWith(".ts") || p.endsWith(".cts")) src = host.transpile(p, src);
+            const module = { exports: {} };
+            globalThis.__cjsCache.set(p, module.exports);
+            const dir = p.replace(/\/[^/]*$/, "");
+            const fn = new Function("module", "exports", "require", "__filename", "__dirname", src);
+            fn(module, module.exports, (s) => globalThis.__cjsRequire(p, s), p, dir);
+            globalThis.__cjsCache.set(p, module.exports);
+            return module.exports;
+        };
+    "#;
+    Module::evaluate(ctx.clone(), "pocket-pi:cjs-bootstrap", cjs_boot)?.finish::<()>()?;
     Ok(())
 }

@@ -63,6 +63,39 @@ export function unlinkSync(path) {
 export function rmSync(path) {
   fs.unlink(String(path));
 }
+export const constants = { F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1 };
+export function accessSync(path, _mode) {
+  if (!existsSync(path)) throw enoent("no access", path);
+}
+
+// Broader fs surface as stubs so any `import { … } from "fs"` resolves. The ones
+// pi actually exercises headlessly are implemented above; the rest throw or no-op
+// until a milestone needs them.
+const nope = (name) => () => { throw new Error(`fs.${name} is not implemented in Pocket Pi`); };
+export const openSync = nope("openSync");
+export const closeSync = () => {};
+export const readSync = nope("readSync");
+export const writeSync = nope("writeSync");
+export function appendFileSync(path, data, options) {
+  const prev = existsSync(path) ? readFileSync(path, "utf8") : "";
+  writeFileSync(path, prev + (typeof data === "string" ? data : ""), options);
+}
+export const copyFileSync = nope("copyFileSync");
+export function renameSync(a, b) { const d = readFileSync(a); writeFileSync(b, d); unlinkSync(a); }
+export const rmdirSync = (p) => unlinkSync(p);
+export const cpSync = nope("cpSync");
+export const chmodSync = () => {};
+export const symlinkSync = nope("symlinkSync");
+export const readlinkSync = (p) => realpathSync(p);
+export const truncateSync = nope("truncateSync");
+export const utimesSync = () => {};
+export const createReadStream = nope("createReadStream");
+export const createWriteStream = nope("createWriteStream");
+export const watchFile = () => {};
+export const unwatchFile = () => {};
+export function watch() { return { close() {}, on() {}, unref() { return this; } }; }
+export const opendirSync = nope("opendirSync");
+export const mkdtempSync = (prefix) => { const p = prefix + Math.random().toString(36).slice(2, 8); mkdirSync(p, { recursive: true }); return p; };
 
 function makeStat(res) {
   return {
@@ -80,6 +113,24 @@ function enoent(msg, path) {
   return e;
 }
 
+// Callback-style async API (fs.readFile(path, cb), etc.) — wrap the sync forms.
+const cbify = (fn) => (...args) => {
+  const cb = typeof args[args.length - 1] === "function" ? args.pop() : () => {};
+  queueMicrotask(() => { try { cb(null, fn(...args)); } catch (e) { cb(e); } });
+};
+export const readFile = cbify(readFileSync);
+export const writeFile = cbify(writeFileSync);
+export const readdir = cbify(readdirSync);
+export const stat = cbify(statSync);
+export const lstat = cbify(statSync);
+export const mkdir = cbify(mkdirSync);
+export const access = cbify(accessSync);
+export const unlink = cbify(unlinkSync);
+export const realpath = cbify(realpathSync);
+export const rename = cbify(renameSync);
+export const rm = cbify(unlinkSync);
+export const exists = (p, cb) => queueMicrotask(() => cb(existsSync(p)));
+
 const P = (fn) => (...args) => new Promise((res, rej) => { try { res(fn(...args)); } catch (e) { rej(e); } });
 export const promises = {
   readFile: P(readFileSync),
@@ -89,9 +140,29 @@ export const promises = {
   stat: P(statSync),
   lstat: P(statSync),
   realpath: P(realpathSync),
+  readlink: P(readlinkSync),
   unlink: P(unlinkSync),
   rm: P(rmSync),
-  access: P((p) => { if (!existsSync(p)) throw enoent("no access", p); }),
+  rmdir: P(rmdirSync),
+  rename: P(renameSync),
+  copyFile: P(copyFileSync),
+  cp: P(cpSync),
+  appendFile: P(appendFileSync),
+  chmod: P(chmodSync),
+  symlink: P(symlinkSync),
+  utimes: P(utimesSync),
+  truncate: P(truncateSync),
+  mkdtemp: P(mkdtempSync),
+  access: P(accessSync),
+  open: P((path) => ({
+    fd: 0,
+    readFile: (opts) => readFileSync(path, opts),
+    writeFile: (data, opts) => writeFileSync(path, data, opts),
+    stat: () => statSync(path),
+    close: () => {},
+    read: () => ({ bytesRead: 0, buffer: null }),
+    write: () => ({ bytesWritten: 0 }),
+  })),
 };
 
 export default {
