@@ -8,22 +8,33 @@
 
 import { Agent } from "@mariozechner/pi-agent-core";
 import { anthropicStream } from "./anthropic-stream.js";
+import { openaiStream } from "./openai-stream.js";
 import { makeScriptedStream } from "./scripted.js";
-import "./anthropic-stream.js"; // installs globalThis.__catpiPump
+import "./stream-core.js"; // installs globalThis.__catpiPump
 
-function buildModel(cfg) {
+// Provider is chosen explicitly (cfg.provider) or inferred from the model id.
+function resolveProvider(cfg) {
+  if (cfg.provider) return cfg.provider;
+  const id = (cfg.model || "").toLowerCase();
+  if (id.startsWith("gpt") || id.startsWith("o1") || id.startsWith("o3") || id.startsWith("o4"))
+    return "openai";
+  return "anthropic";
+}
+
+function buildModel(cfg, provider) {
+  const openai = provider === "openai";
   return {
-    id: cfg.model || "claude-opus-4-8",
-    name: cfg.model || "claude-opus-4-8",
-    api: "anthropic-messages",
-    provider: "anthropic",
-    baseUrl: cfg.baseUrl || "https://api.anthropic.com",
+    id: cfg.model || (openai ? "gpt-4o" : "claude-opus-4-8"),
+    name: cfg.model || (openai ? "gpt-4o" : "claude-opus-4-8"),
+    api: openai ? "openai-completions" : "anthropic-messages",
+    provider,
+    baseUrl: cfg.baseUrl || (openai ? "https://api.openai.com" : "https://api.anthropic.com"),
     apiKey: cfg.apiKey || "",
     reasoning: false,
     input: ["text", "image"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: cfg.contextWindow || 200000,
-    maxTokens: cfg.maxTokens || 4096,
+    contextWindow: cfg.contextWindow || 128000,
+    maxTokens: cfg.maxTokens || 1024,
   };
 }
 
@@ -95,9 +106,14 @@ function forward(event) {
 globalThis.PocketPi = {
   boot(configJson) {
     const cfg = typeof configJson === "string" ? JSON.parse(configJson) : configJson;
-    const model = buildModel(cfg);
+    const provider = resolveProvider(cfg);
+    const model = buildModel(cfg, provider);
     const tools = (cfg.tools || []).map(hostTool);
-    const streamFn = cfg.scripted ? makeScriptedStream(cfg.scripted) : anthropicStream;
+    const streamFn = cfg.scripted
+      ? makeScriptedStream(cfg.scripted)
+      : provider === "openai"
+        ? openaiStream
+        : anthropicStream;
     agent = new Agent({
       initialState: {
         systemPrompt: cfg.systemPrompt || "",

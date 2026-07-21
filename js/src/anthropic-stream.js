@@ -1,39 +1,10 @@
-// The Anthropic streamFn for Pocket Pi.
-//
-// pi-agent-core's loop calls `streamFn(model, context, options)` and consumes
-// the returned async-iterable of pi `AssistantMessageEvent`s. We build the
-// Anthropic Messages request here, hand it to the native HTTP op (which does
-// the blocking HTTPS + SSE read on a background thread), and each frame drain
-// the raw `data:` lines it collected — mapping Anthropic SSE deltas onto pi's
-// running `partial` message exactly the way pi-ai's own provider does.
-//
-// The native surface (see native ops in Rust):
-//   host.http.start(requestJson) -> turnId : begins the request on a thread
-//   host.http.drain(turnId) -> { lines:[string], done:bool, error:string|null }
-//   host.http.cancel(turnId)
-//
-// Nothing here blocks. `globalThis.__catpiPump()` (called once per host frame)
-// walks the active turns, drains their mailboxes, and pushes pi events into the
-// AssistantMessageEventStream. LLM latency (seconds) dwarfs the frame period,
-// so a 2 Hz headless pump is plenty — this is the whole point of borrowing
-// PocketJS's frame scheduler for an agent runtime.
+// The Anthropic streamFn for Pocket Pi. Builds an Anthropic Messages request,
+// hands it to the shared streaming core, and maps Anthropic SSE deltas onto pi's
+// running `partial` message (the same shape pi-ai's own provider produces).
 
 import { AssistantMessageEventStream } from "@mariozechner/pi-ai";
+import { beginTurn, emptyUsage, safeParse } from "./stream-core.js";
 
-const activeTurns = new Map();
-
-function emptyUsage() {
-  return {
-    input: 0,
-    output: 0,
-    cacheRead: 0,
-    cacheWrite: 0,
-    totalTokens: 0,
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-  };
-}
-
-// pi message content ← Anthropic content-block shapes.
 function toAnthropicMessages(context) {
   const messages = [];
   for (const m of context.messages) {
@@ -54,7 +25,7 @@ function toAnthropicMessages(context) {
           {
             type: "tool_result",
             tool_use_id: m.toolCallId,
-            content: normalizeToolResultContent(m.content),
+            content: normalizeBlocks(m.content),
             is_error: !!m.isError,
           },
         ],
@@ -66,18 +37,10 @@ function toAnthropicMessages(context) {
 
 function normalizeUserContent(content) {
   if (typeof content === "string") return [{ type: "text", text: content }];
-  return content.map((c) => {
-    if (c.type === "text") return { type: "text", text: c.text };
-    if (c.type === "image")
-      return {
-        type: "image",
-        source: { type: "base64", media_type: c.mimeType || "image/png", data: c.data },
-      };
-    return c;
-  });
+  return normalizeBlocks(content);
 }
 
-function normalizeToolResultContent(content) {
+function normalizeBlocks(content) {
   if (typeof content === "string") return [{ type: "text", text: content }];
   return content.map((c) => {
     if (c.type === "text") return { type: "text", text: c.text };
@@ -101,7 +64,6 @@ function toAnthropicTools(tools) {
 
 export function anthropicStream(model, context, options) {
   const stream = new AssistantMessageEventStream();
-
   const partial = {
     role: "assistant",
     stopReason: "stop",
@@ -112,10 +74,10 @@ export function anthropicStream(model, context, options) {
     usage: emptyUsage(),
     timestamp: Date.now(),
   };
-
   const request = {
     url: (model.baseUrl || "https://api.anthropic.com") + "/v1/messages",
     apiKey: options.apiKey || model.apiKey || "",
+    auth: "x-api-key",
     body: {
       model: model.id,
       max_tokens: options.maxTokens || model.maxTokens || 4096,
@@ -125,64 +87,21 @@ export function anthropicStream(model, context, options) {
       stream: true,
     },
   };
-
-  let turnId;
-  try {
-    turnId = host.http.start(JSON.stringify(request));
-  } catch (e) {
-    partial.stopReason = "error";
-    partial.errorMessage = String(e && e.message ? e.message : e);
-    stream.push({ type: "error", reason: "error", error: partial });
-    stream.end();
-    return stream;
-  }
-
-  const state = { started: false };
-
-  activeTurns.set(turnId, {
-    stream,
-    partial,
-    state,
-    onAbort: () => {
-      try {
-        host.http.cancel(turnId);
-      } catch {}
-      partial.stopReason = "aborted";
-      stream.push({ type: "error", reason: "aborted", error: partial });
-      stream.end();
-      activeTurns.delete(turnId);
-    },
-  });
-
-  if (options.signal) {
-    if (options.signal.aborted) {
-      activeTurns.get(turnId).onAbort();
-    } else {
-      options.signal.addEventListener("abort", () => {
-        const t = activeTurns.get(turnId);
-        if (t) t.onAbort();
-      });
-    }
-  }
-
+  beginTurn(stream, partial, request, applyAnthropicEvent, options.signal);
   return stream;
 }
 
-// Map one decoded Anthropic SSE `data:` JSON onto the running partial message,
-// pushing the corresponding pi event. Returns true when the turn is finished.
+// Map one Anthropic SSE event onto the running partial. Returns true when done.
 function applyAnthropicEvent(turn, ev) {
-  const { partial, stream, state } = turn;
+  const { partial, stream } = turn;
   switch (ev.type) {
-    case "message_start": {
-      if (ev.message && ev.message.usage) {
-        partial.usage.input = ev.message.usage.input_tokens || 0;
-      }
-      if (!state.started) {
-        state.started = true;
+    case "message_start":
+      if (ev.message && ev.message.usage) partial.usage.input = ev.message.usage.input_tokens || 0;
+      if (!turn.started) {
+        turn.started = true;
         stream.push({ type: "start", partial });
       }
       return false;
-    }
     case "content_block_start": {
       const i = ev.index;
       const b = ev.content_block;
@@ -193,13 +112,7 @@ function applyAnthropicEvent(turn, ev) {
         partial.content[i] = { type: "thinking", thinking: "" };
         stream.push({ type: "thinking_start", contentIndex: i, partial });
       } else if (b.type === "tool_use") {
-        partial.content[i] = {
-          type: "toolCall",
-          id: b.id,
-          name: b.name,
-          arguments: {},
-          partialJson: "",
-        };
+        partial.content[i] = { type: "toolCall", id: b.id, name: b.name, arguments: {}, partialJson: "" };
         stream.push({ type: "toolcall_start", contentIndex: i, partial });
       }
       return false;
@@ -234,83 +147,23 @@ function applyAnthropicEvent(turn, ev) {
       }
       return false;
     }
-    case "message_delta": {
+    case "message_delta":
       if (ev.usage) partial.usage.output = ev.usage.output_tokens || partial.usage.output;
-      if (ev.delta && ev.delta.stop_reason) {
+      if (ev.delta && ev.delta.stop_reason)
         partial.stopReason = ev.delta.stop_reason === "tool_use" ? "toolUse" : "stop";
-      }
       return false;
-    }
-    case "message_stop": {
+    case "message_stop":
       partial.usage.totalTokens = partial.usage.input + partial.usage.output;
       stream.push({ type: "done", reason: partial.stopReason, message: partial });
       stream.end();
       return true;
-    }
-    case "error": {
+    case "error":
       partial.stopReason = "error";
       partial.errorMessage = ev.error ? ev.error.message || String(ev.error) : "stream error";
       stream.push({ type: "error", reason: "error", error: partial });
       stream.end();
       return true;
-    }
     default:
       return false;
   }
 }
-
-function safeParse(text) {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return {};
-  }
-}
-
-// Called once per host frame. Drains every active turn's HTTP mailbox and
-// advances its event stream. Kept deliberately allocation-light on the hot path
-// when there are no active turns.
-globalThis.__catpiPump = function () {
-  if (activeTurns.size === 0) return;
-  for (const [turnId, turn] of activeTurns) {
-    let out;
-    try {
-      out = JSON.parse(host.http.drain(turnId));
-    } catch (e) {
-      turn.partial.stopReason = "error";
-      turn.partial.errorMessage = String(e);
-      turn.stream.push({ type: "error", reason: "error", error: turn.partial });
-      turn.stream.end();
-      activeTurns.delete(turnId);
-      continue;
-    }
-    let finished = false;
-    for (const line of out.lines) {
-      let ev;
-      try {
-        ev = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      if (applyAnthropicEvent(turn, ev)) {
-        finished = true;
-        break;
-      }
-    }
-    if (out.error && !finished) {
-      turn.partial.stopReason = "error";
-      turn.partial.errorMessage = out.error;
-      turn.stream.push({ type: "error", reason: "error", error: turn.partial });
-      turn.stream.end();
-      finished = true;
-    } else if (out.done && !finished && !turn.stream.done) {
-      // Connection closed without message_stop — treat as protocol error.
-      turn.partial.stopReason = "error";
-      turn.partial.errorMessage = "stream ended without message_stop";
-      turn.stream.push({ type: "error", reason: "error", error: turn.partial });
-      turn.stream.end();
-      finished = true;
-    }
-    if (finished) activeTurns.delete(turnId);
-  }
-};

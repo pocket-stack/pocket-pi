@@ -839,7 +839,7 @@
     }
   };
 
-  // js/src/anthropic-stream.js
+  // js/src/stream-core.js
   var activeTurns = /* @__PURE__ */ new Map();
   function emptyUsage() {
     return {
@@ -851,6 +851,90 @@
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
     };
   }
+  function safeParse(text) {
+    try {
+      return JSON.parse(text);
+    } catch {
+      return {};
+    }
+  }
+  function beginTurn(stream, partial, request, apply, signal) {
+    let turnId;
+    try {
+      turnId = host.http.start(JSON.stringify(request));
+    } catch (e) {
+      partial.stopReason = "error";
+      partial.errorMessage = String(e && e.message ? e.message : e);
+      stream.push({ type: "error", reason: "error", error: partial });
+      stream.end();
+      return;
+    }
+    const turn = { stream, partial, apply, done: false };
+    activeTurns.set(turnId, turn);
+    const abort = () => {
+      try {
+        host.http.cancel(turnId);
+      } catch {
+      }
+      if (!turn.done) {
+        partial.stopReason = "aborted";
+        stream.push({ type: "error", reason: "aborted", error: partial });
+        stream.end();
+      }
+      activeTurns.delete(turnId);
+    };
+    if (signal) {
+      if (signal.aborted) abort();
+      else signal.addEventListener("abort", () => activeTurns.has(turnId) && abort());
+    }
+  }
+  globalThis.__catpiPump = function() {
+    if (activeTurns.size === 0) return;
+    for (const [turnId, turn] of activeTurns) {
+      let out;
+      try {
+        out = JSON.parse(host.http.drain(turnId));
+      } catch (e) {
+        fail(turn, String(e));
+        activeTurns.delete(turnId);
+        continue;
+      }
+      let finished = false;
+      for (const line of out.lines) {
+        const ev = safeParseOrNull(line);
+        if (ev === null) continue;
+        if (turn.apply(turn, ev)) {
+          finished = true;
+          break;
+        }
+      }
+      if (out.error && !finished) {
+        fail(turn, out.error);
+        finished = true;
+      } else if (out.done && !finished && !turn.stream.done) {
+        fail(turn, "stream ended without a terminal event");
+        finished = true;
+      }
+      if (finished) activeTurns.delete(turnId);
+    }
+  };
+  function fail(turn, message) {
+    if (turn.done) return;
+    turn.done = true;
+    turn.partial.stopReason = "error";
+    turn.partial.errorMessage = message;
+    turn.stream.push({ type: "error", reason: "error", error: turn.partial });
+    turn.stream.end();
+  }
+  function safeParseOrNull(line) {
+    try {
+      return JSON.parse(line);
+    } catch {
+      return null;
+    }
+  }
+
+  // js/src/anthropic-stream.js
   function toAnthropicMessages(context) {
     const messages = [];
     for (const m of context.messages) {
@@ -871,7 +955,7 @@
             {
               type: "tool_result",
               tool_use_id: m.toolCallId,
-              content: normalizeToolResultContent(m.content),
+              content: normalizeBlocks(m.content),
               is_error: !!m.isError
             }
           ]
@@ -882,17 +966,9 @@
   }
   function normalizeUserContent(content) {
     if (typeof content === "string") return [{ type: "text", text: content }];
-    return content.map((c) => {
-      if (c.type === "text") return { type: "text", text: c.text };
-      if (c.type === "image")
-        return {
-          type: "image",
-          source: { type: "base64", media_type: c.mimeType || "image/png", data: c.data }
-        };
-      return c;
-    });
+    return normalizeBlocks(content);
   }
-  function normalizeToolResultContent(content) {
+  function normalizeBlocks(content) {
     if (typeof content === "string") return [{ type: "text", text: content }];
     return content.map((c) => {
       if (c.type === "text") return { type: "text", text: c.text };
@@ -927,6 +1003,7 @@
     const request = {
       url: (model.baseUrl || "https://api.anthropic.com") + "/v1/messages",
       apiKey: options.apiKey || model.apiKey || "",
+      auth: "x-api-key",
       body: {
         model: model.id,
         max_tokens: options.maxTokens || model.maxTokens || 4096,
@@ -936,57 +1013,19 @@
         stream: true
       }
     };
-    let turnId;
-    try {
-      turnId = host.http.start(JSON.stringify(request));
-    } catch (e) {
-      partial.stopReason = "error";
-      partial.errorMessage = String(e && e.message ? e.message : e);
-      stream.push({ type: "error", reason: "error", error: partial });
-      stream.end();
-      return stream;
-    }
-    const state = { started: false };
-    activeTurns.set(turnId, {
-      stream,
-      partial,
-      state,
-      onAbort: () => {
-        try {
-          host.http.cancel(turnId);
-        } catch {
-        }
-        partial.stopReason = "aborted";
-        stream.push({ type: "error", reason: "aborted", error: partial });
-        stream.end();
-        activeTurns.delete(turnId);
-      }
-    });
-    if (options.signal) {
-      if (options.signal.aborted) {
-        activeTurns.get(turnId).onAbort();
-      } else {
-        options.signal.addEventListener("abort", () => {
-          const t = activeTurns.get(turnId);
-          if (t) t.onAbort();
-        });
-      }
-    }
+    beginTurn(stream, partial, request, applyAnthropicEvent, options.signal);
     return stream;
   }
   function applyAnthropicEvent(turn, ev) {
-    const { partial, stream, state } = turn;
+    const { partial, stream } = turn;
     switch (ev.type) {
-      case "message_start": {
-        if (ev.message && ev.message.usage) {
-          partial.usage.input = ev.message.usage.input_tokens || 0;
-        }
-        if (!state.started) {
-          state.started = true;
+      case "message_start":
+        if (ev.message && ev.message.usage) partial.usage.input = ev.message.usage.input_tokens || 0;
+        if (!turn.started) {
+          turn.started = true;
           stream.push({ type: "start", partial });
         }
         return false;
-      }
       case "content_block_start": {
         const i = ev.index;
         const b = ev.content_block;
@@ -997,13 +1036,7 @@
           partial.content[i] = { type: "thinking", thinking: "" };
           stream.push({ type: "thinking_start", contentIndex: i, partial });
         } else if (b.type === "tool_use") {
-          partial.content[i] = {
-            type: "toolCall",
-            id: b.id,
-            name: b.name,
-            arguments: {},
-            partialJson: ""
-          };
+          partial.content[i] = { type: "toolCall", id: b.id, name: b.name, arguments: {}, partialJson: "" };
           stream.push({ type: "toolcall_start", contentIndex: i, partial });
         }
         return false;
@@ -1038,80 +1071,186 @@
         }
         return false;
       }
-      case "message_delta": {
+      case "message_delta":
         if (ev.usage) partial.usage.output = ev.usage.output_tokens || partial.usage.output;
-        if (ev.delta && ev.delta.stop_reason) {
+        if (ev.delta && ev.delta.stop_reason)
           partial.stopReason = ev.delta.stop_reason === "tool_use" ? "toolUse" : "stop";
-        }
         return false;
-      }
-      case "message_stop": {
+      case "message_stop":
         partial.usage.totalTokens = partial.usage.input + partial.usage.output;
         stream.push({ type: "done", reason: partial.stopReason, message: partial });
         stream.end();
         return true;
-      }
-      case "error": {
+      case "error":
         partial.stopReason = "error";
         partial.errorMessage = ev.error ? ev.error.message || String(ev.error) : "stream error";
         stream.push({ type: "error", reason: "error", error: partial });
         stream.end();
         return true;
-      }
       default:
         return false;
     }
   }
-  function safeParse(text) {
-    try {
-      return JSON.parse(text);
-    } catch {
-      return {};
+
+  // js/src/openai-stream.js
+  function toOpenAIMessages(context) {
+    const messages = [];
+    if (context.systemPrompt) messages.push({ role: "system", content: context.systemPrompt });
+    for (const m of context.messages) {
+      if (m.role === "user") {
+        messages.push({ role: "user", content: userContent(m.content) });
+      } else if (m.role === "assistant") {
+        const text = m.content.filter((c) => c.type === "text").map((c) => c.text).join("");
+        const toolCalls = m.content.filter((c) => c.type === "toolCall").map((c) => ({
+          id: c.id,
+          type: "function",
+          function: { name: c.name, arguments: JSON.stringify(c.arguments ?? {}) }
+        }));
+        const msg = { role: "assistant", content: text || null };
+        if (toolCalls.length) msg.tool_calls = toolCalls;
+        messages.push(msg);
+      } else if (m.role === "toolResult") {
+        const parts = Array.isArray(m.content) ? m.content : [{ type: "text", text: String(m.content) }];
+        const text = parts.filter((c) => c.type === "text").map((c) => c.text).join("\n") || "(done)";
+        messages.push({ role: "tool", tool_call_id: m.toolCallId, content: text });
+        const images = parts.filter((c) => c.type === "image");
+        if (images.length) {
+          messages.push({
+            role: "user",
+            content: images.map((c) => ({
+              type: "image_url",
+              image_url: { url: `data:${c.mimeType || "image/jpeg"};base64,${c.data}` }
+            }))
+          });
+        }
+      }
     }
+    return messages;
   }
-  globalThis.__catpiPump = function() {
-    if (activeTurns.size === 0) return;
-    for (const [turnId, turn] of activeTurns) {
-      let out;
-      try {
-        out = JSON.parse(host.http.drain(turnId));
-      } catch (e) {
-        turn.partial.stopReason = "error";
-        turn.partial.errorMessage = String(e);
-        turn.stream.push({ type: "error", reason: "error", error: turn.partial });
-        turn.stream.end();
-        activeTurns.delete(turnId);
-        continue;
+  function userContent(content) {
+    if (typeof content === "string") return content;
+    return content.map((c) => {
+      if (c.type === "text") return { type: "text", text: c.text };
+      if (c.type === "image")
+        return {
+          type: "image_url",
+          image_url: { url: `data:${c.mimeType || "image/png"};base64,${c.data}` }
+        };
+      return { type: "text", text: JSON.stringify(c) };
+    });
+  }
+  function toOpenAITools(tools) {
+    if (!tools || !tools.length) return void 0;
+    return tools.map((t) => ({
+      type: "function",
+      function: {
+        name: t.name,
+        description: t.description || "",
+        parameters: t.parameters || { type: "object", properties: {} }
       }
-      let finished = false;
-      for (const line of out.lines) {
-        let ev;
-        try {
-          ev = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        if (applyAnthropicEvent(turn, ev)) {
-          finished = true;
-          break;
-        }
-      }
-      if (out.error && !finished) {
-        turn.partial.stopReason = "error";
-        turn.partial.errorMessage = out.error;
-        turn.stream.push({ type: "error", reason: "error", error: turn.partial });
-        turn.stream.end();
-        finished = true;
-      } else if (out.done && !finished && !turn.stream.done) {
-        turn.partial.stopReason = "error";
-        turn.partial.errorMessage = "stream ended without message_stop";
-        turn.stream.push({ type: "error", reason: "error", error: turn.partial });
-        turn.stream.end();
-        finished = true;
-      }
-      if (finished) activeTurns.delete(turnId);
+    }));
+  }
+  function openaiStream(model, context, options) {
+    const stream = new AssistantMessageEventStream();
+    const partial = {
+      role: "assistant",
+      stopReason: "stop",
+      content: [],
+      api: model.api,
+      provider: model.provider,
+      model: model.id,
+      usage: emptyUsage(),
+      timestamp: Date.now()
+    };
+    const body = {
+      model: model.id,
+      messages: toOpenAIMessages(context),
+      tools: toOpenAITools(context.tools),
+      stream: true,
+      max_completion_tokens: options.maxTokens || model.maxTokens || 1024
+    };
+    const request = {
+      url: (model.baseUrl || "https://api.openai.com") + "/v1/chat/completions",
+      apiKey: options.apiKey || model.apiKey || "",
+      auth: "bearer",
+      body
+    };
+    const scratch = { textIdx: -1, tools: /* @__PURE__ */ new Map() };
+    beginTurn(stream, partial, request, (turn, ev) => applyOpenAIEvent(turn, ev, scratch), options.signal);
+    return stream;
+  }
+  function applyOpenAIEvent(turn, ev, scratch) {
+    const { partial, stream } = turn;
+    if (ev.error) {
+      partial.stopReason = "error";
+      partial.errorMessage = ev.error.message || JSON.stringify(ev.error);
+      stream.push({ type: "error", reason: "error", error: partial });
+      stream.end();
+      return true;
     }
-  };
+    if (ev.usage) {
+      partial.usage.input = ev.usage.prompt_tokens || partial.usage.input;
+      partial.usage.output = ev.usage.completion_tokens || partial.usage.output;
+    }
+    const choice = ev.choices && ev.choices[0];
+    if (!choice) return false;
+    if (!turn.started) {
+      turn.started = true;
+      stream.push({ type: "start", partial });
+    }
+    const d = choice.delta || {};
+    if (typeof d.content === "string" && d.content.length) {
+      if (scratch.textIdx < 0) {
+        scratch.textIdx = partial.content.length;
+        partial.content[scratch.textIdx] = { type: "text", text: "" };
+        stream.push({ type: "text_start", contentIndex: scratch.textIdx, partial });
+      }
+      const c = partial.content[scratch.textIdx];
+      c.text += d.content;
+      stream.push({ type: "text_delta", contentIndex: scratch.textIdx, delta: d.content, partial });
+    }
+    for (const tc of d.tool_calls || []) {
+      let entry = scratch.tools.get(tc.index);
+      if (!entry) {
+        const piIdx = partial.content.length;
+        partial.content[piIdx] = {
+          type: "toolCall",
+          id: tc.id || `call_${tc.index}`,
+          name: tc.function && tc.function.name || "",
+          arguments: {},
+          partialJson: ""
+        };
+        entry = { piIdx };
+        scratch.tools.set(tc.index, entry);
+        stream.push({ type: "toolcall_start", contentIndex: piIdx, partial });
+      }
+      const block = partial.content[entry.piIdx];
+      if (tc.function && tc.function.name) block.name = tc.function.name;
+      if (tc.function && tc.function.arguments) {
+        block.partialJson += tc.function.arguments;
+        block.arguments = safeParse(block.partialJson);
+        partial.content[entry.piIdx] = { ...block };
+        stream.push({ type: "toolcall_delta", contentIndex: entry.piIdx, delta: tc.function.arguments, partial });
+      }
+    }
+    if (choice.finish_reason) {
+      if (scratch.textIdx >= 0) {
+        const c = partial.content[scratch.textIdx];
+        stream.push({ type: "text_end", contentIndex: scratch.textIdx, content: c.text, partial });
+      }
+      for (const entry of scratch.tools.values()) {
+        const block = partial.content[entry.piIdx];
+        delete block.partialJson;
+        stream.push({ type: "toolcall_end", contentIndex: entry.piIdx, toolCall: block, partial });
+      }
+      partial.stopReason = choice.finish_reason === "tool_calls" ? "toolUse" : "stop";
+      partial.usage.totalTokens = partial.usage.input + partial.usage.output;
+      stream.push({ type: "done", reason: partial.stopReason, message: partial });
+      stream.end();
+      return true;
+    }
+    return false;
+  }
 
   // js/src/scripted.js
   function makeScriptedStream(cfg) {
@@ -1169,19 +1308,27 @@
   }
 
   // js/src/entry.js
-  function buildModel(cfg) {
+  function resolveProvider(cfg) {
+    if (cfg.provider) return cfg.provider;
+    const id = (cfg.model || "").toLowerCase();
+    if (id.startsWith("gpt") || id.startsWith("o1") || id.startsWith("o3") || id.startsWith("o4"))
+      return "openai";
+    return "anthropic";
+  }
+  function buildModel(cfg, provider) {
+    const openai = provider === "openai";
     return {
-      id: cfg.model || "claude-opus-4-8",
-      name: cfg.model || "claude-opus-4-8",
-      api: "anthropic-messages",
-      provider: "anthropic",
-      baseUrl: cfg.baseUrl || "https://api.anthropic.com",
+      id: cfg.model || (openai ? "gpt-4o" : "claude-opus-4-8"),
+      name: cfg.model || (openai ? "gpt-4o" : "claude-opus-4-8"),
+      api: openai ? "openai-completions" : "anthropic-messages",
+      provider,
+      baseUrl: cfg.baseUrl || (openai ? "https://api.openai.com" : "https://api.anthropic.com"),
       apiKey: cfg.apiKey || "",
       reasoning: false,
       input: ["text", "image"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: cfg.contextWindow || 2e5,
-      maxTokens: cfg.maxTokens || 4096
+      contextWindow: cfg.contextWindow || 128e3,
+      maxTokens: cfg.maxTokens || 1024
     };
   }
   function hostTool(decl) {
@@ -1242,9 +1389,10 @@
   globalThis.PocketPi = {
     boot(configJson) {
       const cfg = typeof configJson === "string" ? JSON.parse(configJson) : configJson;
-      const model = buildModel(cfg);
+      const provider = resolveProvider(cfg);
+      const model = buildModel(cfg, provider);
       const tools = (cfg.tools || []).map(hostTool);
-      const streamFn = cfg.scripted ? makeScriptedStream(cfg.scripted) : anthropicStream;
+      const streamFn = cfg.scripted ? makeScriptedStream(cfg.scripted) : provider === "openai" ? openaiStream : anthropicStream;
       agent = new Agent({
         initialState: {
           systemPrompt: cfg.systemPrompt || "",

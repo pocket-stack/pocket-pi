@@ -64,6 +64,12 @@ impl HttpHub {
             .to_string();
         let body = req.get("body").cloned().unwrap_or(serde_json::json!({}));
         let body_str = serde_json::to_string(&body).map_err(|e| e.to_string())?;
+        // "bearer" (OpenAI-style) vs "x-api-key" (Anthropic, default).
+        let auth = req
+            .get("auth")
+            .and_then(|v| v.as_str())
+            .unwrap_or("x-api-key")
+            .to_string();
 
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let cancel = Arc::new(AtomicBool::new(false));
@@ -81,7 +87,7 @@ impl HttpHub {
         let hub = self.inner.clone();
         std::thread::Builder::new()
             .name(format!("pocket-pi-http-{id}"))
-            .spawn(move || run_request(hub, id, url, api_key, body_str, cancel))
+            .spawn(move || run_request(hub, id, url, api_key, auth, body_str, cancel))
             .map_err(|e| format!("spawn failed: {e}"))?;
         Ok(id)
     }
@@ -146,26 +152,42 @@ fn run_request(
     id: u64,
     url: String,
     api_key: String,
+    auth: String,
     body: String,
     cancel: Arc<AtomicBool>,
 ) {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(20))
-        .build();
+    let mut builder =
+        ureq::AgentBuilder::new().timeout_connect(std::time::Duration::from_secs(20));
+    // Respect a system proxy (Clash/mihomo, corporate egress, …) the way curl
+    // does — many desktops route all external HTTP through one.
+    if let Some(proxy_url) = std::env::var("HTTPS_PROXY")
+        .or_else(|_| std::env::var("https_proxy"))
+        .or_else(|_| std::env::var("ALL_PROXY"))
+        .or_else(|_| std::env::var("all_proxy"))
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        if let Ok(proxy) = ureq::Proxy::new(&proxy_url) {
+            builder = builder.proxy(proxy);
+        }
+    }
+    let agent = builder.build();
 
-    // OAuth tokens (sk-ant-oat…) go on Authorization: Bearer with the Claude
-    // Code identity beta; plain keys go on x-api-key.
-    let is_oauth = api_key.starts_with("sk-ant-oat");
-    let mut req = agent
-        .post(&url)
-        .set("anthropic-version", "2023-06-01")
-        .set("content-type", "application/json");
-    if is_oauth {
+    let mut req = agent.post(&url).set("content-type", "application/json");
+    if auth == "bearer" {
+        // OpenAI-style: Authorization: Bearer <key>.
+        req = req.set("authorization", &format!("Bearer {api_key}"));
+    } else if api_key.starts_with("sk-ant-oat") {
+        // Anthropic OAuth token → Bearer + Claude Code identity beta.
         req = req
+            .set("anthropic-version", "2023-06-01")
             .set("authorization", &format!("Bearer {api_key}"))
             .set("anthropic-beta", "oauth-2025-04-20");
     } else {
-        req = req.set("x-api-key", &api_key);
+        // Anthropic API key.
+        req = req
+            .set("anthropic-version", "2023-06-01")
+            .set("x-api-key", &api_key);
     }
 
     let resp = match req.send_string(&body) {
@@ -211,6 +233,9 @@ fn run_request(
                 let payload = rest.trim();
                 if payload.is_empty() || payload == "[DONE]" {
                     continue;
+                }
+                if std::env::var("POCKET_PI_DEBUG_SSE").is_ok() {
+                    eprintln!("SSE< {}", &payload[..payload.len().min(300)]);
                 }
                 push_line(&hub, id, payload.to_string());
             }

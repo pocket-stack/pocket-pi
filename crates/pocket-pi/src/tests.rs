@@ -94,6 +94,46 @@ fn scripted_tool_call_round_trips_through_native_rust() {
     assert!(kinds.contains(&"end"), "no end in {kinds:?}");
 }
 
+/// Live end-to-end against OpenAI. Skipped unless OPENAI_API_KEY is set.
+#[test]
+fn live_openai_turn() {
+    let Ok(key) = std::env::var("OPENAI_API_KEY") else {
+        eprintln!("skipping live_openai_turn: OPENAI_API_KEY not set");
+        return;
+    };
+    let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into());
+    let (sink, cb) = collector();
+    let mut rt = PiRuntime::new().expect("runtime");
+    rt.on_event(cb);
+    let cfg = serde_json::json!({
+        "provider": "openai",
+        "model": model,
+        "apiKey": key,
+        // Reasoning models (gpt-5.x) spend tokens thinking before answering —
+        // a tiny cap leaves nothing for the visible reply.
+        "maxTokens": 2048,
+        "systemPrompt": "Reply with exactly the word: pong"
+    });
+    rt.boot(&cfg.to_string()).expect("boot");
+    rt.prompt("ping").expect("prompt");
+    run(&mut rt, sink.clone(), 4.0, 90.0);
+
+    let events = sink.borrow();
+    let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+    eprintln!("openai event kinds: {kinds:?}");
+    for e in events.iter().filter(|e| e.kind == "error") {
+        eprintln!("openai error raw: {}", e.raw);
+    }
+    assert!(kinds.contains(&"end"), "turn did not complete: {kinds:?}");
+    let text = events
+        .iter()
+        .find(|e| e.kind == "assistant_text")
+        .and_then(|e| e.value.get("text").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    eprintln!("live openai said: {text:?}");
+    assert!(!text.is_empty(), "no assistant text");
+}
+
 /// Live end-to-end against Anthropic. Skipped unless ANTHROPIC_API_KEY is set,
 /// so `cargo test` is hermetic by default.
 #[test]
