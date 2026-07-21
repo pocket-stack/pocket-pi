@@ -435,6 +435,92 @@ fn live_anthropic_turn() {
     assert!(!text.is_empty(), "no assistant text");
 }
 
+/// Path B: load the esbuild-bundled UNMODIFIED pi-coding-agent (one module) and
+/// confirm it evaluates — sidestepping the QuickJS multi-module linker crash.
+/// Run with `cargo test -- --ignored loads_bundled_pi_coding_agent --nocapture`.
+#[ignore]
+#[test]
+fn loads_bundled_pi_coding_agent() {
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let bundle = format!("{manifest}/js/pi-full.bundle.js");
+    if !std::path::Path::new(&bundle).exists() {
+        eprintln!("skip: bundle not built (node js/build-pi-full.mjs)");
+        return;
+    }
+    let mut rt = PiRuntime::new().expect("runtime");
+    match rt.run_module(&bundle) {
+        Ok(()) => {
+            let loaded = rt.get_global_json("__piFullLoaded");
+            eprintln!("BUNDLE LOADED: __piFullLoaded = {loaded:?}");
+            assert_eq!(loaded, Some(serde_json::Value::Bool(true)), "createAgentSession not exported");
+        }
+        Err(e) => panic!("BUNDLE LOAD FAILED: {e}"),
+    }
+}
+
+/// Path B end-to-end: stand up an AgentSession from the UNMODIFIED bundled
+/// pi-coding-agent and run one real turn against gpt-5.6 through Pocket Pi's
+/// fetch + system proxy. Requires OPENAI_API_KEY and a reachable proxy, so it is
+/// `#[ignore]`. Run with:
+///   https_proxy=http://127.0.0.1:7897 OPENAI_API_KEY=... \
+///     cargo test -p pocket-pi runs_bundled_pi_turn -- --ignored --nocapture
+#[ignore]
+#[test]
+fn runs_bundled_pi_turn() {
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let bundle = format!("{manifest}/js/pi-full.bundle.js");
+    let driver = format!("{manifest}/../../js/pi-full/driver.js");
+    if !std::path::Path::new(&bundle).exists() {
+        eprintln!("skip: bundle not built");
+        return;
+    }
+    let key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+    if key.is_empty() {
+        eprintln!("skip: OPENAI_API_KEY not set");
+        return;
+    }
+
+    let mut rt = PiRuntime::new().expect("runtime");
+    rt.run_module(&bundle).expect("bundle load");
+    // Inject the key as a global (kept out of logs) then load the driver script.
+    rt.eval_script(&format!("globalThis.__OPENAI_KEY = {key:?};")).expect("inject key");
+    let driver_src = std::fs::read_to_string(&driver).expect("driver.js");
+    rt.eval_script(&driver_src).expect("driver eval");
+
+    // Kick off the async turn (fire-and-forget promise), then pump at 2Hz.
+    rt.eval_script("globalThis.__piRun('Reply with exactly: pocket pi lives');")
+        .expect("kick off");
+
+    let start = std::time::Instant::now();
+    let mut done = false;
+    while start.elapsed().as_secs_f64() < 90.0 {
+        rt.pump().expect("pump");
+        if rt.get_global_json("__piDone") == Some(serde_json::Value::Bool(true)) {
+            done = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+
+    let result = rt.get_global_json("__piResult");
+    let err = rt.get_global_json("__piError");
+    let last = rt.get_global_json("__piLastEvent");
+    let log = rt.get_global_json("__piLog");
+    eprintln!("TURN done={done} last_event={last:?}");
+    eprintln!("TURN error={err:?}");
+    eprintln!("TURN result={result:?}");
+    if let Some(serde_json::Value::Array(items)) = log {
+        eprintln!("TURN log ({} events):", items.len());
+        for it in items {
+            eprintln!("  - {}", it.as_str().unwrap_or_default());
+        }
+    }
+    assert!(done, "turn did not complete within budget");
+    assert_eq!(err, Some(serde_json::Value::Null), "agent errored");
+    let text = result.and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+    assert!(!text.trim().is_empty(), "no assistant text produced");
+}
+
 /// WIP integration probe toward loading unmodified pi-coding-agent. Run with
 /// `cargo test -- --ignored probe_pi_coding_agent --nocapture`. Currently clears
 /// the whole Node-builtin + CJS dependency surface and reaches pi-coding-agent's

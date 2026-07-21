@@ -39,6 +39,21 @@ const BUILTINS: &[(&str, &str)] = &[
     ("readline", include_str!("../js/node/readline.js")),
     ("perf_hooks", include_str!("../js/node/perf_hooks.js")),
     ("tty", include_str!("../js/node/tty.js")),
+    ("http", include_str!("../js/node/http.js")),
+    ("https", include_str!("../js/node/https.js")),
+    ("net", include_str!("../js/node/net.js")),
+    ("tls", include_str!("../js/node/tls.js")),
+    ("zlib", include_str!("../js/node/zlib.js")),
+    ("dns", include_str!("../js/node/dns.js")),
+    ("querystring", include_str!("../js/node/querystring.js")),
+    ("assert", include_str!("../js/node/assert.js")),
+    ("timers", include_str!("../js/node/timers.js")),
+    ("worker_threads", include_str!("../js/node/worker_threads.js")),
+    ("v8", include_str!("../js/node/v8.js")),
+    ("vm", include_str!("../js/node/vm.js")),
+    ("constants", include_str!("../js/node/constants.js")),
+    ("async_hooks", include_str!("../js/node/async_hooks.js")),
+    ("diagnostics_channel", include_str!("../js/node/diagnostics_channel.js")),
 ];
 
 fn builtin_source(name: &str) -> Option<&'static str> {
@@ -267,7 +282,9 @@ impl Loader for NodeLoader {
             eprintln!("LOAD {name}");
         }
         if let Some(src) = builtin_source(name) {
-            return Module::declare(ctx.clone(), name, src);
+            let m = Module::declare(ctx.clone(), name, src)?;
+            set_import_meta(&m, name);
+            return Ok(m);
         }
         let source = std::fs::read_to_string(name)
             .map_err(|e| Error::new_loading_message(name.to_string(), e.to_string()))?;
@@ -284,7 +301,22 @@ impl Loader for NodeLoader {
         } else {
             rewrite_reexports(&source)
         };
-        Module::declare(ctx.clone(), name, js)
+        let m = Module::declare(ctx.clone(), name, js)?;
+        set_import_meta(&m, name);
+        Ok(m)
+    }
+}
+
+/// Populate `import.meta.url` (and a no-op `resolve`) so code that derives
+/// `__filename`/`__dirname` from `import.meta.url` works.
+fn set_import_meta(module: &Module<'_, Declared>, name: &str) {
+    if let Ok(meta) = module.meta() {
+        let url = if name.starts_with("node:") {
+            format!("file:///node/{}", name.strip_prefix("node:").unwrap())
+        } else {
+            format!("file://{name}")
+        };
+        let _ = meta.set("url", url);
     }
 }
 
@@ -584,6 +616,22 @@ pub fn install_node(ctx: &Ctx) -> rquickjs::Result<()> {
         import * as _fsp from "node:fs/promises";
         import * as _perf from "node:perf_hooks";
         import * as _tty from "node:tty";
+        import * as _http from "node:http";
+        import * as _https from "node:https";
+        import * as _net from "node:net";
+        import * as _tls from "node:tls";
+        import * as _zlib from "node:zlib";
+        import * as _dns from "node:dns";
+        import * as _qs from "node:querystring";
+        import * as _assert from "node:assert";
+        import * as _timers from "node:timers";
+        import * as _wt from "node:worker_threads";
+        import * as _v8 from "node:v8";
+        import * as _vm from "node:vm";
+        import * as _constants from "node:constants";
+        import * as _ah from "node:async_hooks";
+        import * as _dc from "node:diagnostics_channel";
+        import * as _sp from "node:stream/promises";
         const pick = (ns) => (ns && ns.default !== undefined ? ns.default : ns);
         globalThis.__builtinExports = {
             fs: pick(_fs), path: pick(_path), os: pick(_os), events: pick(_events),
@@ -591,6 +639,11 @@ pub fn install_node(ctx: &Ctx) -> rquickjs::Result<()> {
             crypto: pick(_crypto), url: pick(_url), module: pick(_module), stream: pick(_stream),
             string_decoder: pick(_sd), readline: pick(_readline),
             "fs/promises": pick(_fsp), perf_hooks: pick(_perf), tty: pick(_tty),
+            http: pick(_http), https: pick(_https), net: pick(_net), tls: pick(_tls),
+            zlib: pick(_zlib), dns: pick(_dns), querystring: pick(_qs), assert: pick(_assert),
+            timers: pick(_timers), worker_threads: pick(_wt), v8: pick(_v8), vm: pick(_vm),
+            constants: pick(_constants), async_hooks: pick(_ah), "stream/promises": pick(_sp),
+            diagnostics_channel: pick(_dc),
         };
         globalThis.__cjsCache = globalThis.__cjsCache || new Map();
         globalThis.__cjsRequire = function (fromFile, spec) {
@@ -613,6 +666,9 @@ pub fn install_node(ctx: &Ctx) -> rquickjs::Result<()> {
             globalThis.__cjsCache.set(p, module.exports);
             return module.exports;
         };
+        // esbuild-bundled CJS calls a runtime `require` for external builtins;
+        // delegate it to our synchronous require.
+        globalThis.require = (spec) => globalThis.__cjsRequire("/pocket-pi-bundle", spec);
     "#;
     Module::evaluate(ctx.clone(), "pocket-pi:cjs-bootstrap", cjs_boot)?.finish::<()>()?;
     Ok(())
