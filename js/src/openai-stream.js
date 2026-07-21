@@ -89,6 +89,14 @@ export function openaiStream(model, context, options) {
     stream: true,
     max_completion_tokens: options.maxTokens || model.maxTokens || 1024,
   };
+  // gpt-5.x / o-series are reasoning models. Chat Completions rejects function
+  // tools while reasoning is on ("set reasoning_effort to 'none'"), so when the
+  // agent has tools we disable reasoning; otherwise honor an explicit override.
+  const reasoning = /^(gpt-5|o[134])/.test((model.id || "").toLowerCase());
+  if (reasoning) {
+    const effort = model.reasoningEffort || (body.tools ? "none" : null);
+    if (effort) body.reasoning_effort = effort;
+  }
   const request = {
     url: (model.baseUrl || "https://api.openai.com") + "/v1/chat/completions",
     apiKey: options.apiKey || model.apiKey || "",

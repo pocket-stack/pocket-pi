@@ -31,6 +31,7 @@ function buildModel(cfg, provider) {
     baseUrl: cfg.baseUrl || (openai ? "https://api.openai.com" : "https://api.anthropic.com"),
     apiKey: cfg.apiKey || "",
     reasoning: false,
+    reasoningEffort: cfg.reasoningEffort, // openai reasoning models; undefined = auto
     input: ["text", "image"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: cfg.contextWindow || 128000,
@@ -82,11 +83,15 @@ function forward(event) {
     case "message_end": {
       const m = event.message;
       if (m && m.role === "assistant") {
-        const text = (m.content || [])
-          .filter((c) => c.type === "text")
-          .map((c) => c.text)
-          .join("");
-        if (text) out = { kind: "assistant_text", text };
+        if (m.stopReason === "error" || m.errorMessage) {
+          out = { kind: "error", message: m.errorMessage || "stream error" };
+        } else {
+          const text = (m.content || [])
+            .filter((c) => c.type === "text")
+            .map((c) => c.text)
+            .join("");
+          if (text) out = { kind: "assistant_text", text };
+        }
       }
       break;
     }

@@ -1169,6 +1169,11 @@
       stream: true,
       max_completion_tokens: options.maxTokens || model.maxTokens || 1024
     };
+    const reasoning = /^(gpt-5|o[134])/.test((model.id || "").toLowerCase());
+    if (reasoning) {
+      const effort = model.reasoningEffort || (body.tools ? "none" : null);
+      if (effort) body.reasoning_effort = effort;
+    }
     const request = {
       url: (model.baseUrl || "https://api.openai.com") + "/v1/chat/completions",
       apiKey: options.apiKey || model.apiKey || "",
@@ -1325,6 +1330,8 @@
       baseUrl: cfg.baseUrl || (openai ? "https://api.openai.com" : "https://api.anthropic.com"),
       apiKey: cfg.apiKey || "",
       reasoning: false,
+      reasoningEffort: cfg.reasoningEffort,
+      // openai reasoning models; undefined = auto
       input: ["text", "image"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: cfg.contextWindow || 128e3,
@@ -1369,8 +1376,12 @@
       case "message_end": {
         const m = event.message;
         if (m && m.role === "assistant") {
-          const text = (m.content || []).filter((c) => c.type === "text").map((c) => c.text).join("");
-          if (text) out = { kind: "assistant_text", text };
+          if (m.stopReason === "error" || m.errorMessage) {
+            out = { kind: "error", message: m.errorMessage || "stream error" };
+          } else {
+            const text = (m.content || []).filter((c) => c.type === "text").map((c) => c.text).join("");
+            if (text) out = { kind: "assistant_text", text };
+          }
         }
         break;
       }

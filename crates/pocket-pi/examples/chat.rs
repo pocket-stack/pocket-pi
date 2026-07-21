@@ -46,17 +46,28 @@ fn main() {
         _ => {}
     });
 
-    let cfg = match std::env::var("ANTHROPIC_API_KEY") {
+    let tool = serde_json::json!({
+        "name": "current_time",
+        "description": "Get the current unix time in seconds.",
+        "parameters": {"type": "object", "properties": {}}
+    });
+    let cfg = if let Ok(key) = std::env::var("OPENAI_API_KEY") {
+        serde_json::json!({
+            "provider": "openai",
+            "model": std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-5.6".into()),
+            "apiKey": key,
+            "maxTokens": 2048,
+            "systemPrompt": "You are Pocket Pi, a tiny agent living in a QuickJS runtime. Be brief.",
+            "tools": [tool]
+        })
+    } else {
+        match std::env::var("ANTHROPIC_API_KEY") {
         Ok(key) => serde_json::json!({
             "model": "claude-opus-4-8",
             "apiKey": key,
             "maxTokens": 256,
             "systemPrompt": "You are Pocket Pi, a tiny agent living in a QuickJS runtime. Be brief.",
-            "tools": [{
-                "name": "current_time",
-                "description": "Get the current unix time in seconds.",
-                "parameters": {"type": "object", "properties": {}}
-            }]
+            "tools": [tool]
         }),
         Err(_) => {
             eprintln!("(no ANTHROPIC_API_KEY — running the offline scripted assistant)\n");
@@ -66,6 +77,7 @@ fn main() {
                     { "text": "I'm Pocket Pi — pi's agent core running inside QuickJS, no Node, no bun." }
                 ]}
             })
+        }
         }
     };
 
