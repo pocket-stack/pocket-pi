@@ -521,6 +521,58 @@ fn runs_bundled_pi_turn() {
     assert!(!text.trim().is_empty(), "no assistant text produced");
 }
 
+/// Path B extensions (M6): load a real, unmodified pi extension through Pocket
+/// Pi's OWN module loader — the `.ts` is transpiled natively with oxc, NOT jiti
+/// (which needs Node internals QuickJS lacks) — and hand its default factory to
+/// pi's unmodified `loadExtensionFromFactory`. Asserts the extension's tool and
+/// lifecycle hook register. Offline; only needs the built bundle. Run with:
+///   cargo test -p pocket-pi loads_pi_extension_via_our_loader -- --ignored --nocapture
+#[ignore]
+#[test]
+fn loads_pi_extension_via_our_loader() {
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let bundle = format!("{manifest}/js/pi-full.bundle.js");
+    let probe = format!("{manifest}/../../js/pi-full/ext-probe.js");
+    let ext = format!("{manifest}/../../js/pi-full/example-extension.ts");
+    if !std::path::Path::new(&bundle).exists() {
+        eprintln!("skip: bundle not built");
+        return;
+    }
+
+    let mut rt = PiRuntime::new().expect("runtime");
+    rt.run_module(&bundle).expect("bundle load");
+    let probe_src = std::fs::read_to_string(&probe).expect("ext-probe.js");
+    rt.eval_script(&probe_src).expect("probe eval");
+    rt.eval_script(&format!("globalThis.__piLoadExtension({ext:?});"))
+        .expect("kick off");
+
+    let start = std::time::Instant::now();
+    while start.elapsed().as_secs_f64() < 15.0 {
+        rt.pump().expect("pump");
+        if rt.get_global_json("__piExtDone") == Some(serde_json::Value::Bool(true)) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    let err = rt.get_global_json("__piExtError");
+    let result = rt.get_global_json("__piExtResult");
+    eprintln!("EXT error={err:?}");
+    eprintln!("EXT result={result:?}");
+    assert_eq!(err, Some(serde_json::Value::Null), "extension load errored");
+    let result = result.expect("no extension result");
+    let tools = result.get("tools").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let handlers = result.get("handlers").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    assert!(
+        tools.iter().any(|t| t.as_str() == Some("echo")),
+        "extension tool 'echo' not registered (got {tools:?})"
+    );
+    assert!(
+        handlers.iter().any(|h| h.as_str() == Some("agent_start")),
+        "extension hook 'agent_start' not registered (got {handlers:?})"
+    );
+}
+
 /// WIP integration probe toward loading unmodified pi-coding-agent. Run with
 /// `cargo test -- --ignored probe_pi_coding_agent --nocapture`. Currently clears
 /// the whole Node-builtin + CJS dependency surface and reaches pi-coding-agent's
