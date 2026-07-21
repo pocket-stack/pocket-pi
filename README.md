@@ -93,10 +93,65 @@ no Node at build time either. To regenerate the bundle after editing `js/src/`:
 node js/build.mjs      # shells esbuild via npx; aliases pi-ai to a 4-symbol stub
 ```
 
-The bundle is pi's `Agent` + our Anthropic `streamFn` + an offline scripted
-assistant. pi-ai (its ~5 MB of provider SDKs, TypeBox, and a 553 KB model table)
-is replaced at bundle time by `js/src/pi-ai-stub.js`, which reimplements the four
-symbols the core actually imports.
+The bundle is pi's `Agent` + our Anthropic/OpenAI `streamFn`s + an offline
+scripted assistant. pi-ai (its ~5 MB of provider SDKs, TypeBox, and a 553 KB
+model table) is replaced at bundle time by `js/src/pi-ai-stub.js`, which
+reimplements the four symbols the core actually imports.
+
+## Staying in sync with upstream pi
+
+The concern this design takes seriously: **don't fork pi.** `pi-agent-core` — the
+loop that receives upstream feature updates — is a **real, unmodified npm
+dependency** (`js/package.json`), byte-identical to what `npm install` fetches.
+Syncing a new pi release is:
+
+```sh
+cd js && npm update @mariozechner/pi-agent-core && node build.mjs
+```
+
+The only deliberate substitution is the *provider layer* (`pi-ai`), replaced by a
+four-symbol stub plus native-Rust `streamFn`s — that's the "heavy Node dep →
+native op" rule, not a fork of pi's logic. (Upstream has since moved to the
+`@earendil-works` scope; following it is a one-line dependency bump.)
+
+## Plugins: agent-authored TypeScript, loaded at runtime
+
+Real pi loads extensions — **TypeScript files** — at runtime via `jiti` (a Node
+toolchain). Pocket Pi has no Node, so it does the same thing with a **native
+Rust transpiler**: [`oxc`](https://oxc.rs) strips the types and QuickJS evaluates
+the result. The agent can write and install its own tools mid-session:
+
+```rust
+rt.load_plugin_ts("adder", r#"
+    export default (api) => api.addTool({
+        name: "add", description: "add two numbers",
+        parameters: { type:"object", properties:{ a:{type:"number"}, b:{type:"number"} }, required:["a","b"] },
+        execute: (args: { a: number; b: number }): string => String(args.a + args.b),
+    });
+"#)?;
+```
+
+Boot with `"selfExtend": true` and the agent gets a `define_plugin` tool, so it
+can author a `.ts` plugin itself; the tools it registers are callable on its next
+turn (tools are read at run start, matching pi's extension model). A plugin is a
+single file that `export default`s a factory `(api) => void`; `api.addTool`,
+`api.onEvent`, `api.callHostTool`, and `api.log` are the current surface (a lean
+subset of pi's `ExtensionAPI` — the "Option A" scope).
+
+## Footprint vs shipping pi on bun / node
+
+A standalone Pocket Pi binary **includes** pi's core, LLM streaming, **and** the
+TypeScript transpiler for plugins — where the bun/node path gets runtime TS from
+`jiti` + `typescript` inside a heavy `node_modules`:
+
+| Shipping pi as… | Size |
+|---|---|
+| **Pocket Pi** — single self-contained binary (QuickJS + pi core + streaming + oxc TS) | **5.9 MB** |
+| `bun build --compile` (providers external; embeds JavaScriptCore) | 61 MB |
+| node runtime + `node_modules` (pi-agent-core + pi-ai + deps, 106 pkgs) | 114 MB + 131 MB |
+
+~**10× smaller than a bun-compiled pi, ~40× smaller than node + node_modules** —
+and nothing to `npm install` at the destination.
 
 ## Status
 
@@ -104,8 +159,13 @@ symbols the core actually imports.
 - ✅ Anthropic streaming `streamFn` (raw SSE, `input_json_delta` tool streaming,
   image tool-results) — wired and unit-tested against the scripted path; the live
   path compiles and is covered by an env-gated test.
+- ✅ OpenAI provider too (Chat Completions streaming, gpt-5.x); system proxy.
 - ✅ Coalesced 2 Hz+ frame scheduler; tools round-trip through native Rust.
-- ⛔ Not hardened: single provider (Anthropic), permissive tool-arg validation,
-  no session persistence/compaction. This is a PoC substrate, not pi's full CLI.
+- ✅ Agent-authored **TypeScript plugins** loaded at runtime (oxc transpiler),
+  including agent self-extension via `define_plugin`.
+- ⛔ Not hardened: two providers, permissive tool-arg validation, no session
+  persistence/compaction, and the plugin API is a lean subset of pi's
+  `ExtensionAPI` (single-file plugins, no value imports). A PoC substrate, not
+  pi's full CLI.
 
 MIT.

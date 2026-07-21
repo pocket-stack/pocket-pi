@@ -94,6 +94,116 @@ fn scripted_tool_call_round_trips_through_native_rust() {
     assert!(kinds.contains(&"end"), "no end in {kinds:?}");
 }
 
+/// The Option-A capability: an agent-authored **TypeScript** plugin is
+/// transpiled natively (oxc) and loaded into the live realm, registering a new
+/// tool the agent then calls — no Node, no build step.
+#[test]
+fn loads_a_typescript_plugin_and_calls_its_tool() {
+    let (sink, cb) = collector();
+    let mut rt = PiRuntime::new().expect("runtime");
+    rt.on_event(cb);
+
+    // Boot with NO tools; the plugin adds one at runtime.
+    rt.boot(
+        r#"{"model":"test","scripted":{"steps":[
+            {"toolCall":{"name":"add","arguments":{"a":2,"b":3}}},
+            {"text":"the sum is 5"}
+        ]}}"#,
+    )
+    .expect("boot");
+
+    // A real TypeScript plugin: types, an interface, an arrow fn with a cast.
+    let plugin_ts = r#"
+interface AddArgs { a: number; b: number }
+export default function (api: any): void {
+    api.addTool({
+        name: "add",
+        description: "Add two numbers",
+        parameters: {
+            type: "object",
+            properties: { a: { type: "number" }, b: { type: "number" } },
+            required: ["a", "b"],
+        },
+        execute: (args: AddArgs): string => {
+            const sum: number = (args.a as number) + (args.b as number);
+            api.log("sum=" + sum);
+            return String(sum);
+        },
+    });
+}
+"#;
+    rt.load_plugin_ts("adder", plugin_ts).expect("load plugin");
+
+    rt.prompt("add 2 and 3").expect("prompt");
+    run(&mut rt, sink.clone(), 4.0, 5.0);
+
+    let events = sink.borrow();
+    let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+    assert!(kinds.contains(&"plugin_loaded"), "plugin not loaded: {kinds:?}");
+    assert!(kinds.contains(&"tool_start"), "tool not called: {kinds:?}");
+    // The plugin's TS logic actually ran with the right args → sum=5.
+    let logged = events.iter().any(|e| {
+        e.kind == "plugin_log"
+            && e.value.get("message").and_then(|v| v.as_str()) == Some("sum=5")
+    });
+    assert!(logged, "plugin tool didn't compute correctly: {kinds:?}");
+}
+
+/// Self-extension: the agent calls `define_plugin` to author a tool in
+/// TypeScript, then calls that very tool on the next turn — pi's "the agent
+/// extends its own harness" loop, on the no-Node runtime.
+#[test]
+fn agent_writes_and_uses_its_own_plugin() {
+    let (sink, cb) = collector();
+    let mut rt = PiRuntime::new().expect("runtime");
+    rt.on_event(cb);
+
+    // The agent's scripted turns: (1) write a plugin in TypeScript, (2) call it.
+    let plugin_src = r#"
+export default (api: any) => {
+    api.addTool({
+        name: "shout",
+        description: "uppercase a word",
+        parameters: { type: "object", properties: { word: { type: "string" } }, required: ["word"] },
+        execute: (a: { word: string }): string => {
+            const s: string = a.word.toUpperCase();
+            api.log("shouted=" + s);
+            return s;
+        },
+    });
+};
+"#;
+    // A self-authored tool becomes available on the NEXT prompt (tools are read
+    // at run start), matching pi's extension model — so: prompt 1 defines it,
+    // prompt 2 uses it.
+    let cfg = serde_json::json!({
+        "model": "test",
+        "selfExtend": true,
+        "scripted": { "steps": [
+            { "toolCall": { "name": "define_plugin",
+                "arguments": { "name": "shouter", "typescript": plugin_src } } },
+            { "text": "made a shout tool" },
+            { "toolCall": { "name": "shout", "arguments": { "word": "meow" } } },
+            { "text": "MEOW" }
+        ]}
+    });
+    rt.boot(&cfg.to_string()).expect("boot");
+    rt.prompt("make a shout tool").expect("prompt");
+    run(&mut rt, sink.clone(), 4.0, 6.0);
+    rt.prompt("now shout meow").expect("prompt");
+    run(&mut rt, sink.clone(), 4.0, 6.0);
+
+    let events = sink.borrow();
+    let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+    assert!(kinds.contains(&"plugin_loaded"), "plugin not loaded: {kinds:?}");
+    // The self-authored tool actually ran with the right arg.
+    let shouted = events.iter().any(|e| {
+        e.kind == "plugin_log"
+            && e.value.get("message").and_then(|v| v.as_str()) == Some("shouted=MEOW")
+    });
+    assert!(shouted, "self-authored tool didn't run correctly: {kinds:?}");
+}
+
 /// Live end-to-end against OpenAI. Skipped unless OPENAI_API_KEY is set.
 #[test]
 fn live_openai_turn() {

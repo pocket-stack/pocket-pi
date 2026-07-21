@@ -27,6 +27,7 @@
 //! ```
 
 mod http;
+mod transpile;
 
 use rquickjs::{CatchResultExt, Context, Ctx, Function, Object, Runtime};
 use std::cell::RefCell;
@@ -198,6 +199,26 @@ impl PiRuntime {
         self.pump()
     }
 
+    /// Load an agent-authored **TypeScript** plugin at runtime. The source is
+    /// transpiled natively (oxc) and evaluated in the live realm; its default
+    /// export is a factory `(api) => void` that can register tools and hooks on
+    /// the running agent. This is the no-Node analogue of pi's jiti extension
+    /// loader — the agent can write and install its own tools mid-session.
+    pub fn load_plugin_ts(&mut self, name: &str, ts_source: &str) -> Result<(), String> {
+        let (name, ts) = (name.to_string(), ts_source.to_string());
+        self.ctx.with(|ctx| -> Result<(), String> {
+            let pp: Object = ctx.globals().get("PocketPi").map_err(|e| e.to_string())?;
+            let f: Function = pp.get("loadPlugin").map_err(|e| e.to_string())?;
+            f.call::<_, ()>((name, ts))
+                .catch(&ctx)
+                .map_err(|e| format!("loadPlugin: {e}"))?;
+            Ok(())
+        })?;
+        self.drain_jobs();
+        self.flush_events();
+        Ok(())
+    }
+
     /// Abort the in-flight turn, if any.
     pub fn abort(&mut self) -> Result<(), String> {
         self.ctx.with(|ctx| -> Result<(), String> {
@@ -334,6 +355,18 @@ fn install_host(
     host.set(
         "uuid",
         Function::new(ctx.clone(), move || -> String { simple_uuid() })?,
+    )?;
+
+    // host.transpile(name, tsSource) -> jsSource  (agent-authored TS plugins)
+    host.set(
+        "transpile",
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx, name: String, source: String| -> rquickjs::Result<String> {
+                transpile::transpile_ts(&name, &source)
+                    .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))
+            },
+        )?,
     )?;
 
     ctx.globals().set("host", host)?;

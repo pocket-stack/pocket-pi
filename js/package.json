@@ -1,0 +1,12 @@
+{
+  "name": "pocket-pi-guest",
+  "private": true,
+  "description": "Build inputs for Pocket Pi's guest bundle. pi's agent core is a real, unmodified upstream dependency here — sync it with `npm update` and rebuild with `node build.mjs`.",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "@mariozechner/pi-agent-core": "0.73.1"
+  }
+}

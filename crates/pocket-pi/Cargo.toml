@@ -12,5 +12,14 @@ serde_json = "1"
 ureq = { version = "2", features = ["tls"] }
 log = "0.4"
 
+# Runtime TypeScript → JavaScript for agent-authored plugins (Option A): the
+# heavy "jiti + typescript" Node dependency, reimplemented as a native op.
+oxc_allocator = "0.140"
+oxc_parser = "0.140"
+oxc_codegen = "0.140"
+oxc_semantic = "0.140"
+oxc_span = "0.140"
+oxc_transformer = "0.140"
+
 [dev-dependencies]
 env_logger = "0.11"
