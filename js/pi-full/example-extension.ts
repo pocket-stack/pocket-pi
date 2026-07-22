@@ -8,7 +8,13 @@ interface Pi {
     name: string;
     description: string;
     parameters: unknown;
-    execute: (args: Record<string, unknown>) => Promise<unknown>;
+    execute: (
+      toolCallId: string,
+      input: Record<string, unknown>,
+      signal?: unknown,
+      onUpdate?: unknown,
+      ctx?: unknown,
+    ) => Promise<unknown>;
   }): void;
   on(event: string, handler: (event: unknown) => void): void;
 }
@@ -22,7 +28,12 @@ export default (pi: Pi): void => {
       properties: { text: { type: "string" } },
       required: ["text"],
     },
-    execute: async (args): Promise<unknown> => ({ output: String(args.text ?? "") }),
+    // pi calls execute(toolCallId, input, ...); the result must carry a `content`
+    // array of blocks (the shape pi converts into a tool-result message).
+    execute: async (_toolCallId, input): Promise<unknown> => {
+      (globalThis as Record<string, unknown>).__echoCalled = input;
+      return { content: [{ type: "text", text: String(input?.text ?? "") }] };
+    },
   });
 
   pi.on("agent_start", (): void => {
