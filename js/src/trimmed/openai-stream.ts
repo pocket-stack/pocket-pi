@@ -2,7 +2,7 @@
 // and maps its SSE deltas (a different shape from Anthropic — `choices[].delta`,
 // incremental `tool_calls`, `image_url` content) onto pi's running `partial`.
 
-import { AssistantMessageEventStream } from "@mariozechner/pi-ai";
+import { AssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { beginTurn, emptyUsage, safeParse } from "./stream-core.js";
 
 function toOpenAIMessages(context) {

@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2023"],
+    "types": [],
+    "strict": false,
+    "noImplicitAny": false,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
+    "allowJs": true,
+    "isolatedModules": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "//": "esbuild transpiles ALL of src/. tsc typechecks Pocket Pi's own orchestration code (the pi-full session harness). The runtime layer (src/runtime/**) and the pi-ai/undici adapter glue (src/trimmed/**, undici-stub) are deliberately loose polyfills/adapters over upstream's runtime shapes — typechecking them against the very APIs they reimplement is counterproductive.",
+  "include": ["src/pi-full/**/*.ts", "env.d.ts"],
+  "exclude": ["src/pi-full/undici-stub.ts"]
+}

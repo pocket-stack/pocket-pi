@@ -6,7 +6,7 @@
 // back to native Rust so the guest realm stays capability-free (no fs, no net
 // except through the vetted http op).
 
-import { Agent } from "@mariozechner/pi-agent-core";
+import { Agent } from "@earendil-works/pi-agent-core";
 import { anthropicStream } from "./anthropic-stream.js";
 import { openaiStream } from "./openai-stream.js";
 import { makeScriptedStream } from "./scripted.js";

@@ -11,7 +11,7 @@
 // Steps are consumed one per assistant turn; when tool calls are involved the
 // loop drives another turn automatically, so the next step answers.
 
-import { AssistantMessageEventStream } from "@mariozechner/pi-ai";
+import { AssistantMessageEventStream } from "@earendil-works/pi-ai";
 
 export function makeScriptedStream(cfg) {
   const steps = (cfg && cfg.steps) || [{ text: "(scripted: no steps configured)" }];

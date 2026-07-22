@@ -1,11 +1,21 @@
-// node:process — re-exports the global process object the runtime installs.
 const p = globalThis.process;
-export const env = p.env;
-export const platform = p.platform;
-export const argv = p.argv;
-export const version = p.version;
-export const versions = p.versions;
-export const cwd = p.cwd;
-export const nextTick = p.nextTick;
-export const exit = p.exit;
-export default p;
+const env = p.env;
+const platform = p.platform;
+const argv = p.argv;
+const version = p.version;
+const versions = p.versions;
+const cwd = p.cwd;
+const nextTick = p.nextTick;
+const exit = p.exit;
+var process_default = p;
+export {
+  argv,
+  cwd,
+  process_default as default,
+  env,
+  exit,
+  nextTick,
+  platform,
+  version,
+  versions
+};

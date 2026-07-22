@@ -1,0 +1,26 @@
+// node:fs/promises
+import fs from "node:fs";
+const p = fs.promises;
+export const readFile = p.readFile;
+export const writeFile = p.writeFile;
+export const readdir = p.readdir;
+export const mkdir = p.mkdir;
+export const stat = p.stat;
+export const lstat = p.lstat;
+export const realpath = p.realpath;
+export const readlink = p.readlink;
+export const unlink = p.unlink;
+export const rm = p.rm;
+export const rmdir = p.rmdir;
+export const rename = p.rename;
+export const copyFile = p.copyFile;
+export const cp = p.cp;
+export const appendFile = p.appendFile;
+export const chmod = p.chmod;
+export const symlink = p.symlink;
+export const utimes = p.utimes;
+export const truncate = p.truncate;
+export const mkdtemp = p.mkdtemp;
+export const access = p.access;
+export const open = p.open;
+export default p;

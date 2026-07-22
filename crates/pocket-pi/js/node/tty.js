@@ -1,5 +1,14 @@
-// node:tty — stub (Pocket Pi runs headless).
-export function isatty() { return false; }
-export class ReadStream {}
-export class WriteStream {}
-export default { isatty, ReadStream, WriteStream };
+function isatty() {
+  return false;
+}
+class ReadStream {
+}
+class WriteStream {
+}
+var tty_default = { isatty, ReadStream, WriteStream };
+export {
+  ReadStream,
+  WriteStream,
+  tty_default as default,
+  isatty
+};

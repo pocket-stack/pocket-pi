@@ -1,45 +1,109 @@
-// Bundle the Pocket Pi guest to a single IIFE that QuickJS evaluates.
+// Unified build for all of Pocket Pi's JavaScript guest layer.
 //
-// Run with plain Node (no bun): `npm install && node js/build.mjs`. pi's agent
-// core is a **real, unmodified npm dependency** (js/package.json) — sync it with
-// `npm update @mariozechner/pi-agent-core` and rebuild. The runtime itself needs
-// neither Node nor bun nor esbuild: it embeds the produced bundle via
-// include_str! in the crate, and the committed bundle builds fully offline.
+// Sources are TypeScript under js/src/; this emits the artifacts the Rust crate
+// embeds. Run with plain Node: `npm install && node js/build.mjs`.
 //
-// The one deliberate substitution: pi's ~5 MB pi-ai (provider SDKs + typebox +
-// a 553 KB model table) is aliased to src/pi-ai-stub.js — four stable symbols
-// plus our own Rust-backed streamFns — per the runtime's "heavy Node dep →
-// native op" rule. pi-agent-core (the loop that gets upstream feature updates)
-// is resolved straight from node_modules, unmodified.
+//   src/runtime/**       →  crates/pocket-pi/js/**            (per-file transpile; embedded via include_str!)
+//   src/pi-full/{driver,ext-probe,persist-probe}
+//                        →  crates/pocket-pi/js/pi-full/**    (test harness scripts)
+//   src/trimmed/entry    →  crates/pocket-pi/js/agent.bundle.js       (trimmed core, pi-ai stubbed)
+//   src/pi-full/entry    →  crates/pocket-pi/js/pi-full.bundle.js(.gz) (full unmodified pi)
+//
+// pi is a real, unmodified npm dependency (package.json) — sync with `npm update`
+// and rerun this. The emitted runtime .js and agent.bundle.js are committed so
+// `cargo` builds Rust-only; the full pi bundle is git-ignored (built on demand).
 
-import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import * as esbuild from "esbuild";
+import { execFileSync } from "node:child_process";
+import { gzipSync } from "node:zlib";
+import { readFileSync, writeFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "..");
+const outJs = join(root, "crates/pocket-pi/js");
+const nm = join(here, "node_modules");
 
-if (!existsSync(join(here, "node_modules/@mariozechner/pi-agent-core"))) {
-  console.error("pi-agent-core not installed — run `npm install` in js/ first.");
+if (!existsSync(join(nm, "@earendil-works/pi-coding-agent"))) {
+  console.error("pi packages not installed — run `npm install` in js/ first.");
   process.exit(1);
 }
 
-const args = [
-  "--yes",
-  "esbuild@0.24",
-  join(here, "src/entry.js"),
-  "--bundle",
-  "--format=iife",
-  "--platform=neutral",
-  "--legal-comments=none",
-  `--alias:@mariozechner/pi-ai=${join(here, "src/pi-ai-stub.js")}`,
-  // Reference the real, npm-installed upstream by its resolved entry (avoids
-  // esbuild's platform=neutral exports-map quirk; still the unmodified package
-  // that `npm update` syncs).
-  `--alias:@mariozechner/pi-agent-core=${join(here, "node_modules/@mariozechner/pi-agent-core/dist/index.js")}`,
-  `--outfile=${join(root, "crates/pocket-pi/js/agent.bundle.js")}`,
-];
+const mb = (n) => (n / 1048576).toFixed(1);
+function walk(dir) {
+  return readdirSync(dir).flatMap((name) => {
+    const p = join(dir, name);
+    return statSync(p).isDirectory() ? walk(p) : [p];
+  });
+}
 
-const r = spawnSync("npx", args, { stdio: "inherit" });
-process.exit(r.status ?? 1);
+// 1. Typecheck gate over Pocket Pi's own orchestration code (see tsconfig.json).
+console.log("• typecheck (tsc --noEmit)");
+execFileSync(join(nm, ".bin/tsc"), ["--noEmit", "-p", join(here, "tsconfig.json")], { stdio: "inherit" });
+
+// 2. Runtime glue: per-file transpile (type-strip), structure preserved. These
+//    are loaded individually as modules by the runtime, so no bundling.
+const runtimeSrc = join(here, "src/runtime");
+console.log("• runtime glue → crates/pocket-pi/js");
+await esbuild.build({
+  entryPoints: walk(runtimeSrc).filter((f) => f.endsWith(".ts")),
+  outdir: outJs,
+  outbase: runtimeSrc,
+  bundle: false,
+  format: "esm",
+  platform: "neutral",
+  logLevel: "warning",
+});
+
+// 3. Test-harness scripts (eval'd as plain scripts by the Rust tests).
+console.log("• harness scripts → crates/pocket-pi/js/pi-full");
+await esbuild.build({
+  entryPoints: ["driver", "ext-probe", "persist-probe"].map((n) => join(here, `src/pi-full/${n}.ts`)),
+  outdir: join(outJs, "pi-full"),
+  bundle: false,
+  format: "esm",
+  platform: "neutral",
+  logLevel: "warning",
+});
+
+// 4. Trimmed core bundle (pi's Agent loop + native streamFns; pi-ai stubbed).
+console.log("• trimmed bundle → agent.bundle.js");
+await esbuild.build({
+  entryPoints: [join(here, "src/trimmed/entry.ts")],
+  outfile: join(outJs, "agent.bundle.js"),
+  bundle: true,
+  format: "iife",
+  platform: "neutral",
+  legalComments: "none",
+  alias: {
+    "@earendil-works/pi-ai": join(here, "src/trimmed/pi-ai-stub.ts"),
+    // Resolve the real, unmodified upstream by its entry (avoids esbuild's
+    // platform=neutral exports-map quirk).
+    "@earendil-works/pi-agent-core": join(nm, "@earendil-works/pi-agent-core/dist/index.js"),
+  },
+  logLevel: "warning",
+});
+
+// 5. Full, unmodified pi-coding-agent bundle. Whitespace-minify only (identifier
+//    and syntax minification emit tokens the embedded QuickJS parser rejects);
+//    line-limit wraps the long lines QuickJS chokes on; undici → stub.
+console.log("• full pi bundle → pi-full.bundle.js(.gz)");
+const fullOut = join(outJs, "pi-full.bundle.js");
+await esbuild.build({
+  entryPoints: [join(here, "src/pi-full/entry.ts")],
+  outfile: fullOut,
+  bundle: true,
+  format: "esm",
+  platform: "node",
+  legalComments: "none",
+  minifyWhitespace: true,
+  lineLimit: 500,
+  alias: { undici: join(here, "src/pi-full/undici-stub.ts") },
+  logLevel: "warning",
+});
+const src = readFileSync(fullOut);
+const gz = gzipSync(src, { level: 9 });
+writeFileSync(`${fullOut}.gz`, gz);
+
+console.log(`\n✓ built. full pi: ${mb(src.length)} MB minified → ${mb(gz.length)} MB gzip`);

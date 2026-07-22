@@ -183,7 +183,7 @@ of the bundle.)
 
 ```sh
 cd js && npm install
-node build-pi-full.mjs     # → pi-full.bundle.js (~9 MB minified) + .js.gz (~1.8 MB), git-ignored
+node build.mjs             # → pi-full.bundle.js (~9 MB minified) + .js.gz (~1.8 MB), git-ignored
 ```
 
 The `.gz` is embedded into the binary under the `embed-full-pi` feature, for a
@@ -222,7 +222,7 @@ cargo test                     # unit + module-system suite (23 tests); no bundl
 cargo clippy --workspace --all-targets -- -D warnings
 
 # The bundle-backed integration tests are #[ignore] — build the bundle first:
-cd js && npm install && node build-pi-full.mjs
+cd js && npm install && node build.mjs
 cargo test -p pocket-pi loads_bundled_pi_coding_agent   -- --ignored   # bundle evaluates
 cargo test -p pocket-pi binds_extension_into_session    -- --ignored   # extension binds to a session (offline)
 cargo test -p pocket-pi persists_and_resumes_session    -- --ignored   # session round-trips to disk (offline)

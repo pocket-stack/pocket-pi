@@ -2,7 +2,7 @@
 // hands it to the shared streaming core, and maps Anthropic SSE deltas onto pi's
 // running `partial` message (the same shape pi-ai's own provider produces).
 
-import { AssistantMessageEventStream } from "@mariozechner/pi-ai";
+import { AssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { beginTurn, emptyUsage, safeParse } from "./stream-core.js";
 
 function toAnthropicMessages(context) {

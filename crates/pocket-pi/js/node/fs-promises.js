@@ -1,26 +1,50 @@
-// node:fs/promises
 import fs from "node:fs";
 const p = fs.promises;
-export const readFile = p.readFile;
-export const writeFile = p.writeFile;
-export const readdir = p.readdir;
-export const mkdir = p.mkdir;
-export const stat = p.stat;
-export const lstat = p.lstat;
-export const realpath = p.realpath;
-export const readlink = p.readlink;
-export const unlink = p.unlink;
-export const rm = p.rm;
-export const rmdir = p.rmdir;
-export const rename = p.rename;
-export const copyFile = p.copyFile;
-export const cp = p.cp;
-export const appendFile = p.appendFile;
-export const chmod = p.chmod;
-export const symlink = p.symlink;
-export const utimes = p.utimes;
-export const truncate = p.truncate;
-export const mkdtemp = p.mkdtemp;
-export const access = p.access;
-export const open = p.open;
-export default p;
+const readFile = p.readFile;
+const writeFile = p.writeFile;
+const readdir = p.readdir;
+const mkdir = p.mkdir;
+const stat = p.stat;
+const lstat = p.lstat;
+const realpath = p.realpath;
+const readlink = p.readlink;
+const unlink = p.unlink;
+const rm = p.rm;
+const rmdir = p.rmdir;
+const rename = p.rename;
+const copyFile = p.copyFile;
+const cp = p.cp;
+const appendFile = p.appendFile;
+const chmod = p.chmod;
+const symlink = p.symlink;
+const utimes = p.utimes;
+const truncate = p.truncate;
+const mkdtemp = p.mkdtemp;
+const access = p.access;
+const open = p.open;
+var fs_promises_default = p;
+export {
+  access,
+  appendFile,
+  chmod,
+  copyFile,
+  cp,
+  fs_promises_default as default,
+  lstat,
+  mkdir,
+  mkdtemp,
+  open,
+  readFile,
+  readdir,
+  readlink,
+  realpath,
+  rename,
+  rm,
+  rmdir,
+  stat,
+  symlink,
+  truncate,
+  unlink,
+  utimes,
+  writeFile
+};

@@ -1,40 +1,88 @@
-// node:worker_threads — stub. Pocket Pi is single-threaded (one QuickJS realm),
-// so there are no real workers; these exist so imports resolve. `Worker` throws
-// if actually constructed.
-export class Worker {
+class Worker {
   constructor() {
     throw new Error("worker_threads.Worker is not supported in Pocket Pi (single-threaded)");
   }
 }
-export const isMainThread = true;
-export const parentPort = null;
-export const threadId = 0;
-export const workerData = null;
-export class MessageChannel {
-  constructor() { this.port1 = new MessagePort(); this.port2 = new MessagePort(); }
+const isMainThread = true;
+const parentPort = null;
+const threadId = 0;
+const workerData = null;
+class MessageChannel {
+  constructor() {
+    this.port1 = new MessagePort();
+    this.port2 = new MessagePort();
+  }
 }
-export class MessagePort {
-  postMessage() {}
-  on() { return this; }
-  once() { return this; }
-  close() {}
-  ref() { return this; }
-  unref() { return this; }
-  start() {}
+class MessagePort {
+  postMessage() {
+  }
+  on() {
+    return this;
+  }
+  once() {
+    return this;
+  }
+  close() {
+  }
+  ref() {
+    return this;
+  }
+  unref() {
+    return this;
+  }
+  start() {
+  }
 }
-export const BroadcastChannel = class BroadcastChannel {
-  postMessage() {}
-  close() {}
-  on() { return this; }
+const BroadcastChannel = class BroadcastChannel2 {
+  postMessage() {
+  }
+  close() {
+  }
+  on() {
+    return this;
+  }
 };
-export function markAsUntransferable() {}
-export function moveMessagePortToContext() { throw new Error("not supported"); }
-export function receiveMessageOnPort() { return undefined; }
-export function setEnvironmentData() {}
-export function getEnvironmentData() { return undefined; }
-export default {
-  Worker, isMainThread, parentPort, threadId, workerData,
-  MessageChannel, MessagePort, BroadcastChannel,
-  markAsUntransferable, moveMessagePortToContext, receiveMessageOnPort,
-  setEnvironmentData, getEnvironmentData,
+function markAsUntransferable() {
+}
+function moveMessagePortToContext() {
+  throw new Error("not supported");
+}
+function receiveMessageOnPort() {
+  return void 0;
+}
+function setEnvironmentData() {
+}
+function getEnvironmentData() {
+  return void 0;
+}
+var worker_threads_default = {
+  Worker,
+  isMainThread,
+  parentPort,
+  threadId,
+  workerData,
+  MessageChannel,
+  MessagePort,
+  BroadcastChannel,
+  markAsUntransferable,
+  moveMessagePortToContext,
+  receiveMessageOnPort,
+  setEnvironmentData,
+  getEnvironmentData
+};
+export {
+  BroadcastChannel,
+  MessageChannel,
+  MessagePort,
+  Worker,
+  worker_threads_default as default,
+  getEnvironmentData,
+  isMainThread,
+  markAsUntransferable,
+  moveMessagePortToContext,
+  parentPort,
+  receiveMessageOnPort,
+  setEnvironmentData,
+  threadId,
+  workerData
 };

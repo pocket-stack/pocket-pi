@@ -1,42 +1,57 @@
-// node:os — backed by native ops for the machine-specific bits.
 const n = globalThis.__node;
-
-export function platform() {
-  return (globalThis.process && globalThis.process.platform) || "linux";
+function platform() {
+  return globalThis.process && globalThis.process.platform || "linux";
 }
-export function homedir() {
+function homedir() {
   return n ? n.homedir() : "/";
 }
-export function tmpdir() {
+function tmpdir() {
   return n ? n.tmpdir() : "/tmp";
 }
-export function hostname() {
+function hostname() {
   return n && n.hostname ? n.hostname() : "localhost";
 }
-export function arch() {
-  return (globalThis.process && globalThis.process.arch) || "x64";
+function arch() {
+  return globalThis.process && globalThis.process.arch || "x64";
 }
-export function type() {
+function type() {
   return platform() === "darwin" ? "Darwin" : platform() === "win32" ? "Windows_NT" : "Linux";
 }
-export function release() {
+function release() {
   return "0.0.0";
 }
-export function cpus() {
+function cpus() {
   return [];
 }
-export function totalmem() {
+function totalmem() {
   return 0;
 }
-export function freemem() {
+function freemem() {
   return 0;
 }
-export function uptime() {
+function uptime() {
   return 0;
 }
-export function userInfo() {
+function userInfo() {
   return { username: "user", homedir: homedir(), shell: null, uid: -1, gid: -1 };
 }
-export const EOL = "\n";
-export const constants = { signals: {}, errno: {} };
-export default { platform, homedir, tmpdir, hostname, arch, type, release, cpus, totalmem, freemem, uptime, userInfo, EOL, constants };
+const EOL = "\n";
+const constants = { signals: {}, errno: {} };
+var os_default = { platform, homedir, tmpdir, hostname, arch, type, release, cpus, totalmem, freemem, uptime, userInfo, EOL, constants };
+export {
+  EOL,
+  arch,
+  constants,
+  cpus,
+  os_default as default,
+  freemem,
+  homedir,
+  hostname,
+  platform,
+  release,
+  tmpdir,
+  totalmem,
+  type,
+  uptime,
+  userInfo
+};

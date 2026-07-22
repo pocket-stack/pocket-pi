@@ -1,4 +1,4 @@
-// Minimal stand-in for @mariozechner/pi-ai on the Pocket Pi agent-core path.
+// Minimal stand-in for @earendil-works/pi-ai on the Pocket Pi agent-core path.
 //
 // pi-agent-core's loop imports exactly three things from pi-ai:
 //   { EventStream, streamSimple, validateToolArguments }
@@ -82,6 +82,37 @@ export function streamSimple() {
 // PoC — tools own their own input handling.
 export function validateToolArguments(_tool, toolCall) {
   return toolCall.arguments ?? {};
+}
+
+// Extract the concatenated text of a message's content (array of blocks or a
+// bare string), falling back to `fallback` when empty. Used by the harness's
+// compaction/editor paths.
+export function contentText(content, fallback = "") {
+  if (typeof content === "string") return content || fallback;
+  if (Array.isArray(content)) {
+    const t = content
+      .filter((b) => b && b.type === "text" && typeof b.text === "string")
+      .map((b) => b.text)
+      .join("");
+    return t || fallback;
+  }
+  return fallback;
+}
+
+// Retry wrapper around an assistant call. Pocket Pi's PoC path doesn't retry —
+// produce once and return (the real policy only matters for compaction).
+export async function retryAssistantCall(produce) {
+  return await produce();
+}
+
+// UUIDv7-ish id. The prelude provides crypto.randomUUID (host-backed entropy).
+export function uuidv7() {
+  if (globalThis.crypto && globalThis.crypto.randomUUID) return globalThis.crypto.randomUUID();
+  if (globalThis.host && globalThis.host.uuid) return globalThis.host.uuid();
+  return "xxxxxxxx-xxxx-7xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = Math.floor(Math.random() * 16);
+    return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
+  });
 }
 
 // Incremental JSON repair for streamed tool-call arguments. Good enough for the

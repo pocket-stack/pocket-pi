@@ -1,2 +1,4 @@
-// node:v8 — minimal stub.
-export default {};
+var v8_default = {};
+export {
+  v8_default as default
+};
