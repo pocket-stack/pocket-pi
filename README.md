@@ -83,7 +83,7 @@ export default (pi) => {
 Pocket Pi loads it through pi's own `extensionFactories` seam — no jiti, no Node.
 The host imports the file (which routes through the oxc loader) and hands the
 factory to `createAgentSession`; the session's extension runner then exposes the
-tool and hook. The runnable reference is [`js/pi-full/driver.js`](js/pi-full/driver.js):
+tool and hook. The runnable reference is [`js/src/pi-full/driver.ts`](js/src/pi-full/driver.ts):
 
 ```js
 // the essence — see driver.js for the full session setup
@@ -149,21 +149,15 @@ while !rt.is_idle() {
 }
 ```
 
-There are two ways to run pi on this API:
+`PiRuntime::new()` embeds and loads the **whole, unmodified `pi-coding-agent`** —
+sessions, extensions, pi's own tool suite — plus a host harness. `boot` stands up
+a pi session from a config (`provider`/`model`/`apiKey`/`systemPrompt`/`tools`);
+each config `tool` bridges to the native Rust closure you registered with
+`register_tool` (that's how cat's `look_at_screen` screenshot tool reaches the
+agent); `prompt` runs a turn and events stream to `on_event`. There is one path —
+no trimmed variant, no feature flag.
 
-- **The trimmed embeddable core** (default). `PiRuntime::new()` boots
-  `agent.bundle.js` — pi's `Agent` loop with the provider layer replaced by native
-  Rust `streamFn`s (Anthropic + OpenAI SSE). Drive it directly with
-  `boot` / `prompt` / `register_tool` / `pump`. Smallest footprint; best when you
-  want a lightweight agent and native tools, not pi's full CLI feature set.
-- **The full, unmodified `pi-coding-agent`**. Load the bundle — either embedded
-  (`rt.load_full_pi()`, with the `embed-full-pi` feature) or from disk
-  (`rt.run_module(".../pi-full.bundle.js")`) — then drive `createAgentSession`.
-  This unlocks extensions, session persistence, and pi's own tool suite.
-  [`js/pi-full/driver.js`](js/pi-full/driver.js) is the reference harness.
-
-Other `PiRuntime` methods: `run_module`, `eval_script`, `get_global_json`,
-`load_plugin_ts` (native oxc transpile of an agent-authored TS plugin), `abort`,
+Other `PiRuntime` methods: `run_module`, `eval_script`, `get_global_json`,`abort`,
 `is_idle`.
 
 ---
@@ -183,34 +177,31 @@ of the bundle.)
 
 ```sh
 cd js && npm install
-node build.mjs             # → pi-full.bundle.js (~9 MB minified) + .js.gz (~1.8 MB), git-ignored
+node build.mjs   # → pi-full.bundle.js.gz (~1.8 MB, committed + embedded) + runtime glue
 ```
 
-The `.gz` is embedded into the binary under the `embed-full-pi` feature, for a
-single self-contained executable (see Footprint).
+The `.gz` is **committed** and `include_bytes!`'d into the crate, so `PiRuntime`
+carries the whole pi with no external files — and `cargo build` (including from
+cat's vendored submodule) needs only Rust, no Node.
 
 **Staying in sync with upstream pi** (`@earendil-works/pi-coding-agent`) is
-`npm update` + rebuild — no patches to carry. The bundle is git-ignored (a
-generated artifact), so the integration tests
-that use it are `#[ignore]` and run locally; the crate itself builds with only
-Rust.
+`npm update` + `node js/build.mjs` + commit — no patches to carry.
 
 ---
 
 ## Footprint
 
-Everything ships as a single self-contained binary — **nothing to `npm install`
-at the destination**. Even a binary carrying the *whole unmodified pi* (the ~9 MB
-bundle, gzip-embedded to ~1.8 MB via the `embed-full-pi` feature) is one file:
+Everything ships as **one self-contained binary** carrying the whole unmodified
+pi (the ~9 MB bundle, gzip-embedded to ~1.8 MB) — **nothing to `npm install` at
+the destination**:
 
 | Shipping pi as… | Size |
 |---|---|
 | **Pocket Pi** — one binary, full unmodified pi embedded | **~8.9 MB** |
-| **Pocket Pi** — one binary, trimmed core only (no full bundle) | **~7 MB** |
 | `bun build --compile` (providers external; embeds JavaScriptCore) | ~61 MB |
 | node runtime + `node_modules` (pi-agent-core + pi-ai + deps) | ~114 MB + ~131 MB |
 
-The ~7 MB base is dominated by **oxc** (~1.6 MB — the TypeScript transpiler for
+The base is dominated by **oxc** (~1.6 MB — the TypeScript transpiler for
 extensions), TLS `rustls`+`ring` (~0.6 MB), `regex` (~0.5 MB), and QuickJS (~0.5 MB).
 
 ---
@@ -218,19 +209,19 @@ extensions), TLS `rustls`+`ring` (~0.6 MB), `regex` (~0.5 MB), and QuickJS (~0.5
 ## Build & test
 
 ```sh
-cargo test                     # unit + module-system suite (23 tests); no bundle needed
+# The full pi bundle is committed + embedded, so the whole suite runs with only
+# Rust — no Node, no build step. This includes the offline pi tests: it loads,
+# an extension binds to a session, sessions persist to disk.
+cargo test
 cargo clippy --workspace --all-targets -- -D warnings
 
-# The bundle-backed integration tests are #[ignore] — build the bundle first:
-cd js && npm install && node build.mjs
-cargo test -p pocket-pi loads_bundled_pi_coding_agent   -- --ignored   # bundle evaluates
-cargo test -p pocket-pi binds_extension_into_session    -- --ignored   # extension binds to a session (offline)
-cargo test -p pocket-pi persists_and_resumes_session    -- --ignored   # session round-trips to disk (offline)
+# Rebuild the guest layer only after editing js/src/**:
+cd js && npm install && node js/build.mjs
 
-# The turn tests need an API key + (here) a proxy:
-https_proxy=http://127.0.0.1:7897 OPENAI_API_KEY=… \
-  cargo test -p pocket-pi runs_bundled_pi_turn          -- --ignored --nocapture
-https_proxy=http://127.0.0.1:7897 OPENAI_API_KEY=… \
+# Real-turn tests need an API key + (here) a proxy; they skip without one:
+OPENAI_API_KEY=… OPENAI_MODEL=gpt-5.6 https_proxy=http://127.0.0.1:7897 \
+  cargo test -p pocket-pi live_openai_turn -- --nocapture         # boot/prompt → real turn
+OPENAI_API_KEY=… https_proxy=http://127.0.0.1:7897 \
   cargo test -p pocket-pi runs_pi_turn_with_extension_tool -- --ignored --nocapture
 ```
 
