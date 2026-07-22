@@ -22,5 +22,16 @@ oxc_span = "0.140"
 oxc_transformer = "0.140"
 regex = "1"
 
+# Gzip decode for the embedded full-pi bundle (pure-Rust backend, no C). Only
+# pulled in by the `embed-full-pi` feature.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"], optional = true }
+
+[features]
+# Embed the full, unmodified pi-coding-agent bundle (gzip) into the binary for a
+# single self-contained distributable. Off by default so dev/CI builds — which
+# path-load the bundle in #[ignore] tests — don't need it built. Turning it on
+# requires `node js/build-pi-full.mjs` to have produced pi-full.bundle.js.gz.
+embed-full-pi = ["dep:flate2"]
+
 [dev-dependencies]
 env_logger = "0.11"

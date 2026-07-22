@@ -5,3 +5,4 @@ node_modules
 
 # Path B full-pi bundle (13 MB generated artifact; rebuild with `node js/build-pi-full.mjs`)
 crates/pocket-pi/js/pi-full.bundle.js
+crates/pocket-pi/js/pi-full.bundle.js.gz
