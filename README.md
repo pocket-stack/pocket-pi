@@ -1,71 +1,145 @@
 # Pocket Pi
 
-**Run the [pi](https://github.com/badlogic/pi-mono) coding-agent core inside QuickJS — no Node, no bun — on a PocketJS-style coalesced frame scheduler.**
+**Run the unmodified [pi](https://github.com/badlogic/pi-mono) coding-agent — and its extensions — inside QuickJS. No Node, no bun.**
 
-Pocket Pi is a small Rust runtime that embeds QuickJS, evaluates pi's embeddable
-`Agent` core (`@mariozechner/pi-agent-core`), and gives it exactly the native
-capabilities an agent needs and nothing more: streaming HTTPS to an LLM, a tool
-bridge back to native code, and a heartbeat. It is the substrate the
+Pocket Pi is a small Rust runtime that embeds QuickJS and gives JavaScript exactly
+enough of a Node/Web platform — a module system, the `node:` builtins, `fetch`,
+and a native TypeScript loader — that the **whole, unmodified `pi-coding-agent`
+runs on it**, drives real LLM turns with tools, loads real extensions, and
+persists sessions. It is the substrate the
 [`cat`](https://github.com/paperboytm/cat-poc) desktop-assistant harness runs on,
-and it is the sibling of [PocketJS](https://github.com/pocket-stack/pocketjs):
-where PocketJS proved a *UI* runtime can live outside the browser under an 8 MB
-budget, Pocket Pi does the same for an *agent* runtime.
+and the sibling of [PocketJS](https://github.com/pocket-stack/pocketjs): where
+PocketJS proved a *UI* runtime can live outside the browser under a tiny budget,
+Pocket Pi does the same for an *agent* runtime.
 
 ```
-┌──────────────────────────── PiRuntime (one thread) ────────────────────────────┐
-│  QuickJS realm                                                                  │
-│    prelude.js         timers · AbortController · structuredClone · crypto       │
-│    agent.bundle.js    pi Agent + loop  (44 KB — pi-ai's 5 MB stripped away)     │
-│    anthropic-stream.js  Anthropic SSE → pi events, off the HTTP mailbox         │
-│         │  host.http.start/drain/cancel   host.tool   host.emit                 │
-│  ───────┼──────────────────────────────────────────────────────────────────    │
-│  native │  HttpHub  ──►  background thread per turn: TLS POST + SSE read        │
-│         │  tool registry (Rust closures)     event flush → your callback        │
-│  pump() │  timers → deliver LLM events → drain job queue → flush events         │
-└─────────┴───────────────────────────────────────────────────────────────────────┘
+┌────────────────────────── PiRuntime (one QuickJS realm, one thread) ──────────────────────────┐
+│  prelude.js        timers · AbortController · fetch/Response/ReadableStream · Blob/FormData     │
+│  node: builtins    fs · path · child_process · process · buffer · events · stream · … (JS)      │
+│  pi-full.bundle    the UNMODIFIED pi-coding-agent, esbuild-bundled to one ES module             │
+│  your extension    a .ts factory, transpiled by oxc at load — NOT jiti                          │
+│        │  __node (resolve/fs/spawn)   host.http   host.transpile   host.tool   host.emit        │
+│  ──────┼─────────────────────────────────────────────────────────────────────────────────────  │
+│ native │  NodeResolver/NodeLoader  ·  oxc TS→JS  ·  fs & subprocess ops  ·  HTTP hub (TLS+SSE)  │
+│ pump() │  timers → deliver fetch/LLM chunks → drain job queue → flush events → your callback    │
+└────────┴───────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Why
+## What works today
 
-pi is a clean, hang-resistant agent loop, but it ships as a Node/bun program
-with a heavy dependency graph (provider SDKs, a 553 KB model table, terminal UI,
-`node:child_process`, …). To put an agent inside a low-resource native product —
-a desktop widget, an embedded device, anywhere without a JS server — none of that
-belongs. The recon behind this runtime found that pi's **agent loop is only
-~43 KB of pure JS** and touches almost no globals; everything heavy is the CLI,
-the TUI, and the provider layer. Pocket Pi keeps the loop and replaces the rest:
+- **Unmodified `pi-coding-agent` runs end-to-end** on QuickJS — a real gpt-5.6
+  turn streams tokens and completes, tools and all. No source edits to pi; it's a
+  real npm dependency synced with `npm update`.
+- **Extensions load through Pocket Pi's own loader** (oxc TypeScript transpile,
+  **no jiti**). A normal pi extension registers tools and lifecycle hooks, and the
+  agent can call those tools in a live turn.
+- **Sessions persist and resume** — pi's `SessionManager` reads/writes `.jsonl`
+  through the runtime's `fs` builtin.
+- **A near-complete Node/Web platform:** a Node resolver/loader (relative,
+  `node_modules`, `exports`/`imports`, `.ts` on the fly), CommonJS interop, ~30
+  `node:` builtins, and WHATWG `fetch`/`Response`/`ReadableStream`/`Headers`/`URL`
+  backed by a native, proxy-aware HTTP hub.
+- **A coalesced frame scheduler** — an agent spends almost all its time waiting on
+  the model, so the host drives work in `pump()` frames and can run as slow as
+  **2 Hz** while a turn streams, at near-zero idle CPU. See [ARCHITECTURE.md](ARCHITECTURE.md).
+- **CI**: clippy (`-D warnings`) + build + test on every push and PR.
 
-- **No Node, no bun at runtime.** Just QuickJS (via `rquickjs`) and Rust.
-- **One native op that matters:** streaming HTTPS. Everything else pi needs
-  (`TextDecoder`, `fetch`, `ReadableStream`) is sidestepped by parsing SSE in
-  Rust and handing pi complete events.
-- **Tools are Rust.** The guest realm has no filesystem and no network except the
-  vetted `host.http` op; a tool is a Rust closure the agent calls by name. Heavy
-  Node tool-deps become native ops instead of npm packages.
-- **The scheduler is the point** — see [ARCHITECTURE.md](ARCHITECTURE.md).
+---
 
-## The frame scheduler
+## Writing an extension
 
-An agent spends almost all of its wall-clock waiting on the model. Pocket Pi
-borrows PocketJS's **demand-render** governor: work happens in discrete `pump()`
-frames, and each frame only does something if there is something to do (an LLM
-chunk arrived, a timer is due, a promise can resolve). Because LLM latency
-(seconds) dwarfs a frame period, the host can pump as slowly as **2 Hz** while a
-turn is in flight and lose nothing — the runtime coalesces to near-zero CPU
-between token bursts. A headless agent doesn't need a hot loop; it needs a
-heartbeat. The verdict, with measurements, is in [ARCHITECTURE.md](ARCHITECTURE.md).
+An extension for Pocket Pi is **the same file an unmodified pi extension is**: a
+module whose default export is a factory `(pi) => void` (or async). Pocket Pi
+loads it through its own module system, so the file is written in TypeScript and
+may `import` `node:` builtins, relative modules, and npm packages.
 
-## Use it
+```ts
+// my-extension.ts
+export default (pi) => {
+  pi.registerTool({
+    name: "echo",
+    description: "Echo the given text back.",
+    parameters: {
+      type: "object",
+      properties: { text: { type: "string" } },
+      required: ["text"],
+    },
+    // pi calls execute(toolCallId, input, signal, onUpdate, ctx).
+    // Return a result whose `content` is an array of content blocks.
+    execute: async (_id, input) => ({
+      content: [{ type: "text", text: String(input.text) }],
+    }),
+  });
+
+  pi.on("agent_start", () => {
+    /* lifecycle hook — fires when a turn begins */
+  });
+
+  // also available: pi.registerCommand / registerFlag / registerShortcut /
+  // registerMessageRenderer / sendMessage / exec / getActiveTools / …
+};
+```
+
+Pocket Pi loads it through pi's own `extensionFactories` seam — no jiti, no Node.
+The host imports the file (which routes through the oxc loader) and hands the
+factory to `createAgentSession`; the session's extension runner then exposes the
+tool and hook. The runnable reference is [`js/pi-full/driver.js`](js/pi-full/driver.js):
+
+```js
+// the essence — see driver.js for the full session setup
+const factory = (await import("/abs/path/my-extension.ts")).default; // ← oxc transpiles the .ts
+const resourceLoader = new DefaultResourceLoader({
+  cwd, agentDir, settingsManager,
+  noExtensions: true,           // skip on-disk (jiti) discovery
+  extensionFactories: [factory] // inject ours — loaded via loadExtensionFromFactory, no jiti
+});
+await resourceLoader.reload();
+const { session } = await createAgentSession({ model, resourceLoader, tools: ["echo"], /* … */ });
+```
+
+### What an extension can call
+
+Everything **import-resolves** (a bundled extension never crashes at load), but
+the surface splits into real, partial, and stub:
+
+| Module | Status |
+|---|---|
+| `fs`, `fs/promises` | **Real** (native) — read/write/append/readdir/mkdir/stat/exists/realpath/unlink, sync + callback + promise, plus `openSync`/`readSync` |
+| `path`, `buffer`, `events`, `util`, `stream`, `string_decoder`, `os`, `url`, `querystring`, `assert`, `timers`, `readline`, `module`, `process` | **Real** JS implementations |
+| `child_process` | **Real** `spawnSync` / `execSync` / `execFileSync` (native subprocess) |
+| `crypto` | **Partial** — `randomUUID` (real host entropy), `randomBytes`/`getRandomValues` (Math.random), `createHash`/`createHmac` use **FNV** (fast, **non-cryptographic** — fine for cache keys/ids, not for security) |
+| `http`, `https`, `net`, `tls`, `dns`, `zlib`, `vm`, `v8`, `worker_threads`, `async_hooks`, `perf_hooks`, `tty` | **Stub** — imports resolve; classic socket/server/client calls throw or no-op |
+
+For **networking**, use the global `fetch()` — real, streaming, and proxy-aware
+(routes through the native HTTP hub); `http.request`/`net.Socket` are stubbed
+toward it. Also available as globals: `Response`, `Headers`, `URL`,
+`URLSearchParams`, `ReadableStream`, `TextEncoder`/`TextDecoder`, `Blob`/`File`/
+`FormData`, `AbortController`, `structuredClone`, `Buffer`, `setTimeout`/`setImmediate`.
+
+**Bottom line:** an extension that reads/writes files, shells out, or calls an
+HTTP API runs unmodified. Socket servers, native compression, and worker threads
+do not yet — those builtins exist only so imports resolve. Adding a real one is
+one row in `crates/pocket-pi/src/node/builtins.rs` (the single source of truth for
+builtins) plus its JS shim.
+
+---
+
+## Embedding Pocket Pi (Rust API)
+
+If you're building a host on top of Pocket Pi — like `cat` — this is your surface.
+`PiRuntime` owns one QuickJS realm and is driven from a single thread; the host
+owns the `pump()` cadence.
 
 ```rust
 use pocket_pi::{PiRuntime, ToolResult};
 
 let mut rt = PiRuntime::new()?;
-rt.register_tool("current_time", |_args| {
-    ToolResult::text(format!("{}", now_unix()))
-});
-rt.on_event(|ev| println!("{}: {}", ev.kind, ev.raw));   // start/text/tool_*/end
-rt.boot(r#"{"model":"claude-opus-4-8","apiKey":"…","systemPrompt":"Be terse."}"#)?;
+
+// Native tools are Rust closures the agent calls by name.
+rt.register_tool("current_time", |_args| ToolResult::text(now_unix().to_string()));
+rt.on_event(|ev| println!("{}: {}", ev.kind, ev.raw));   // start / text / tool_* / end
+
+rt.boot(r#"{"model":"gpt-5.6","apiKey":"…","systemPrompt":"Be terse."}"#)?;
 rt.prompt("What time is it?")?;
 
 // Pump at whatever cadence suits the host — 2 Hz is plenty while streaming.
@@ -75,126 +149,80 @@ while !rt.is_idle() {
 }
 ```
 
-Run the demo (offline scripted answer with no key, real Anthropic stream with one):
+There are two ways to run pi on this API:
+
+- **The trimmed embeddable core** (default). `PiRuntime::new()` boots
+  `agent.bundle.js` — pi's `Agent` loop with the provider layer replaced by native
+  Rust `streamFn`s (Anthropic + OpenAI SSE). Drive it directly with
+  `boot` / `prompt` / `register_tool` / `pump`. Smallest footprint; best when you
+  want a lightweight agent and native tools, not pi's full CLI feature set.
+- **The full, unmodified `pi-coding-agent`** (Path B). Load the bundle with
+  `rt.run_module(".../pi-full.bundle.js")`, then drive `createAgentSession` — this
+  is what unlocks extensions, session persistence, and pi's own tool suite.
+  [`js/pi-full/driver.js`](js/pi-full/driver.js) is the reference harness.
+
+Other `PiRuntime` methods: `run_module`, `eval_script`, `get_global_json`,
+`load_plugin_ts` (native oxc transpile of an agent-authored TS plugin), `abort`,
+`is_idle`.
+
+---
+
+## How pi runs unmodified (Path B)
+
+QuickJS's module linker **null-derefs** (`js_inner_module_linking`,
+`quickjs.c:30806`) when you import `createAgentSession` and pull pi-coding-agent's
+~500-module circular graph — an engine-level bug on graphs that large. The fix is
+to hand QuickJS **one** module instead of five hundred: esbuild bundles the
+*unmodified* pi source into a single ES module (only `node:*` left external), and
+Pocket Pi's Node/Web layer satisfies it at runtime. Bundling isn't forking —
+every dependency is the real, unmodified upstream package.
 
 ```sh
-cargo test                                   # scripted turn + native tool round-trip
-ANTHROPIC_API_KEY=… cargo test -- live       # exercises the real streaming path
-cargo run -p pocket-pi --example chat -- "Say hi in three words."
+cd js && npm install
+node build-pi-full.mjs     # → crates/pocket-pi/js/pi-full.bundle.js (~13 MB, git-ignored)
 ```
 
-## Building the guest bundle
+**Staying in sync with upstream pi** is `npm update` + rebuild — no patches to
+carry. The bundle is git-ignored (a generated artifact), so the integration tests
+that use it are `#[ignore]` and run locally; the crate itself builds with only
+Rust.
 
-The JS guest is pre-bundled into `crates/pocket-pi/js/agent.bundle.js` and
-embedded with `include_str!`, so **building the crate needs only Rust** — no npm,
-no Node at build time either. To regenerate the bundle after editing `js/src/`:
+---
 
-```sh
-node js/build.mjs      # shells esbuild via npx; aliases pi-ai to a 4-symbol stub
-```
+## Footprint
 
-The bundle is pi's `Agent` + our Anthropic/OpenAI `streamFn`s + an offline
-scripted assistant. pi-ai (its ~5 MB of provider SDKs, TypeBox, and a 553 KB
-model table) is replaced at bundle time by `js/src/pi-ai-stub.js`, which
-reimplements the four symbols the core actually imports.
-
-## Staying in sync with upstream pi
-
-The concern this design takes seriously: **don't fork pi.** `pi-agent-core` — the
-loop that receives upstream feature updates — is a **real, unmodified npm
-dependency** (`js/package.json`), byte-identical to what `npm install` fetches.
-Syncing a new pi release is:
-
-```sh
-cd js && npm update @mariozechner/pi-agent-core && node build.mjs
-```
-
-The only deliberate substitution is the *provider layer* (`pi-ai`), replaced by a
-four-symbol stub plus native-Rust `streamFn`s — that's the "heavy Node dep →
-native op" rule, not a fork of pi's logic. (Upstream has since moved to the
-`@earendil-works` scope; following it is a one-line dependency bump.)
-
-## Plugins: agent-authored TypeScript, loaded at runtime
-
-Real pi loads extensions — **TypeScript files** — at runtime via `jiti` (a Node
-toolchain). Pocket Pi has no Node, so it does the same thing with a **native
-Rust transpiler**: [`oxc`](https://oxc.rs) strips the types and QuickJS evaluates
-the result. The agent can write and install its own tools mid-session:
-
-```rust
-rt.load_plugin_ts("adder", r#"
-    export default (api) => api.addTool({
-        name: "add", description: "add two numbers",
-        parameters: { type:"object", properties:{ a:{type:"number"}, b:{type:"number"} }, required:["a","b"] },
-        execute: (args: { a: number; b: number }): string => String(args.a + args.b),
-    });
-"#)?;
-```
-
-Boot with `"selfExtend": true` and the agent gets a `define_plugin` tool, so it
-can author a `.ts` plugin itself; the tools it registers are callable on its next
-turn (tools are read at run start, matching pi's extension model). A plugin is a
-single file that `export default`s a factory `(api) => void`; `api.addTool`,
-`api.onEvent`, `api.callHostTool`, and `api.log` are the current surface (a lean
-subset of pi's `ExtensionAPI` — the "Option A" scope).
-
-## Footprint vs shipping pi on bun / node
-
-A standalone Pocket Pi binary **includes** pi's core, LLM streaming, **and** the
-TypeScript transpiler for plugins — where the bun/node path gets runtime TS from
-`jiti` + `typescript` inside a heavy `node_modules`:
+The runtime is tiny. The trimmed embeddable core ships as a single self-contained
+binary — QuickJS + pi's `Agent` core + LLM streaming + the oxc TypeScript loader,
+with **nothing to `npm install` at the destination**:
 
 | Shipping pi as… | Size |
 |---|---|
-| **Pocket Pi** — single self-contained binary (QuickJS + pi core + streaming + oxc TS) | **5.9 MB** |
+| **Pocket Pi** — trimmed core, single self-contained binary | **5.9 MB** |
 | `bun build --compile` (providers external; embeds JavaScriptCore) | 61 MB |
 | node runtime + `node_modules` (pi-agent-core + pi-ai + deps, 106 pkgs) | 114 MB + 131 MB |
 
-~**10× smaller than a bun-compiled pi, ~40× smaller than node + node_modules** —
-and nothing to `npm install` at the destination.
+Running the *full* unmodified pi adds the ~13 MB JS bundle, loaded at runtime — a
+generated artifact, not a `node_modules` tree.
 
-## Status
+---
 
-- ✅ pi `Agent` core boots and drives multi-turn tool loops inside QuickJS.
-- ✅ Anthropic streaming `streamFn` (raw SSE, `input_json_delta` tool streaming,
-  image tool-results) — wired and unit-tested against the scripted path; the live
-  path compiles and is covered by an env-gated test.
-- ✅ OpenAI provider too (Chat Completions streaming, gpt-5.x); system proxy.
-- ✅ Coalesced 2 Hz+ frame scheduler; tools round-trip through native Rust.
-- ✅ Agent-authored **TypeScript plugins** loaded at runtime (oxc transpiler),
-  including agent self-extension via `define_plugin`.
-- 🚧 **Node-compat runtime (in progress)** — the path to running *unmodified*
-  `pi-coding-agent` and its real extensions.
-  - **M1 — module system:** rquickjs resolver/loader; relative + `node_modules`
-    (exports/module/main) + `node:` builtins; on-the-fly `.ts` transpile;
-    builtins `path`/`os`/`fs`/`events`/`util`/`buffer`/`process` over native ops.
-  - **M2 — Web globals + real pi code:** WHATWG `fetch`→`Response`→`ReadableStream`
-    (native raw-HTTP backing, driven by the frame pump), `Headers`, `URL`,
-    `TextEncoder`/`TextDecoder`, `atob`/`btoa`, `crypto.getRandomValues` — proven
-    against a live endpoint. And **real, unmodified pi-ai code loads and runs**
-    from `node_modules` through the loader.
-  - **M3 — CommonJS interop + full builtin surface.** The transitive tree has
-    ~90 CJS-only packages (chalk's `ansi-styles`/`color-convert`, `debug`, `yaml`,
-    `cli-highlight`, …), so CJS *is* required: a synchronous `require`, a
-    cjs-module-lexer for named exports, and an ESM bridge (CJS wrapped as ESM).
-    Plus `child_process`/`crypto`/`url`/`module`/`stream`/`string_decoder`/
-    `readline`/`perf_hooks`/`tty`/`fs/promises`/`stream/promises` and a broad `fs`
-    surface; subpath (`exports["./x"]`) and internal (`#x`) resolution. The loader
-    now clears the *entire* Node + CJS dependency surface of pi-coding-agent.
-  - **M4 — ESM cycle rewrite:** indirect re-exports (`export { x } from "./y"`)
-    are rewritten to `import { x as _local } from "./y"; export { _local as x }`,
-    which sidesteps QuickJS's "circular reference" on pi-coding-agent's cyclic
-    graph. This lets it link *hundreds* of real pi modules.
-  - **Now blocked on:** importing `createAgentSession` pulls pi-coding-agent's
-    entire ~500-module graph (including the interactive TUI), and QuickJS's module
-    linker **null-derefs** (`js_inner_module_linking`, `quickjs.c:30806`) on a
-    circular structure that large — an engine-level bug. Two paths under
-    evaluation: patch/upgrade the bundled QuickJS, or **build-time bundle** the
-    unmodified pi source into one module (sidesteps the multi-module linker,
-    reuses this whole Node-compat runtime), with extensions still runtime-loaded.
-- ⛔ Not hardened: two providers, permissive tool-arg validation, no session
-  persistence/compaction, and the plugin API is a lean subset of pi's
-  `ExtensionAPI` (single-file plugins, no value imports). A PoC substrate, not
-  pi's full CLI.
+## Build & test
+
+```sh
+cargo test                     # unit + module-system suite (23 tests); no bundle needed
+cargo clippy --workspace --all-targets -- -D warnings
+
+# Path B integration tests are #[ignore] — build the bundle first:
+cd js && npm install && node build-pi-full.mjs
+cargo test -p pocket-pi loads_bundled_pi_coding_agent   -- --ignored   # bundle evaluates
+cargo test -p pocket-pi binds_extension_into_session    -- --ignored   # extension binds to a session (offline)
+cargo test -p pocket-pi persists_and_resumes_session    -- --ignored   # session round-trips to disk (offline)
+
+# The turn tests need an API key + (here) a proxy:
+https_proxy=http://127.0.0.1:7897 OPENAI_API_KEY=… \
+  cargo test -p pocket-pi runs_bundled_pi_turn          -- --ignored --nocapture
+https_proxy=http://127.0.0.1:7897 OPENAI_API_KEY=… \
+  cargo test -p pocket-pi runs_pi_turn_with_extension_tool -- --ignored --nocapture
+```
 
 MIT.
