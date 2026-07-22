@@ -1,2 +1,4 @@
-// node:constants — minimal stub.
-export default {};
+var constants_default = {};
+export {
+  constants_default as default
+};

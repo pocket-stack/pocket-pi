@@ -469,7 +469,7 @@ fn loads_bundled_pi_coding_agent() {
 fn runs_bundled_pi_turn() {
     let manifest = env!("CARGO_MANIFEST_DIR");
     let bundle = format!("{manifest}/js/pi-full.bundle.js");
-    let driver = format!("{manifest}/../../js/pi-full/driver.js");
+    let driver = format!("{manifest}/js/pi-full/driver.js");
     if !std::path::Path::new(&bundle).exists() {
         eprintln!("skip: bundle not built");
         return;
@@ -532,8 +532,8 @@ fn runs_bundled_pi_turn() {
 fn loads_pi_extension_via_our_loader() {
     let manifest = env!("CARGO_MANIFEST_DIR");
     let bundle = format!("{manifest}/js/pi-full.bundle.js");
-    let probe = format!("{manifest}/../../js/pi-full/ext-probe.js");
-    let ext = format!("{manifest}/../../js/pi-full/example-extension.ts");
+    let probe = format!("{manifest}/js/pi-full/ext-probe.js");
+    let ext = format!("{manifest}/../../js/src/pi-full/example-extension.ts");
     if !std::path::Path::new(&bundle).exists() {
         eprintln!("skip: bundle not built");
         return;
@@ -597,8 +597,8 @@ fn drive_session(rt: &mut PiRuntime, opts_json: &str, max_secs: f64) -> bool {
 fn binds_extension_into_session() {
     let manifest = env!("CARGO_MANIFEST_DIR");
     let bundle = format!("{manifest}/js/pi-full.bundle.js");
-    let driver = format!("{manifest}/../../js/pi-full/driver.js");
-    let ext = format!("{manifest}/../../js/pi-full/example-extension.ts");
+    let driver = format!("{manifest}/js/pi-full/driver.js");
+    let ext = format!("{manifest}/../../js/src/pi-full/example-extension.ts");
     if !std::path::Path::new(&bundle).exists() {
         eprintln!("skip: bundle not built");
         return;
@@ -631,8 +631,8 @@ fn binds_extension_into_session() {
 fn runs_pi_turn_with_extension_tool() {
     let manifest = env!("CARGO_MANIFEST_DIR");
     let bundle = format!("{manifest}/js/pi-full.bundle.js");
-    let driver = format!("{manifest}/../../js/pi-full/driver.js");
-    let ext = format!("{manifest}/../../js/pi-full/example-extension.ts");
+    let driver = format!("{manifest}/js/pi-full/driver.js");
+    let ext = format!("{manifest}/../../js/src/pi-full/example-extension.ts");
     if !std::path::Path::new(&bundle).exists() {
         eprintln!("skip: bundle not built");
         return;
@@ -674,7 +674,7 @@ fn runs_pi_turn_with_extension_tool() {
 fn persists_and_resumes_session() {
     let manifest = env!("CARGO_MANIFEST_DIR");
     let bundle = format!("{manifest}/js/pi-full.bundle.js");
-    let probe = format!("{manifest}/../../js/pi-full/persist-probe.js");
+    let probe = format!("{manifest}/js/pi-full/persist-probe.js");
     if !std::path::Path::new(&bundle).exists() {
         eprintln!("skip: bundle not built");
         return;

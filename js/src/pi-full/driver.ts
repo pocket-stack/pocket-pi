@@ -89,7 +89,7 @@
       });
       if (resourceLoader.reload) await resourceLoader.reload();
 
-      const sessionOpts = {
+      const sessionOpts: Record<string, any> = {
         model: MODEL,
         modelRuntime,
         settingsManager,

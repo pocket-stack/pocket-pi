@@ -1,2 +1,4 @@
-// node:vm — minimal stub.
-export default {};
+var vm_default = {};
+export {
+  vm_default as default
+};

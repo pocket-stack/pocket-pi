@@ -1,26 +1,41 @@
-// node:events — EventEmitter, pure JS.
-export class EventEmitter {
+class EventEmitter {
   constructor() {
-    this._events = new Map();
+    this._events = /* @__PURE__ */ new Map();
     this._maxListeners = 10;
   }
-  setMaxListeners(n) { this._maxListeners = n; return this; }
-  getMaxListeners() { return this._maxListeners; }
+  setMaxListeners(n) {
+    this._maxListeners = n;
+    return this;
+  }
+  getMaxListeners() {
+    return this._maxListeners;
+  }
   on(type, fn) {
     let arr = this._events.get(type);
-    if (!arr) { arr = []; this._events.set(type, arr); }
+    if (!arr) {
+      arr = [];
+      this._events.set(type, arr);
+    }
     arr.push(fn);
     return this;
   }
-  addListener(type, fn) { return this.on(type, fn); }
+  addListener(type, fn) {
+    return this.on(type, fn);
+  }
   once(type, fn) {
-    const wrap = (...args) => { this.off(type, wrap); fn(...args); };
+    const wrap = (...args) => {
+      this.off(type, wrap);
+      fn(...args);
+    };
     wrap.listener = fn;
     return this.on(type, wrap);
   }
   prependListener(type, fn) {
     let arr = this._events.get(type);
-    if (!arr) { arr = []; this._events.set(type, arr); }
+    if (!arr) {
+      arr = [];
+      this._events.set(type, arr);
+    }
     arr.unshift(fn);
     return this;
   }
@@ -32,9 +47,11 @@ export class EventEmitter {
     }
     return this;
   }
-  removeListener(type, fn) { return this.off(type, fn); }
+  removeListener(type, fn) {
+    return this.off(type, fn);
+  }
   removeAllListeners(type) {
-    if (type === undefined) this._events.clear();
+    if (type === void 0) this._events.clear();
     else this._events.delete(type);
     return this;
   }
@@ -47,16 +64,26 @@ export class EventEmitter {
     for (const fn of arr.slice()) fn.apply(this, args);
     return true;
   }
-  listeners(type) { return (this._events.get(type) || []).slice(); }
-  listenerCount(type) { return (this._events.get(type) || []).length; }
-  eventNames() { return [...this._events.keys()]; }
+  listeners(type) {
+    return (this._events.get(type) || []).slice();
+  }
+  listenerCount(type) {
+    return (this._events.get(type) || []).length;
+  }
+  eventNames() {
+    return [...this._events.keys()];
+  }
 }
-export const once = (emitter, name) =>
-  new Promise((resolve, reject) => {
-    emitter.once(name, (...args) => resolve(args));
-    emitter.once("error", reject);
-  });
-export default EventEmitter;
+const once = (emitter, name) => new Promise((resolve, reject) => {
+  emitter.once(name, (...args) => resolve(args));
+  emitter.once("error", reject);
+});
+var events_default = EventEmitter;
 EventEmitter.EventEmitter = EventEmitter;
 EventEmitter.once = once;
 EventEmitter.defaultMaxListeners = 10;
+export {
+  EventEmitter,
+  events_default as default,
+  once
+};

@@ -1,12 +1,19 @@
-// node:stream/promises
-export function pipeline(...args) {
+function pipeline(...args) {
   if (typeof args[args.length - 1] === "function") args.pop();
   return Promise.resolve();
 }
-export function finished(stream) {
+function finished(stream) {
   return new Promise((res) => {
-    if (stream && stream.on) { stream.on("end", res); stream.on("finish", res); }
+    if (stream && stream.on) {
+      stream.on("end", res);
+      stream.on("finish", res);
+    }
     queueMicrotask(res);
   });
 }
-export default { pipeline, finished };
+var stream_promises_default = { pipeline, finished };
+export {
+  stream_promises_default as default,
+  finished,
+  pipeline
+};
