@@ -209,6 +209,9 @@ extensions), TLS `rustls`+`ring` (~0.6 MB), `regex` (~0.5 MB), and QuickJS (~0.5
 ## Build & test
 
 ```sh
+# Acceptance: a self-contained ~8.9 MB binary carrying the whole pi says hello.
+OPENAI_API_KEY=…  cargo run --release --example hello    # → "Hello! Nice to meet you."
+
 # The full pi bundle is committed + embedded, so the whole suite runs with only
 # Rust — no Node, no build step. This includes the offline pi tests: it loads,
 # an extension binds to a session, sessions persist to disk.
