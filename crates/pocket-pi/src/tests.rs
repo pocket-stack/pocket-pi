@@ -24,185 +24,32 @@ fn collector() -> (Rc<RefCell<Vec<HostEvent>>>, impl FnMut(&HostEvent) + 'static
     (sink, move |ev: &HostEvent| s.borrow_mut().push(ev.clone()))
 }
 
-#[test]
-fn boots_the_pi_agent_core() {
-    let (sink, cb) = collector();
-    let mut rt = PiRuntime::new().expect("runtime");
-    rt.on_event(cb);
-    rt.boot(r#"{"model":"test","scripted":{"steps":[{"text":"hello"}]}}"#)
-        .expect("boot");
-    let kinds: Vec<String> = sink.borrow().iter().map(|e| e.kind.clone()).collect();
-    assert!(kinds.contains(&"booted".to_string()), "got {kinds:?}");
+/// Assemble the assistant reply the way the host does: streamed `text` deltas,
+/// with an `assistant_text` full-text emit as a fallback.
+fn reply_text(events: &[HostEvent]) -> String {
+    let mut out = String::new();
+    for e in events {
+        match e.kind.as_str() {
+            "text" => {
+                if let Some(d) = e.value.get("delta").and_then(|v| v.as_str()) {
+                    out.push_str(d);
+                }
+            }
+            "assistant_text" if out.is_empty() => {
+                if let Some(t) = e.value.get("text").and_then(|v| v.as_str()) {
+                    out = t.to_string();
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
-#[test]
-fn scripted_text_turn_completes() {
-    let (sink, cb) = collector();
-    let mut rt = PiRuntime::new().expect("runtime");
-    rt.on_event(cb);
-    rt.boot(r#"{"model":"test","scripted":{"steps":[{"text":"three word answer"}]}}"#)
-        .expect("boot");
-    rt.prompt("say something").expect("prompt");
-    run(&mut rt, sink.clone(), 2.0, 5.0);
 
-    let events = sink.borrow();
-    let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
-    assert!(kinds.contains(&"start"), "no start in {kinds:?}");
-    assert!(kinds.contains(&"assistant_text"), "no assistant_text in {kinds:?}");
-    assert!(kinds.contains(&"end"), "no end in {kinds:?}");
 
-    let text = events
-        .iter()
-        .find(|e| e.kind == "assistant_text")
-        .and_then(|e| e.value.get("text").and_then(|v| v.as_str()))
-        .unwrap_or("");
-    assert_eq!(text, "three word answer");
-    assert!(rt.is_idle());
-}
 
-#[test]
-fn scripted_tool_call_round_trips_through_native_rust() {
-    let (sink, cb) = collector();
-    let mut rt = PiRuntime::new().expect("runtime");
-    rt.on_event(cb);
 
-    let tool_calls = Rc::new(RefCell::new(0u32));
-    let tc = tool_calls.clone();
-    rt.register_tool("get_secret", move |args| {
-        *tc.borrow_mut() += 1;
-        let who = args.get("who").and_then(|v| v.as_str()).unwrap_or("world");
-        ToolResult::text(format!("secret for {who} is 42"))
-    });
-
-    // Turn 1: the model calls the tool. Turn 2 (loop re-drives): it answers.
-    rt.boot(
-        r#"{"model":"test","tools":[{"name":"get_secret","description":"get the secret",
-        "parameters":{"type":"object","properties":{"who":{"type":"string"}}}}],
-        "scripted":{"steps":[{"toolCall":{"name":"get_secret","arguments":{"who":"cat"}}},
-        {"text":"the secret is 42"}]}}"#,
-    )
-    .expect("boot");
-    rt.prompt("what is the secret for cat?").expect("prompt");
-    run(&mut rt, sink.clone(), 2.0, 5.0);
-
-    assert_eq!(*tool_calls.borrow(), 1, "tool should run exactly once");
-    let events = sink.borrow();
-    let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
-    assert!(kinds.contains(&"tool_start"), "no tool_start in {kinds:?}");
-    assert!(kinds.contains(&"tool_end"), "no tool_end in {kinds:?}");
-    assert!(kinds.contains(&"assistant_text"), "no assistant_text in {kinds:?}");
-    assert!(kinds.contains(&"end"), "no end in {kinds:?}");
-}
-
-/// The Option-A capability: an agent-authored **TypeScript** plugin is
-/// transpiled natively (oxc) and loaded into the live realm, registering a new
-/// tool the agent then calls — no Node, no build step.
-#[test]
-fn loads_a_typescript_plugin_and_calls_its_tool() {
-    let (sink, cb) = collector();
-    let mut rt = PiRuntime::new().expect("runtime");
-    rt.on_event(cb);
-
-    // Boot with NO tools; the plugin adds one at runtime.
-    rt.boot(
-        r#"{"model":"test","scripted":{"steps":[
-            {"toolCall":{"name":"add","arguments":{"a":2,"b":3}}},
-            {"text":"the sum is 5"}
-        ]}}"#,
-    )
-    .expect("boot");
-
-    // A real TypeScript plugin: types, an interface, an arrow fn with a cast.
-    let plugin_ts = r#"
-interface AddArgs { a: number; b: number }
-export default function (api: any): void {
-    api.addTool({
-        name: "add",
-        description: "Add two numbers",
-        parameters: {
-            type: "object",
-            properties: { a: { type: "number" }, b: { type: "number" } },
-            required: ["a", "b"],
-        },
-        execute: (args: AddArgs): string => {
-            const sum: number = (args.a as number) + (args.b as number);
-            api.log("sum=" + sum);
-            return String(sum);
-        },
-    });
-}
-"#;
-    rt.load_plugin_ts("adder", plugin_ts).expect("load plugin");
-
-    rt.prompt("add 2 and 3").expect("prompt");
-    run(&mut rt, sink.clone(), 4.0, 5.0);
-
-    let events = sink.borrow();
-    let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
-    assert!(kinds.contains(&"plugin_loaded"), "plugin not loaded: {kinds:?}");
-    assert!(kinds.contains(&"tool_start"), "tool not called: {kinds:?}");
-    // The plugin's TS logic actually ran with the right args → sum=5.
-    let logged = events.iter().any(|e| {
-        e.kind == "plugin_log"
-            && e.value.get("message").and_then(|v| v.as_str()) == Some("sum=5")
-    });
-    assert!(logged, "plugin tool didn't compute correctly: {kinds:?}");
-}
-
-/// Self-extension: the agent calls `define_plugin` to author a tool in
-/// TypeScript, then calls that very tool on the next turn — pi's "the agent
-/// extends its own harness" loop, on the no-Node runtime.
-#[test]
-fn agent_writes_and_uses_its_own_plugin() {
-    let (sink, cb) = collector();
-    let mut rt = PiRuntime::new().expect("runtime");
-    rt.on_event(cb);
-
-    // The agent's scripted turns: (1) write a plugin in TypeScript, (2) call it.
-    let plugin_src = r#"
-export default (api: any) => {
-    api.addTool({
-        name: "shout",
-        description: "uppercase a word",
-        parameters: { type: "object", properties: { word: { type: "string" } }, required: ["word"] },
-        execute: (a: { word: string }): string => {
-            const s: string = a.word.toUpperCase();
-            api.log("shouted=" + s);
-            return s;
-        },
-    });
-};
-"#;
-    // A self-authored tool becomes available on the NEXT prompt (tools are read
-    // at run start), matching pi's extension model — so: prompt 1 defines it,
-    // prompt 2 uses it.
-    let cfg = serde_json::json!({
-        "model": "test",
-        "selfExtend": true,
-        "scripted": { "steps": [
-            { "toolCall": { "name": "define_plugin",
-                "arguments": { "name": "shouter", "typescript": plugin_src } } },
-            { "text": "made a shout tool" },
-            { "toolCall": { "name": "shout", "arguments": { "word": "meow" } } },
-            { "text": "MEOW" }
-        ]}
-    });
-    rt.boot(&cfg.to_string()).expect("boot");
-    rt.prompt("make a shout tool").expect("prompt");
-    run(&mut rt, sink.clone(), 4.0, 6.0);
-    rt.prompt("now shout meow").expect("prompt");
-    run(&mut rt, sink.clone(), 4.0, 6.0);
-
-    let events = sink.borrow();
-    let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
-    assert!(kinds.contains(&"plugin_loaded"), "plugin not loaded: {kinds:?}");
-    // The self-authored tool actually ran with the right arg.
-    let shouted = events.iter().any(|e| {
-        e.kind == "plugin_log"
-            && e.value.get("message").and_then(|v| v.as_str()) == Some("shouted=MEOW")
-    });
-    assert!(shouted, "self-authored tool didn't run correctly: {kinds:?}");
-}
 
 /// Milestone 1 of the Node-compat runtime: the module system resolves + loads
 /// real modules — a relative `.ts` file (transpiled), `node:` builtins, and a
@@ -393,11 +240,7 @@ fn live_openai_turn() {
         eprintln!("openai error raw: {}", e.raw);
     }
     assert!(kinds.contains(&"end"), "turn did not complete: {kinds:?}");
-    let text = events
-        .iter()
-        .find(|e| e.kind == "assistant_text")
-        .and_then(|e| e.value.get("text").and_then(|v| v.as_str()))
-        .unwrap_or("");
+    let text = reply_text(&events);
     eprintln!("live openai said: {text:?}");
     assert!(!text.is_empty(), "no assistant text");
 }
@@ -426,36 +269,26 @@ fn live_anthropic_turn() {
     let events = sink.borrow();
     let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
     assert!(kinds.contains(&"end"), "turn did not complete: {kinds:?}");
-    let text = events
-        .iter()
-        .find(|e| e.kind == "assistant_text")
-        .and_then(|e| e.value.get("text").and_then(|v| v.as_str()))
-        .unwrap_or("");
+    let text = reply_text(&events);
     eprintln!("live model said: {text:?}");
     assert!(!text.is_empty(), "no assistant text");
 }
 
-/// Path B: load the esbuild-bundled UNMODIFIED pi-coding-agent (one module) and
-/// confirm it evaluates — sidestepping the QuickJS multi-module linker crash.
-/// Run with `cargo test -- --ignored loads_bundled_pi_coding_agent --nocapture`.
-#[ignore]
+/// The full, unmodified pi-coding-agent is embedded and loaded by every
+/// `PiRuntime::new()`: `globalThis.PiFull` (createAgentSession, …) and the
+/// `PocketPi` host harness are both present with no external bundle, no network.
 #[test]
-fn loads_bundled_pi_coding_agent() {
-    let manifest = env!("CARGO_MANIFEST_DIR");
-    let bundle = format!("{manifest}/js/pi-full.bundle.js");
-    if !std::path::Path::new(&bundle).exists() {
-        eprintln!("skip: bundle not built (node js/build-pi-full.mjs)");
-        return;
-    }
+fn new_embeds_and_loads_full_pi() {
     let mut rt = PiRuntime::new().expect("runtime");
-    match rt.run_module(&bundle) {
-        Ok(()) => {
-            let loaded = rt.get_global_json("__piFullLoaded");
-            eprintln!("BUNDLE LOADED: __piFullLoaded = {loaded:?}");
-            assert_eq!(loaded, Some(serde_json::Value::Bool(true)), "createAgentSession not exported");
-        }
-        Err(e) => panic!("BUNDLE LOAD FAILED: {e}"),
-    }
+    assert_eq!(
+        rt.get_global_json("__piFullLoaded"),
+        Some(serde_json::Value::Bool(true)),
+        "full pi did not initialize in new()"
+    );
+    // The host harness is wired too.
+    rt.eval_script("globalThis.__hasPocketPi = typeof globalThis.PocketPi?.boot === 'function';")
+        .expect("probe");
+    assert_eq!(rt.get_global_json("__hasPocketPi"), Some(serde_json::Value::Bool(true)));
 }
 
 /// Path B end-to-end: stand up an AgentSession from the UNMODIFIED bundled
@@ -468,12 +301,7 @@ fn loads_bundled_pi_coding_agent() {
 #[test]
 fn runs_bundled_pi_turn() {
     let manifest = env!("CARGO_MANIFEST_DIR");
-    let bundle = format!("{manifest}/js/pi-full.bundle.js");
     let driver = format!("{manifest}/js/pi-full/driver.js");
-    if !std::path::Path::new(&bundle).exists() {
-        eprintln!("skip: bundle not built");
-        return;
-    }
     let key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
     if key.is_empty() {
         eprintln!("skip: OPENAI_API_KEY not set");
@@ -481,7 +309,6 @@ fn runs_bundled_pi_turn() {
     }
 
     let mut rt = PiRuntime::new().expect("runtime");
-    rt.run_module(&bundle).expect("bundle load");
     // Inject the key as a global (kept out of logs) then load the driver script.
     rt.eval_script(&format!("globalThis.__OPENAI_KEY = {key:?};")).expect("inject key");
     let driver_src = std::fs::read_to_string(&driver).expect("driver.js");
@@ -527,20 +354,13 @@ fn runs_bundled_pi_turn() {
 /// pi's unmodified `loadExtensionFromFactory`. Asserts the extension's tool and
 /// lifecycle hook register. Offline; only needs the built bundle. Run with:
 ///   cargo test -p pocket-pi loads_pi_extension_via_our_loader -- --ignored --nocapture
-#[ignore]
 #[test]
 fn loads_pi_extension_via_our_loader() {
     let manifest = env!("CARGO_MANIFEST_DIR");
-    let bundle = format!("{manifest}/js/pi-full.bundle.js");
     let probe = format!("{manifest}/js/pi-full/ext-probe.js");
     let ext = format!("{manifest}/../../js/src/pi-full/example-extension.ts");
-    if !std::path::Path::new(&bundle).exists() {
-        eprintln!("skip: bundle not built");
-        return;
-    }
 
     let mut rt = PiRuntime::new().expect("runtime");
-    rt.run_module(&bundle).expect("bundle load");
     let probe_src = std::fs::read_to_string(&probe).expect("ext-probe.js");
     rt.eval_script(&probe_src).expect("probe eval");
     rt.eval_script(&format!("globalThis.__piLoadExtension({ext:?});"))
@@ -592,19 +412,12 @@ fn drive_session(rt: &mut PiRuntime, opts_json: &str, max_secs: f64) -> bool {
 /// first-class `extensionFactories` seam (no jiti, no network) and confirm the
 /// session's ExtensionRunner picked up the hook and tool. Offline; bundle-gated.
 ///   cargo test -p pocket-pi binds_extension_into_session -- --ignored --nocapture
-#[ignore]
 #[test]
 fn binds_extension_into_session() {
     let manifest = env!("CARGO_MANIFEST_DIR");
-    let bundle = format!("{manifest}/js/pi-full.bundle.js");
     let driver = format!("{manifest}/js/pi-full/driver.js");
     let ext = format!("{manifest}/../../js/src/pi-full/example-extension.ts");
-    if !std::path::Path::new(&bundle).exists() {
-        eprintln!("skip: bundle not built");
-        return;
-    }
     let mut rt = PiRuntime::new().expect("runtime");
-    rt.run_module(&bundle).expect("bundle load");
     rt.eval_script(&std::fs::read_to_string(&driver).expect("driver.js")).expect("driver eval");
 
     let opts = serde_json::json!({ "extensionPath": ext }).to_string();
@@ -630,20 +443,14 @@ fn binds_extension_into_session() {
 #[test]
 fn runs_pi_turn_with_extension_tool() {
     let manifest = env!("CARGO_MANIFEST_DIR");
-    let bundle = format!("{manifest}/js/pi-full.bundle.js");
     let driver = format!("{manifest}/js/pi-full/driver.js");
     let ext = format!("{manifest}/../../js/src/pi-full/example-extension.ts");
-    if !std::path::Path::new(&bundle).exists() {
-        eprintln!("skip: bundle not built");
-        return;
-    }
     let key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
     if key.is_empty() {
         eprintln!("skip: OPENAI_API_KEY not set");
         return;
     }
     let mut rt = PiRuntime::new().expect("runtime");
-    rt.run_module(&bundle).expect("bundle load");
     rt.eval_script(&format!("globalThis.__OPENAI_KEY = {key:?};")).expect("inject key");
     rt.eval_script(&std::fs::read_to_string(&driver).expect("driver.js")).expect("driver eval");
 
@@ -669,22 +476,15 @@ fn runs_pi_turn_with_extension_tool() {
 /// Pocket Pi's fs builtin), then resume it in a fresh manager and confirm the
 /// history round-trips. Offline; bundle-gated. Run with:
 ///   cargo test -p pocket-pi persists_and_resumes_session -- --ignored --nocapture
-#[ignore]
 #[test]
 fn persists_and_resumes_session() {
     let manifest = env!("CARGO_MANIFEST_DIR");
-    let bundle = format!("{manifest}/js/pi-full.bundle.js");
     let probe = format!("{manifest}/js/pi-full/persist-probe.js");
-    if !std::path::Path::new(&bundle).exists() {
-        eprintln!("skip: bundle not built");
-        return;
-    }
     let dir = std::env::temp_dir().join(format!("pocket-pi-sess-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
     let mut rt = PiRuntime::new().expect("runtime");
-    rt.run_module(&bundle).expect("bundle load");
     rt.eval_script(&std::fs::read_to_string(&probe).expect("persist-probe.js")).expect("probe eval");
     rt.eval_script(&format!("globalThis.__piPersist({:?});", dir.to_str().unwrap())).expect("run persist");
     rt.pump().expect("pump");
@@ -710,23 +510,6 @@ fn persists_and_resumes_session() {
     assert!(files.iter().any(|f| f.to_string_lossy().ends_with(".jsonl")), "no .jsonl session file on disk");
 }
 
-/// Self-contained distribution path: load the full, unmodified pi-coding-agent
-/// from the EMBEDDED gzip bundle (no external .js file). Requires the crate built
-/// with `embed-full-pi` (and `node js/build-pi-full.mjs` run first). Run with:
-///   cargo test -p pocket-pi --features embed-full-pi loads_embedded_full_pi -- --ignored --nocapture
-#[cfg(feature = "embed-full-pi")]
-#[ignore]
-#[test]
-fn loads_embedded_full_pi() {
-    assert!(embedded_full_pi_bundle().is_some(), "bundle not embedded");
-    let mut rt = PiRuntime::new().expect("runtime");
-    rt.load_full_pi().expect("load embedded full pi");
-    assert_eq!(
-        rt.get_global_json("__piFullLoaded"),
-        Some(serde_json::Value::Bool(true)),
-        "embedded full pi did not initialize"
-    );
-}
 
 /// WIP integration probe toward loading unmodified pi-coding-agent. Run with
 /// `cargo test -- --ignored probe_pi_coding_agent --nocapture`. Currently clears

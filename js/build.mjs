@@ -56,10 +56,11 @@ await esbuild.build({
   logLevel: "warning",
 });
 
-// 3. Test-harness scripts (eval'd as plain scripts by the Rust tests).
+// 3. The host harness (PocketPi on full pi) + test-harness scripts, eval'd as
+//    plain scripts by the runtime / the Rust tests.
 console.log("• harness scripts → crates/pocket-pi/js/pi-full");
 await esbuild.build({
-  entryPoints: ["driver", "ext-probe", "persist-probe"].map((n) => join(here, `src/pi-full/${n}.ts`)),
+  entryPoints: ["host", "driver", "ext-probe", "persist-probe"].map((n) => join(here, `src/pi-full/${n}.ts`)),
   outdir: join(outJs, "pi-full"),
   bundle: false,
   format: "esm",
@@ -67,25 +68,7 @@ await esbuild.build({
   logLevel: "warning",
 });
 
-// 4. Trimmed core bundle (pi's Agent loop + native streamFns; pi-ai stubbed).
-console.log("• trimmed bundle → agent.bundle.js");
-await esbuild.build({
-  entryPoints: [join(here, "src/trimmed/entry.ts")],
-  outfile: join(outJs, "agent.bundle.js"),
-  bundle: true,
-  format: "iife",
-  platform: "neutral",
-  legalComments: "none",
-  alias: {
-    "@earendil-works/pi-ai": join(here, "src/trimmed/pi-ai-stub.ts"),
-    // Resolve the real, unmodified upstream by its entry (avoids esbuild's
-    // platform=neutral exports-map quirk).
-    "@earendil-works/pi-agent-core": join(nm, "@earendil-works/pi-agent-core/dist/index.js"),
-  },
-  logLevel: "warning",
-});
-
-// 5. Full, unmodified pi-coding-agent bundle. Whitespace-minify only (identifier
+// 4. Full, unmodified pi-coding-agent bundle. Whitespace-minify only (identifier
 //    and syntax minification emit tokens the embedded QuickJS parser rejects);
 //    line-limit wraps the long lines QuickJS chokes on; undici → stub.
 console.log("• full pi bundle → pi-full.bundle.js(.gz)");

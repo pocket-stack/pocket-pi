@@ -1,12 +1,16 @@
 //! # Pocket Pi
 //!
-//! A QuickJS runtime that runs the **pi coding-agent core** — `@mariozechner/pi-agent-core`
-//! — with **no Node and no bun**, on a PocketJS-style **coalesced frame scheduler**.
+//! A QuickJS runtime that runs the **whole, unmodified `pi-coding-agent`** — the
+//! real agent, sessions, extensions, and tool suite — with **no Node and no
+//! bun**, on a PocketJS-style **coalesced frame scheduler**. The full pi bundle
+//! is embedded in the crate, so [`PiRuntime::new`] stands it up self-contained.
 //!
-//! The agent loop, LLM streaming, tool dispatch, and message state are pi's own
-//! JS, evaluated in one QuickJS realm. Everything Node-ish is provided natively:
-//! HTTPS + SSE streaming runs on background threads and lands in a per-turn
-//! mailbox ([`http`]), and the realm is driven one **frame** at a time.
+//! The agent loop, LLM streaming, and message state are pi's own JS, evaluated in
+//! one QuickJS realm. Everything Node-ish is provided natively: HTTPS + SSE
+//! streaming runs on background threads and lands in a per-turn mailbox
+//! ([`http`]), and the realm is driven one **frame** at a time. Native
+//! capabilities (a host's own tools, like a screenshot grabber) bridge into pi as
+//! tools via [`PiRuntime::register_tool`].
 //!
 //! ## Why a frame scheduler for an agent
 //!
@@ -39,29 +43,25 @@ pub use http::HttpHub;
 
 const PRELUDE: &str = include_str!("../js/prelude.js");
 const WEB_GLOBALS: &str = include_str!("../js/web-globals.js");
-const AGENT_BUNDLE: &str = include_str!("../js/agent.bundle.js");
 
-/// The full, unmodified pi-coding-agent bundle, embedded gzip'd for a
-/// self-contained binary. Present only under the `embed-full-pi` feature.
-#[cfg(feature = "embed-full-pi")]
+/// The full, unmodified pi-coding-agent — the whole agent, sessions, extensions,
+/// tools — bundled to one ES module and embedded gzip'd. This IS the runtime:
+/// every `PiRuntime` loads it. Committed (~1.8 MB gz) so the crate builds with
+/// only Rust, no Node.
 const FULL_PI_GZ: &[u8] = include_bytes!("../js/pi-full.bundle.js.gz");
 
-/// The embedded full-pi bundle source (decompressed), or `None` when the crate
-/// was built without `embed-full-pi`. Lets a host ship one self-contained binary
-/// instead of shipping the ~9 MB `.js` alongside it.
-pub fn embedded_full_pi_bundle() -> Option<String> {
-    #[cfg(feature = "embed-full-pi")]
-    {
-        use std::io::Read;
-        let mut d = flate2::read::GzDecoder::new(FULL_PI_GZ);
-        let mut s = String::new();
-        d.read_to_string(&mut s).expect("gunzip embedded full-pi bundle");
-        Some(s)
-    }
-    #[cfg(not(feature = "embed-full-pi"))]
-    {
-        None
-    }
+/// The host harness: reimplements the `PocketPi.boot/prompt` API on top of the
+/// full pi bundle (native tools via `host.tool`, events via `host.emit`).
+const HOST_HARNESS: &str = include_str!("../js/pi-full/host.js");
+
+/// The embedded full-pi bundle source, decompressed. Lets a host ship one
+/// self-contained binary — the whole unmodified pi is inside the executable.
+pub fn embedded_full_pi_bundle() -> String {
+    use std::io::Read;
+    let mut d = flate2::read::GzDecoder::new(FULL_PI_GZ);
+    let mut s = String::new();
+    d.read_to_string(&mut s).expect("gunzip embedded full-pi bundle");
+    s
 }
 
 /// One event surfaced from the agent to the host, already decoded from the
@@ -153,7 +153,8 @@ impl PiRuntime {
             Ok(())
         })?;
 
-        // Prelude first (defines globals the bundle relies on), then the agent.
+        // Prelude first (defines globals the bundle relies on), then the full pi.
+        let full_pi = embedded_full_pi_bundle();
         ctx.with(|ctx| -> Result<(), String> {
             ctx.eval::<(), _>(PRELUDE.as_bytes())
                 .catch(&ctx)
@@ -166,9 +167,22 @@ impl PiRuntime {
             ctx.eval::<(), _>(WEB_GLOBALS.as_bytes())
                 .catch(&ctx)
                 .map_err(|e| format!("web-globals eval: {e}"))?;
-            ctx.eval::<(), _>(AGENT_BUNDLE.as_bytes())
+            // The full, unmodified pi-coding-agent (one ES module → globalThis.PiFull).
+            // Declare + set import.meta.url before evaluating, since this in-memory
+            // module bypasses the loader that normally sets it (pi derives __dirname
+            // from import.meta.url).
+            let declared = rquickjs::module::Module::declare(ctx.clone(), "pocket-pi:pi-full", full_pi.as_bytes())
                 .catch(&ctx)
-                .map_err(|e| format!("agent bundle eval: {e}"))?;
+                .map_err(|e| format!("pi-full declare: {e}"))?;
+            if let Ok(meta) = declared.meta() {
+                let _ = meta.set("url", "file:///pocket-pi/js/pi-full.bundle.js");
+            }
+            let (_evaluated, promise) = declared.eval().catch(&ctx).map_err(|e| format!("pi-full eval start: {e}"))?;
+            promise.finish::<()>().catch(&ctx).map_err(|e| format!("pi-full eval: {e}"))?;
+            // Host harness: PocketPi.boot/prompt on top of pi (native tools + events).
+            ctx.eval::<(), _>(HOST_HARNESS.as_bytes())
+                .catch(&ctx)
+                .map_err(|e| format!("host harness eval: {e}"))?;
             Ok(())
         })?;
 
@@ -202,8 +216,10 @@ impl PiRuntime {
             .insert(name.into(), Box::new(run));
     }
 
-    /// Boot the agent with a JSON config (`model`, `apiKey`, `systemPrompt`,
-    /// `tools:[{name,description,parameters}]`, or `scripted` for offline runs).
+    /// Stand up a pi session from a JSON config: `provider`, `model`, `apiKey`,
+    /// `systemPrompt`, `maxTokens`, and `tools:[{name,description,parameters}]`
+    /// (each `tool` bridges to a native closure registered via
+    /// [`register_tool`](Self::register_tool)). Blocks until the session is ready.
     pub fn boot(&mut self, config_json: &str) -> Result<(), String> {
         let cfg = config_json.to_string();
         self.ctx.with(|ctx| -> Result<(), String> {
@@ -217,8 +233,15 @@ impl PiRuntime {
                 .map_err(|e| format!("boot: {e}"))?;
             Ok(())
         })?;
-        self.drain_jobs();
-        self.flush_events();
+        // The harness stands up the pi session asynchronously (createAgentSession);
+        // drive the job queue until it signals ready. It's offline, so this settles
+        // in a few frames.
+        for _ in 0..500 {
+            self.pump()?;
+            if self.get_global_json("__ppBooted") == Some(serde_json::Value::Bool(true)) {
+                break;
+            }
+        }
         Ok(())
     }
 
@@ -238,26 +261,6 @@ impl PiRuntime {
         self.pump()
     }
 
-    /// Load an agent-authored **TypeScript** plugin at runtime. The source is
-    /// transpiled natively (oxc) and evaluated in the live realm; its default
-    /// export is a factory `(api) => void` that can register tools and hooks on
-    /// the running agent. This is the no-Node analogue of pi's jiti extension
-    /// loader — the agent can write and install its own tools mid-session.
-    pub fn load_plugin_ts(&mut self, name: &str, ts_source: &str) -> Result<(), String> {
-        let (name, ts) = (name.to_string(), ts_source.to_string());
-        self.ctx.with(|ctx| -> Result<(), String> {
-            let pp: Object = ctx.globals().get("PocketPi").map_err(|e| e.to_string())?;
-            let f: Function = pp.get("loadPlugin").map_err(|e| e.to_string())?;
-            f.call::<_, ()>((name, ts))
-                .catch(&ctx)
-                .map_err(|e| format!("loadPlugin: {e}"))?;
-            Ok(())
-        })?;
-        self.drain_jobs();
-        self.flush_events();
-        Ok(())
-    }
-
     /// Import and evaluate an ES module by specifier (absolute path, or a
     /// `node:` builtin), driving the Node resolver/loader — relative imports,
     /// `node_modules` packages, and `.ts` transpile all work. Milestone toward
@@ -272,37 +275,6 @@ impl PiRuntime {
                 .finish::<rquickjs::Value>()
                 .catch(&ctx)
                 .map_err(|e| format!("module eval: {e}"))?;
-            Ok(())
-        })?;
-        self.drain_jobs();
-        Ok(())
-    }
-
-    /// Evaluate the embedded full unmodified `pi-coding-agent` bundle (present
-    /// only when built with the `embed-full-pi` feature). This is the
-    /// self-contained distribution path — no external `.js` file. Returns an
-    /// error if the feature is off. On success `globalThis.PiFull` is populated.
-    pub fn load_full_pi(&mut self) -> Result<(), String> {
-        let src = embedded_full_pi_bundle()
-            .ok_or("full-pi bundle not embedded — build with `--features embed-full-pi`")?;
-        self.ctx.with(|ctx| -> Result<(), String> {
-            // Declare + set import.meta.url before evaluating — the loader that
-            // normally sets it is bypassed for this in-memory module, and pi
-            // derives __dirname from import.meta.url.
-            let declared = rquickjs::module::Module::declare(ctx.clone(), "pocket-pi:pi-full", src.as_bytes())
-                .catch(&ctx)
-                .map_err(|e| format!("pi-full declare: {e}"))?;
-            if let Ok(meta) = declared.meta() {
-                let _ = meta.set("url", "file:///pocket-pi/js/pi-full.bundle.js");
-            }
-            let (_evaluated, promise) = declared
-                .eval()
-                .catch(&ctx)
-                .map_err(|e| format!("pi-full eval start: {e}"))?;
-            promise
-                .finish::<()>()
-                .catch(&ctx)
-                .map_err(|e| format!("pi-full eval: {e}"))?;
             Ok(())
         })?;
         self.drain_jobs();

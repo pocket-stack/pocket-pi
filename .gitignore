@@ -3,6 +3,8 @@
 node_modules
 .DS_Store
 
-# Path B full-pi bundle (13 MB generated artifact; rebuild with `node js/build-pi-full.mjs`)
+# The raw full-pi bundle (~9 MB) is a build intermediate — rebuild with
+# `node js/build.mjs`. The gzip (pi-full.bundle.js.gz, ~1.8 MB) IS committed: the
+# crate embeds it (include_bytes!) so a plain `cargo build` — including from the
+# vendored submodule in cat — works with only Rust, no Node.
 crates/pocket-pi/js/pi-full.bundle.js
-crates/pocket-pi/js/pi-full.bundle.js.gz
