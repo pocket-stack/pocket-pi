@@ -12,9 +12,10 @@ globalThis.__piPersist = function(sessionDir) {
     const sessionId = sm1.getSessionId();
     const sm2 = P.SessionManager.continueRecent(CWD, sessionDir);
     const ctx = sm2.buildSessionContext();
-    const texts = ctx.messages.map(
-      (m) => Array.isArray(m.content) ? m.content.map((c) => c && c.text || "").join("") : String(m.content)
-    );
+    const texts = ctx.messages.map((m) => {
+      const content = m.content;
+      return Array.isArray(content) ? content.map((c) => c && c.text || "").join("") : String(content);
+    });
     globalThis.__piPersistResult = {
       sessionId,
       wrote,

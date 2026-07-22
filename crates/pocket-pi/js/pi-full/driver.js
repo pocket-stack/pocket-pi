@@ -88,12 +88,11 @@
           if (!event) return;
           globalThis.__piLastEvent = event.type;
           if (event.type === "message_update" || event.type === "message_end") {
-            if (event.message && event.message.role !== "user") takeText(event.message);
-            if (event.message && event.message.stopReason === "error" && event.message.errorMessage) {
-              globalThis.__piError = String(event.message.errorMessage);
+            const msg = event.message;
+            if (msg && msg.role !== "user") takeText(msg);
+            if (msg && msg.stopReason === "error" && msg.errorMessage) {
+              globalThis.__piError = String(msg.errorMessage);
             }
-          } else if (event.type === "error") {
-            globalThis.__piError = String(event.error || event.message || "agent error");
           }
         } catch {
         }

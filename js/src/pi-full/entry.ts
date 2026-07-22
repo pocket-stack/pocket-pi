@@ -19,7 +19,7 @@ import {
 } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/auth-storage.js";
 import { loadExtensionFromFactory } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js";
 
-globalThis.PiFull = {
+const PiFull = {
   createAgentSession,
   SessionManager,
   SettingsManager,
@@ -32,4 +32,11 @@ globalThis.PiFull = {
   createEventBus,
   loadExtensionFromFactory,
 };
+globalThis.PiFull = PiFull;
 globalThis.__piFullLoaded = typeof createAgentSession === "function";
+
+// The exact shape of globalThis.PiFull, carrying pi's REAL types. The harness
+// (loaded as a separate script after this bundle) casts globalThis.PiFull to
+// this, so its session/model/auth calls are typechecked against pi's actual API
+// — a pi bump that changes those signatures fails `tsc`, not just a runtime test.
+export type PiFullApi = typeof PiFull;
