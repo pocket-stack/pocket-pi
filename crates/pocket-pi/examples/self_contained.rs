@@ -1,11 +1,9 @@
-//! A self-contained agent binary: the full, unmodified pi-coding-agent is
-//! embedded (gzip) in the executable — no external .js. Build with:
-//!   node js/build-pi-full.mjs
-//!   cargo run --release --features embed-full-pi --example self_contained
+//! Pocket Pi is self-contained: the whole unmodified pi-coding-agent is embedded
+//! in the binary, so `PiRuntime::new()` stands it up with no external files and
+//! no Node. Run: `cargo run --release --example self_contained`.
 use pocket_pi::PiRuntime;
 
 fn main() {
-    let mut rt = PiRuntime::new().expect("runtime");
-    rt.load_full_pi().expect("load embedded full pi");
+    let rt = PiRuntime::new().expect("runtime");
     println!("full pi loaded: {:?}", rt.get_global_json("__piFullLoaded"));
 }
