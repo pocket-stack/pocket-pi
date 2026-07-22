@@ -88,6 +88,47 @@
     };
   }
 
+  // --- Web event/message globals (undici's webidl references these as globals
+  //     during module init; we don't do real message passing, so they're stubs) ---
+  if (typeof globalThis.EventTarget !== "function") {
+    globalThis.EventTarget = class EventTarget {
+      constructor() { this.__l = {}; }
+      addEventListener(t, cb) { (this.__l[t] ||= []).push(cb); }
+      removeEventListener(t, cb) { this.__l[t] = (this.__l[t] || []).filter((f) => f !== cb); }
+      dispatchEvent(e) { for (const cb of this.__l[e && e.type] || []) { try { cb(e); } catch {} } return true; }
+    };
+  }
+  if (typeof globalThis.Event !== "function") {
+    globalThis.Event = class Event {
+      constructor(type, init = {}) { this.type = type; this.bubbles = !!init.bubbles; this.defaultPrevented = false; }
+      preventDefault() { this.defaultPrevented = true; }
+      stopPropagation() {}
+      stopImmediatePropagation() {}
+    };
+  }
+  if (typeof globalThis.CustomEvent !== "function") {
+    globalThis.CustomEvent = class CustomEvent extends globalThis.Event {
+      constructor(type, init = {}) { super(type, init); this.detail = init.detail; }
+    };
+  }
+  if (typeof globalThis.MessagePort !== "function") {
+    globalThis.MessagePort = class MessagePort extends globalThis.EventTarget {
+      postMessage() {} start() {} close() {}
+      on() { return this; } once() { return this; }
+      ref() { return this; } unref() { return this; }
+    };
+  }
+  if (typeof globalThis.MessageChannel !== "function") {
+    globalThis.MessageChannel = class MessageChannel {
+      constructor() { this.port1 = new globalThis.MessagePort(); this.port2 = new globalThis.MessagePort(); }
+    };
+  }
+  if (typeof globalThis.DOMException !== "function") {
+    globalThis.DOMException = class DOMException extends Error {
+      constructor(message, name) { super(message); this.name = name || "Error"; }
+    };
+  }
+
   // --- TextEncoder / TextDecoder (UTF-8) ---
   if (typeof globalThis.TextEncoder !== "function") {
     globalThis.TextEncoder = class TextEncoder {

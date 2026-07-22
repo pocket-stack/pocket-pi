@@ -128,9 +128,17 @@ export function parse(path) {
   return { root, dir, base, ext, name: ext ? base.slice(0, -ext.length) : base };
 }
 
-export const posix = { sep, delimiter: ":", normalize, isAbsolute, join, resolve, dirname, basename, extname, relative, parse };
+export function toNamespacedPath(path) { return path; } // no-op on POSIX
+export function format(obj) {
+  const dir = obj.dir || obj.root || "";
+  const base = obj.base || `${obj.name || ""}${obj.ext || ""}`;
+  if (!dir) return base;
+  return dir === obj.root ? `${dir}${base}` : `${dir}${sep}${base}`;
+}
+
+export const posix = { sep, delimiter: ":", normalize, isAbsolute, join, resolve, dirname, basename, extname, relative, parse, format, toNamespacedPath };
 // We only implement POSIX semantics; win32 is a passthrough so imports resolve.
 export const win32 = { ...posix, sep: "\\", delimiter: ";" };
 export { sep };
 export const delimiter = ":";
-export default { sep, delimiter, normalize, isAbsolute, join, resolve, dirname, basename, extname, relative, parse, posix, win32 };
+export default { sep, delimiter, normalize, isAbsolute, join, resolve, dirname, basename, extname, relative, parse, format, toNamespacedPath, posix, win32 };

@@ -28,6 +28,15 @@ export function createHash(_algo) {
   };
 }
 export function createHmac(algo, key) { const h = createHash(algo); h.update(String(key) + ":"); return h; }
+export function getHashes() { return ["sha1", "sha256", "sha384", "sha512", "md5"]; }
+export function getCiphers() { return []; }
+export function timingSafeEqual(a, b) {
+  if (!a || !b || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+  return diff === 0;
+}
+export const constants = {};
 export const webcrypto = globalThis.crypto;
 export function getRandomValues(a) { return globalThis.crypto.getRandomValues(a); }
-export default { randomBytes, randomUUID, randomFillSync, createHash, createHmac, webcrypto, getRandomValues };
+export default { randomBytes, randomUUID, randomFillSync, createHash, createHmac, getHashes, getCiphers, timingSafeEqual, constants, webcrypto, getRandomValues };

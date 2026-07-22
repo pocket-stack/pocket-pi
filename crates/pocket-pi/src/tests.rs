@@ -710,6 +710,24 @@ fn persists_and_resumes_session() {
     assert!(files.iter().any(|f| f.to_string_lossy().ends_with(".jsonl")), "no .jsonl session file on disk");
 }
 
+/// Self-contained distribution path: load the full, unmodified pi-coding-agent
+/// from the EMBEDDED gzip bundle (no external .js file). Requires the crate built
+/// with `embed-full-pi` (and `node js/build-pi-full.mjs` run first). Run with:
+///   cargo test -p pocket-pi --features embed-full-pi loads_embedded_full_pi -- --ignored --nocapture
+#[cfg(feature = "embed-full-pi")]
+#[ignore]
+#[test]
+fn loads_embedded_full_pi() {
+    assert!(embedded_full_pi_bundle().is_some(), "bundle not embedded");
+    let mut rt = PiRuntime::new().expect("runtime");
+    rt.load_full_pi().expect("load embedded full pi");
+    assert_eq!(
+        rt.get_global_json("__piFullLoaded"),
+        Some(serde_json::Value::Bool(true)),
+        "embedded full pi did not initialize"
+    );
+}
+
 /// WIP integration probe toward loading unmodified pi-coding-agent. Run with
 /// `cargo test -- --ignored probe_pi_coding_agent --nocapture`. Currently clears
 /// the whole Node-builtin + CJS dependency surface and reaches pi-coding-agent's

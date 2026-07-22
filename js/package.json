@@ -7,9 +7,10 @@
     "build": "node build.mjs"
   },
   "dependencies": {
+    "@earendil-works/pi-agent-core": "0.81.1",
+    "@earendil-works/pi-ai": "0.81.1",
+    "@earendil-works/pi-coding-agent": "0.81.1",
     "@google/genai": "^2.12.0",
-    "@mariozechner/pi-agent-core": "0.73.1",
-    "@mariozechner/pi-coding-agent": "0.73.1",
     "@mistralai/mistralai": "^2.5.0",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/api-logs": "^0.220.0"

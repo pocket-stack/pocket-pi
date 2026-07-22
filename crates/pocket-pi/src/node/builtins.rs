@@ -60,6 +60,7 @@ pub static BUILTINS: &[Builtin] = &[
     builtin!("constants", "constants.js"),
     builtin!("async_hooks", "async_hooks.js"),
     builtin!("diagnostics_channel", "diagnostics_channel.js"),
+    builtin!("console", "console.js"),
 ];
 
 /// The static `require` implementation appended after the generated builtin map.

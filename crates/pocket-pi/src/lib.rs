@@ -41,6 +41,29 @@ const PRELUDE: &str = include_str!("../js/prelude.js");
 const WEB_GLOBALS: &str = include_str!("../js/web-globals.js");
 const AGENT_BUNDLE: &str = include_str!("../js/agent.bundle.js");
 
+/// The full, unmodified pi-coding-agent bundle, embedded gzip'd for a
+/// self-contained binary. Present only under the `embed-full-pi` feature.
+#[cfg(feature = "embed-full-pi")]
+const FULL_PI_GZ: &[u8] = include_bytes!("../js/pi-full.bundle.js.gz");
+
+/// The embedded full-pi bundle source (decompressed), or `None` when the crate
+/// was built without `embed-full-pi`. Lets a host ship one self-contained binary
+/// instead of shipping the ~9 MB `.js` alongside it.
+pub fn embedded_full_pi_bundle() -> Option<String> {
+    #[cfg(feature = "embed-full-pi")]
+    {
+        use std::io::Read;
+        let mut d = flate2::read::GzDecoder::new(FULL_PI_GZ);
+        let mut s = String::new();
+        d.read_to_string(&mut s).expect("gunzip embedded full-pi bundle");
+        Some(s)
+    }
+    #[cfg(not(feature = "embed-full-pi"))]
+    {
+        None
+    }
+}
+
 /// One event surfaced from the agent to the host, already decoded from the
 /// guest's compact JSON vocabulary (`start`, `text`, `thinking`,
 /// `assistant_text`, `tool_start`, `tool_end`, `end`, `error`, `booted`).
@@ -249,6 +272,37 @@ impl PiRuntime {
                 .finish::<rquickjs::Value>()
                 .catch(&ctx)
                 .map_err(|e| format!("module eval: {e}"))?;
+            Ok(())
+        })?;
+        self.drain_jobs();
+        Ok(())
+    }
+
+    /// Evaluate the embedded full unmodified `pi-coding-agent` bundle (present
+    /// only when built with the `embed-full-pi` feature). This is the
+    /// self-contained distribution path — no external `.js` file. Returns an
+    /// error if the feature is off. On success `globalThis.PiFull` is populated.
+    pub fn load_full_pi(&mut self) -> Result<(), String> {
+        let src = embedded_full_pi_bundle()
+            .ok_or("full-pi bundle not embedded — build with `--features embed-full-pi`")?;
+        self.ctx.with(|ctx| -> Result<(), String> {
+            // Declare + set import.meta.url before evaluating — the loader that
+            // normally sets it is bypassed for this in-memory module, and pi
+            // derives __dirname from import.meta.url.
+            let declared = rquickjs::module::Module::declare(ctx.clone(), "pocket-pi:pi-full", src.as_bytes())
+                .catch(&ctx)
+                .map_err(|e| format!("pi-full declare: {e}"))?;
+            if let Ok(meta) = declared.meta() {
+                let _ = meta.set("url", "file:///pocket-pi/js/pi-full.bundle.js");
+            }
+            let (_evaluated, promise) = declared
+                .eval()
+                .catch(&ctx)
+                .map_err(|e| format!("pi-full eval start: {e}"))?;
+            promise
+                .finish::<()>()
+                .catch(&ctx)
+                .map_err(|e| format!("pi-full eval: {e}"))?;
             Ok(())
         })?;
         self.drain_jobs();

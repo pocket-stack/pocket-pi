@@ -156,9 +156,10 @@ There are two ways to run pi on this API:
   Rust `streamFn`s (Anthropic + OpenAI SSE). Drive it directly with
   `boot` / `prompt` / `register_tool` / `pump`. Smallest footprint; best when you
   want a lightweight agent and native tools, not pi's full CLI feature set.
-- **The full, unmodified `pi-coding-agent`** (Path B). Load the bundle with
-  `rt.run_module(".../pi-full.bundle.js")`, then drive `createAgentSession` — this
-  is what unlocks extensions, session persistence, and pi's own tool suite.
+- **The full, unmodified `pi-coding-agent`**. Load the bundle — either embedded
+  (`rt.load_full_pi()`, with the `embed-full-pi` feature) or from disk
+  (`rt.run_module(".../pi-full.bundle.js")`) — then drive `createAgentSession`.
+  This unlocks extensions, session persistence, and pi's own tool suite.
   [`js/pi-full/driver.js`](js/pi-full/driver.js) is the reference harness.
 
 Other `PiRuntime` methods: `run_module`, `eval_script`, `get_global_json`,
@@ -167,7 +168,7 @@ Other `PiRuntime` methods: `run_module`, `eval_script`, `get_global_json`,
 
 ---
 
-## How pi runs unmodified (Path B)
+## How pi runs unmodified
 
 QuickJS's module linker **null-derefs** (`js_inner_module_linking`,
 `quickjs.c:30806`) when you import `createAgentSession` and pull pi-coding-agent's
@@ -175,15 +176,22 @@ QuickJS's module linker **null-derefs** (`js_inner_module_linking`,
 to hand QuickJS **one** module instead of five hundred: esbuild bundles the
 *unmodified* pi source into a single ES module (only `node:*` left external), and
 Pocket Pi's Node/Web layer satisfies it at runtime. Bundling isn't forking —
-every dependency is the real, unmodified upstream package.
+every dependency is the real, unmodified upstream package. (The one substitution
+is `undici`, pi's HTTP-*proxy* transport, aliased to a stub — Pocket Pi proxies in
+the native hub, so undici is never used; this keeps its whole web-fetch stack out
+of the bundle.)
 
 ```sh
 cd js && npm install
-node build-pi-full.mjs     # → crates/pocket-pi/js/pi-full.bundle.js (~13 MB, git-ignored)
+node build-pi-full.mjs     # → pi-full.bundle.js (~9 MB minified) + .js.gz (~1.8 MB), git-ignored
 ```
 
-**Staying in sync with upstream pi** is `npm update` + rebuild — no patches to
-carry. The bundle is git-ignored (a generated artifact), so the integration tests
+The `.gz` is embedded into the binary under the `embed-full-pi` feature, for a
+single self-contained executable (see Footprint).
+
+**Staying in sync with upstream pi** (`@earendil-works/pi-coding-agent`) is
+`npm update` + rebuild — no patches to carry. The bundle is git-ignored (a
+generated artifact), so the integration tests
 that use it are `#[ignore]` and run locally; the crate itself builds with only
 Rust.
 
@@ -191,18 +199,19 @@ Rust.
 
 ## Footprint
 
-The runtime is tiny. The trimmed embeddable core ships as a single self-contained
-binary — QuickJS + pi's `Agent` core + LLM streaming + the oxc TypeScript loader,
-with **nothing to `npm install` at the destination**:
+Everything ships as a single self-contained binary — **nothing to `npm install`
+at the destination**. Even a binary carrying the *whole unmodified pi* (the ~9 MB
+bundle, gzip-embedded to ~1.8 MB via the `embed-full-pi` feature) is one file:
 
 | Shipping pi as… | Size |
 |---|---|
-| **Pocket Pi** — trimmed core, single self-contained binary | **5.9 MB** |
-| `bun build --compile` (providers external; embeds JavaScriptCore) | 61 MB |
-| node runtime + `node_modules` (pi-agent-core + pi-ai + deps, 106 pkgs) | 114 MB + 131 MB |
+| **Pocket Pi** — one binary, full unmodified pi embedded | **~8.9 MB** |
+| **Pocket Pi** — one binary, trimmed core only (no full bundle) | **~7 MB** |
+| `bun build --compile` (providers external; embeds JavaScriptCore) | ~61 MB |
+| node runtime + `node_modules` (pi-agent-core + pi-ai + deps) | ~114 MB + ~131 MB |
 
-Running the *full* unmodified pi adds the ~13 MB JS bundle, loaded at runtime — a
-generated artifact, not a `node_modules` tree.
+The ~7 MB base is dominated by **oxc** (~1.6 MB — the TypeScript transpiler for
+extensions), TLS `rustls`+`ring` (~0.6 MB), `regex` (~0.5 MB), and QuickJS (~0.5 MB).
 
 ---
 
@@ -212,7 +221,7 @@ generated artifact, not a `node_modules` tree.
 cargo test                     # unit + module-system suite (23 tests); no bundle needed
 cargo clippy --workspace --all-targets -- -D warnings
 
-# Path B integration tests are #[ignore] — build the bundle first:
+# The bundle-backed integration tests are #[ignore] — build the bundle first:
 cd js && npm install && node build-pi-full.mjs
 cargo test -p pocket-pi loads_bundled_pi_coding_agent   -- --ignored   # bundle evaluates
 cargo test -p pocket-pi binds_extension_into_session    -- --ignored   # extension binds to a session (offline)
