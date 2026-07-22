@@ -9,7 +9,7 @@ globalThis.__piExtDone = false;
 
 globalThis.__piLoadExtension = async function (extPath) {
   try {
-    const P = globalThis.PiFull;
+    const P = globalThis.PiFull as import("./entry").PiFullApi;
     if (!P) throw new Error("PiFull not loaded — run the bundle first");
 
     // Dynamic import routes through Pocket Pi's NodeResolver/NodeLoader, which

@@ -13,7 +13,7 @@
 //   resume?:        bool     — resume the most recent session in sessionDir
 
 (function () {
-  const P = globalThis.PiFull;
+  const P = globalThis.PiFull as import("./entry").PiFullApi;
   if (!P) throw new Error("PiFull not loaded — run the bundle first");
 
   const MODEL = {
@@ -105,8 +105,9 @@
       const { session } = await P.createAgentSession(sessionOpts);
 
       // Report extension binding into the live session (offline-observable).
+      // Deliberate introspection into pi internals — cast past the private field.
       try {
-        const runner = session._extensionRunner;
+        const runner = (session as any)._extensionRunner;
         const regTools = runner && runner.getAllRegisteredTools ? runner.getAllRegisteredTools() : [];
         globalThis.__piBind = {
           hasAgentStart: !!(runner && runner.hasHandlers && runner.hasHandlers("agent_start")),
@@ -121,12 +122,14 @@
           if (!event) return;
           globalThis.__piLastEvent = event.type;
           if (event.type === "message_update" || event.type === "message_end") {
-            if (event.message && event.message.role !== "user") takeText(event.message);
-            if (event.message && event.message.stopReason === "error" && event.message.errorMessage) {
-              globalThis.__piError = String(event.message.errorMessage);
+            // Error fields live on the assistant message (stopReason "error") —
+            // pi has no separate "error" event — and aren't on the base message
+            // union, so read them through a cast.
+            const msg = event.message as any;
+            if (msg && msg.role !== "user") takeText(msg);
+            if (msg && msg.stopReason === "error" && msg.errorMessage) {
+              globalThis.__piError = String(msg.errorMessage);
             }
-          } else if (event.type === "error") {
-            globalThis.__piError = String(event.error || event.message || "agent error");
           }
         } catch {}
       });
