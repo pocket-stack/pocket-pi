@@ -26,14 +26,16 @@ export function readFileSync(path, options) {
   if (res.err) throw enoent(res.err, path);
   return decode(res.bytes, encoding);
 }
-export function writeFileSync(path, data, options) {
+export function writeFileSync(pathOrFd, data, options) {
+  // writeFileSync also accepts a file descriptor (SessionManager uses this).
+  if (typeof pathOrFd === "number") { fdWrite(pathOrFd, data, options); return; }
   const encoding = typeof options === "string" ? options : (options && options.encoding) || "utf8";
   let bytes;
   if (typeof data === "string") {
     const B = globalThis.__nodeBuffer;
     bytes = B ? Array.from(B.from(data, encoding)) : Array.from(data, (c) => c.charCodeAt(0));
   } else bytes = Array.from(data);
-  const res = fs.writeFile(String(path), bytes);
+  const res = fs.writeFile(String(pathOrFd), bytes);
   if (res.err) throw new Error(res.err);
 }
 export function existsSync(path) {
@@ -73,31 +75,67 @@ export function accessSync(path, _mode) {
 // until a milestone needs them.
 const nope = (name) => () => { throw new Error(`fs.${name} is not implemented in Pocket Pi`); };
 
-// Minimal fd-backed reads: openSync slurps the whole file (fine for the small
-// session files pi peeks); readSync copies a window into the caller's buffer.
-// This is exactly the pattern SessionManager uses to read a session header.
+// fd-backed I/O over the whole-file native ops. openSync honors the read/write/
+// append/exclusive flags SessionManager uses ("r", "wx", "a", …); reads slurp the
+// file and readSync copies a window; fd writes append through to the path.
 const __fds = new Map();
 let __nextFd = 3;
-export function openSync(path, _flags, _mode) {
-  const res = fs.readFile(String(path));
-  if (res.err) throw enoent(res.err, path);
+function ebadf() { const e = new Error("EBADF: bad file descriptor"); e.code = "EBADF"; return e; }
+function parseFlags(flags) {
+  const f = String(flags || "r");
+  return {
+    write: /[wa+]/.test(f),
+    append: /a/.test(f),
+    create: /[wa]/.test(f),
+    excl: /x/.test(f),
+    truncate: /w/.test(f) && !/\+/.test(f),
+    read: /r|\+/.test(f),
+  };
+}
+export function openSync(path, flags, _mode) {
+  path = String(path);
+  const f = parseFlags(flags);
+  const exists = existsSync(path);
+  if (f.excl && exists) { const e = new Error(`EEXIST: file already exists, open '${path}'`); e.code = "EEXIST"; throw e; }
+  if (!f.create && !exists) throw enoent("open", path);
+  if (f.truncate || (f.create && !exists)) writeFileSync(path, ""); // create/truncate
+  const bytes = f.read && !f.truncate && existsSync(path) ? (fs.readFile(path).bytes || []) : [];
   const fd = __nextFd++;
-  __fds.set(fd, { bytes: res.bytes, pos: 0 });
+  __fds.set(fd, { path, flags: f, bytes, pos: 0 });
   return fd;
 }
 export function readSync(fd, buffer, offset, length, position) {
-  const f = __fds.get(fd);
-  if (!f) { const e = new Error("EBADF: bad file descriptor"); e.code = "EBADF"; throw e; }
-  const start = position == null || position < 0 ? f.pos : position;
+  const e = __fds.get(fd);
+  if (!e) throw ebadf();
+  const start = position == null || position < 0 ? e.pos : position;
   let n = 0;
-  for (; n < length && start + n < f.bytes.length; n++) {
-    buffer[offset + n] = f.bytes[start + n];
-  }
-  if (position == null || position < 0) f.pos = start + n;
+  for (; n < length && start + n < e.bytes.length; n++) buffer[offset + n] = e.bytes[start + n];
+  if (position == null || position < 0) e.pos = start + n;
   return n;
 }
+function toStr(data, options) {
+  if (typeof data === "string") return data;
+  const enc = (typeof options === "string" ? options : options && options.encoding) || "utf8";
+  const B = globalThis.__nodeBuffer;
+  return B ? B.from(data).toString(enc) : String.fromCharCode(...data);
+}
+// Append `data` through the fd to its file (native writeFile overwrites, so we
+// read-modify-write). Fine for the small, append-mostly session store.
+function fdWrite(fd, data, options) {
+  const e = __fds.get(fd);
+  if (!e) throw ebadf();
+  const prev = existsSync(e.path) ? readFileSync(e.path, "utf8") : "";
+  writeFileSync(e.path, prev + toStr(data, options), "utf8");
+}
+export function writeSync(fd, data, _offOrPos, _length, _position) {
+  const s = typeof data === "string" ? data : toStr(data);
+  fdWrite(fd, s);
+  return typeof data === "string" ? s.length : data.length;
+}
 export function closeSync(fd) { __fds.delete(fd); }
-export const writeSync = nope("writeSync");
+export const fsyncSync = () => {};
+export const fdatasyncSync = () => {};
+export const ftruncateSync = () => {};
 export function appendFileSync(path, data, options) {
   const prev = existsSync(path) ? readFileSync(path, "utf8") : "";
   writeFileSync(path, prev + (typeof data === "string" ? data : ""), options);

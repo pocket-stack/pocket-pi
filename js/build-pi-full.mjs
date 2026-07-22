@@ -17,7 +17,7 @@ import { dirname, join } from "node:path";
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "..");
 
-if (!existsSync(join(here, "node_modules/@mariozechner/pi-coding-agent"))) {
+if (!existsSync(join(here, "node_modules/@earendil-works/pi-coding-agent"))) {
   console.error("pi-coding-agent not installed — run `npm install` in js/ first.");
   process.exit(1);
 }
@@ -31,6 +31,10 @@ const args = [
   // platform=node marks node:* builtins external; Pocket Pi provides them.
   "--platform=node",
   "--legal-comments=none",
+  // undici is pi's HTTP-proxy transport; Pocket Pi replaces it with the native
+  // streaming fetch, so alias it to a stub (never used at runtime, keeps its
+  // huge web-fetch stack out of the bundle). pi's own source stays unmodified.
+  `--alias:undici=${join(here, "pi-full/undici-stub.js")}`,
   `--outfile=${join(root, "crates/pocket-pi/js/pi-full.bundle.js")}`,
 ];
 

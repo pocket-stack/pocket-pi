@@ -47,6 +47,19 @@ export function callbackify(fn) {
 }
 
 export function deprecate(fn) { return fn; }
+// debuglog(section) → a logger; enabled only if NODE_DEBUG lists the section.
+export function debuglog(section, cb) {
+  const env = (globalThis.process && globalThis.process.env && globalThis.process.env.NODE_DEBUG) || "";
+  const on = env.split(/[\s,]+/).includes(section);
+  const fn = on ? (...args) => { try { console.error(`${section}:`, format(...args)); } catch {} } : () => {};
+  if (typeof cb === "function") cb(fn);
+  return fn;
+}
+export const debug = debuglog;
+export function inspect2() {}
+export const isDeepStrictEqual = (a, b) => { try { return JSON.stringify(a) === JSON.stringify(b); } catch { return a === b; } };
+export function stripVTControlCharacters(s) { return String(s).replace(/\x1b\[[0-9;]*m/g, ""); }
+export const _extend = Object.assign;
 
 export const types = {
   isPromise: (v) => v && typeof v.then === "function",
@@ -60,4 +73,4 @@ export const types = {
 export const TextEncoder = globalThis.TextEncoder;
 export const TextDecoder = globalThis.TextDecoder;
 
-export default { inherits, format, inspect, promisify, callbackify, deprecate, types, TextEncoder, TextDecoder };
+export default { inherits, format, inspect, promisify, callbackify, deprecate, debuglog, debug, isDeepStrictEqual, stripVTControlCharacters, _extend, types, TextEncoder, TextDecoder };

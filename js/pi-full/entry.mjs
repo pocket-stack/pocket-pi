@@ -1,27 +1,30 @@
-// Bundle entry for the unmodified pi-coding-agent core (Path B).
+// Bundle entry for the unmodified pi-coding-agent core.
 import {
   createAgentSession,
   SessionManager,
   SettingsManager,
   ModelRegistry,
-  AuthStorage,
-  InMemoryAuthStorageBackend,
   DefaultResourceLoader,
   createExtensionRuntime,
   createEventBus,
-} from "@mariozechner/pi-coding-agent";
-// loadExtensionFromFactory is inside the bundle but not on the top-level barrel
-// (the package's exports map only exposes "." and "./hooks"). Reach it by file
-// path — esbuild dedupes it to the same bundled module, so pi stays unmodified.
-// This is the seam that lets Pocket Pi load extensions through its OWN oxc loader
-// instead of jiti (which needs Node internals QuickJS doesn't have).
-import { loadExtensionFromFactory } from "../node_modules/@mariozechner/pi-coding-agent/dist/core/extensions/loader.js";
+} from "@earendil-works/pi-coding-agent";
+// A few symbols aren't on the top-level barrel (the package's exports map only
+// exposes "." and "./hooks"). Reach them by file path — esbuild dedupes to the
+// same bundled module, so pi stays unmodified. This is what lets Pocket Pi wire
+// model/auth/extensions headlessly.
+import { ModelRuntime } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/model-runtime.js";
+import {
+  AuthStorage,
+  InMemoryAuthStorageBackend,
+} from "../node_modules/@earendil-works/pi-coding-agent/dist/core/auth-storage.js";
+import { loadExtensionFromFactory } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js";
 
 globalThis.PiFull = {
   createAgentSession,
   SessionManager,
   SettingsManager,
   ModelRegistry,
+  ModelRuntime,
   AuthStorage,
   InMemoryAuthStorageBackend,
   DefaultResourceLoader,

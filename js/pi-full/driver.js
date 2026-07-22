@@ -56,12 +56,11 @@
   globalThis.__piRun = async function (opts) {
     opts = typeof opts === "string" ? (opts.trim().startsWith("{") ? JSON.parse(opts) : { prompt: opts }) : (opts || {});
     try {
-      const authBackend = new P.InMemoryAuthStorageBackend();
-      const authStorage = P.AuthStorage.fromStorage(authBackend);
-      if (globalThis.__OPENAI_KEY) authStorage.setRuntimeApiKey("openai", globalThis.__OPENAI_KEY);
-
-      const modelRegistry = P.ModelRegistry.inMemory(authStorage);
-      try { modelRegistry.getAll().push(MODEL); } catch {}
+      // 0.81: model + auth live on a ModelRuntime (in-memory, offline). The
+      // custom gpt-5.6 model is passed straight to createAgentSession; auth is a
+      // runtime API-key override for the "openai" provider.
+      const modelRuntime = await P.ModelRuntime.create({ modelsPath: null });
+      if (globalThis.__OPENAI_KEY) await modelRuntime.setRuntimeApiKey("openai", globalThis.__OPENAI_KEY);
 
       const settingsManager = P.SettingsManager.inMemory({});
       const sessionManager = opts.sessionDir
@@ -92,8 +91,7 @@
 
       const sessionOpts = {
         model: MODEL,
-        authStorage,
-        modelRegistry,
+        modelRuntime,
         settingsManager,
         sessionManager,
         resourceLoader,

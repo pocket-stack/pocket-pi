@@ -115,6 +115,14 @@ fn install_process(ctx: &Ctx) -> rquickjs::Result<()> {
     versions.set("node", "22.0.0")?;
     process.set("versions", versions)?;
     process.set("argv", vec!["node".to_string(), "pocket-pi".to_string()])?;
+    let exe = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "/pocket-pi".into());
+    process.set("execPath", exe.clone())?;
+    process.set("argv0", exe)?;
+    process.set("execArgv", Vec::<String>::new())?;
+    process.set("pid", std::process::id() as f64)?;
+    process.set("ppid", 0)?;
     process.set("exit", Function::new(ctx.clone(), |_code: Option<i32>| {})?)?;
 
     // Minimal stdout/stderr so TUI + logging code can write() headlessly.
