@@ -72,9 +72,31 @@ export function accessSync(path, _mode) {
 // pi actually exercises headlessly are implemented above; the rest throw or no-op
 // until a milestone needs them.
 const nope = (name) => () => { throw new Error(`fs.${name} is not implemented in Pocket Pi`); };
-export const openSync = nope("openSync");
-export const closeSync = () => {};
-export const readSync = nope("readSync");
+
+// Minimal fd-backed reads: openSync slurps the whole file (fine for the small
+// session files pi peeks); readSync copies a window into the caller's buffer.
+// This is exactly the pattern SessionManager uses to read a session header.
+const __fds = new Map();
+let __nextFd = 3;
+export function openSync(path, _flags, _mode) {
+  const res = fs.readFile(String(path));
+  if (res.err) throw enoent(res.err, path);
+  const fd = __nextFd++;
+  __fds.set(fd, { bytes: res.bytes, pos: 0 });
+  return fd;
+}
+export function readSync(fd, buffer, offset, length, position) {
+  const f = __fds.get(fd);
+  if (!f) { const e = new Error("EBADF: bad file descriptor"); e.code = "EBADF"; throw e; }
+  const start = position == null || position < 0 ? f.pos : position;
+  let n = 0;
+  for (; n < length && start + n < f.bytes.length; n++) {
+    buffer[offset + n] = f.bytes[start + n];
+  }
+  if (position == null || position < 0) f.pos = start + n;
+  return n;
+}
+export function closeSync(fd) { __fds.delete(fd); }
 export const writeSync = nope("writeSync");
 export function appendFileSync(path, data, options) {
   const prev = existsSync(path) ? readFileSync(path, "utf8") : "";

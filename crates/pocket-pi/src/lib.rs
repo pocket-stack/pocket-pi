@@ -87,6 +87,8 @@ impl ToolResult {
 }
 
 type ToolFn = Box<dyn FnMut(serde_json::Value) -> ToolResult>;
+/// Optional host callback for agent events, shared with the realm's closures.
+type EventSink = Rc<RefCell<Option<Box<dyn FnMut(&HostEvent)>>>>;
 
 struct HostState {
     tools: HashMap<String, ToolFn>,
@@ -99,7 +101,7 @@ pub struct PiRuntime {
     rt: Runtime,
     ctx: Context,
     state: Rc<RefCell<HostState>>,
-    on_event: Rc<RefCell<Option<Box<dyn FnMut(&HostEvent)>>>>,
+    on_event: EventSink,
     active: Rc<RefCell<bool>>,
 }
 
@@ -118,7 +120,7 @@ impl PiRuntime {
             tools: HashMap::new(),
             emitted: Vec::new(),
         }));
-        let on_event: Rc<RefCell<Option<Box<dyn FnMut(&HostEvent)>>>> = Rc::new(RefCell::new(None));
+        let on_event: EventSink = Rc::new(RefCell::new(None));
         let active = Rc::new(RefCell::new(false));
         let hub = HttpHub::new();
 

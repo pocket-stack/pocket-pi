@@ -9,6 +9,13 @@
 (function () {
   "use strict";
 
+  // Node's `global` alias + setImmediate (many CJS deps assume them).
+  if (typeof globalThis.global === "undefined") globalThis.global = globalThis;
+  if (typeof globalThis.setImmediate !== "function")
+    globalThis.setImmediate = (fn, ...a) => globalThis.setTimeout(fn, 0, ...a);
+  if (typeof globalThis.clearImmediate !== "function")
+    globalThis.clearImmediate = (id) => globalThis.clearTimeout(id);
+
   // --- timers, advanced by the host frame pump (globalThis.__catpiTimers) ---
   const timers = new Map();
   let nextTimer = 1;

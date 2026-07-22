@@ -1,0 +1,5 @@
+{
+  "name": "@mariozechner/pi-coding-agent",
+  "version": "0.73.1",
+  "bin": { "pi": "cli.js" }
+}

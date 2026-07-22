@@ -7,6 +7,87 @@
   "use strict";
   const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+  // --- Intl (minimal; QuickJS ships none) ---
+  if (typeof globalThis.Intl !== "object" || !globalThis.Intl) {
+    globalThis.Intl = {
+      Segmenter: class {
+        constructor() {}
+        segment(str) {
+          const chars = [...String(str)]; // code-point granularity ≈ grapheme
+          return {
+            [Symbol.iterator]() {
+              let i = 0;
+              return {
+                next() {
+                  return i < chars.length
+                    ? { value: { segment: chars[i], index: i++, input: str }, done: false }
+                    : { value: undefined, done: true };
+                },
+              };
+            },
+          };
+        }
+      },
+      NumberFormat: class { constructor() {} format(n) { return String(n); } formatToParts() { return []; } },
+      DateTimeFormat: class { constructor() {} format(d) { return String(d); } formatToParts() { return []; } },
+      Collator: class { constructor() {} compare(a, b) { return a < b ? -1 : a > b ? 1 : 0; } },
+      getCanonicalLocales: (l) => (Array.isArray(l) ? l : [l]).filter(Boolean),
+    };
+  }
+
+  // --- Blob / File / FormData (referenced by the OpenAI transport even for
+  //     JSON requests; we send JSON bodies, so these just need to exist) ---
+  if (typeof globalThis.Blob === "undefined") {
+    globalThis.Blob = class Blob {
+      constructor(parts = [], opts = {}) {
+        this._parts = parts;
+        this.type = (opts && opts.type) || "";
+        let size = 0;
+        for (const p of parts) {
+          if (typeof p === "string") size += p.length;
+          else if (p && p.byteLength != null) size += p.byteLength;
+          else if (p && p.size != null) size += p.size;
+        }
+        this.size = size;
+      }
+      async text() {
+        return this._parts.map((p) => (typeof p === "string" ? p : "")).join("");
+      }
+      async arrayBuffer() {
+        return new globalThis.TextEncoder().encode(await this.text()).buffer;
+      }
+      slice() { return new globalThis.Blob(this._parts, { type: this.type }); }
+    };
+  }
+  if (typeof globalThis.File === "undefined") {
+    globalThis.File = class File extends globalThis.Blob {
+      constructor(parts, name, opts = {}) {
+        super(parts, opts);
+        this.name = String(name);
+        this.lastModified = 0;
+      }
+    };
+  }
+  if (typeof globalThis.FormData === "undefined") {
+    globalThis.FormData = class FormData {
+      constructor() { this._entries = []; }
+      append(k, v, filename) { this._entries.push([String(k), v, filename]); }
+      set(k, v) {
+        this._entries = this._entries.filter((e) => e[0] !== String(k));
+        this._entries.push([String(k), v]);
+      }
+      get(k) { const e = this._entries.find((e) => e[0] === String(k)); return e ? e[1] : null; }
+      getAll(k) { return this._entries.filter((e) => e[0] === String(k)).map((e) => e[1]); }
+      has(k) { return this._entries.some((e) => e[0] === String(k)); }
+      delete(k) { this._entries = this._entries.filter((e) => e[0] !== String(k)); }
+      forEach(cb, thisArg) { for (const [k, v] of this._entries) cb.call(thisArg, v, k, this); }
+      *entries() { for (const e of this._entries) yield [e[0], e[1]]; }
+      *keys() { for (const e of this._entries) yield e[0]; }
+      *values() { for (const e of this._entries) yield e[1]; }
+      [Symbol.iterator]() { return this.entries(); }
+    };
+  }
+
   // --- TextEncoder / TextDecoder (UTF-8) ---
   if (typeof globalThis.TextEncoder !== "function") {
     globalThis.TextEncoder = class TextEncoder {
