@@ -156,7 +156,7 @@ There are two ways to run pi on this API:
   Rust `streamFn`s (Anthropic + OpenAI SSE). Drive it directly with
   `boot` / `prompt` / `register_tool` / `pump`. Smallest footprint; best when you
   want a lightweight agent and native tools, not pi's full CLI feature set.
-- **The full, unmodified `pi-coding-agent`** (Path B). Load the bundle with
+- **The full, unmodified `pi-coding-agent`**. Load the bundle with
   `rt.run_module(".../pi-full.bundle.js")`, then drive `createAgentSession` — this
   is what unlocks extensions, session persistence, and pi's own tool suite.
   [`js/pi-full/driver.js`](js/pi-full/driver.js) is the reference harness.
@@ -167,7 +167,7 @@ Other `PiRuntime` methods: `run_module`, `eval_script`, `get_global_json`,
 
 ---
 
-## How pi runs unmodified (Path B)
+## How pi runs unmodified
 
 QuickJS's module linker **null-derefs** (`js_inner_module_linking`,
 `quickjs.c:30806`) when you import `createAgentSession` and pull pi-coding-agent's
@@ -191,18 +191,24 @@ Rust.
 
 ## Footprint
 
-The runtime is tiny. The trimmed embeddable core ships as a single self-contained
-binary — QuickJS + pi's `Agent` core + LLM streaming + the oxc TypeScript loader,
-with **nothing to `npm install` at the destination**:
+The runtime is small and self-contained — QuickJS + pi's trimmed `Agent` core +
+LLM streaming + the oxc TypeScript loader, with **nothing to `npm install` at the
+destination**. A stripped release build of the example binary is **~7 MB**
+(macOS arm64), dominated by:
+
+- **oxc** (~1.6 MB) — the pure-Rust TypeScript transpiler, linked because
+  extensions are authored in TypeScript and loaded at runtime.
+- **rustls + ring** (~0.6 MB) — TLS for streaming HTTPS to the model.
+- **regex** (~0.5 MB), QuickJS via `rquickjs` (~0.5 MB), and Rust `std`.
 
 | Shipping pi as… | Size |
 |---|---|
-| **Pocket Pi** — trimmed core, single self-contained binary | **5.9 MB** |
-| `bun build --compile` (providers external; embeds JavaScriptCore) | 61 MB |
-| node runtime + `node_modules` (pi-agent-core + pi-ai + deps, 106 pkgs) | 114 MB + 131 MB |
+| **Pocket Pi** — single self-contained binary | **~7 MB** |
+| `bun build --compile` (providers external; embeds JavaScriptCore) | ~61 MB |
+| node runtime + `node_modules` (pi-agent-core + pi-ai + deps) | ~114 MB + ~131 MB |
 
-Running the *full* unmodified pi adds the ~13 MB JS bundle, loaded at runtime — a
-generated artifact, not a `node_modules` tree.
+Running the *full* unmodified pi currently adds the JS bundle, loaded at runtime
+(a generated artifact, not a `node_modules` tree).
 
 ---
 
@@ -212,7 +218,7 @@ generated artifact, not a `node_modules` tree.
 cargo test                     # unit + module-system suite (23 tests); no bundle needed
 cargo clippy --workspace --all-targets -- -D warnings
 
-# Path B integration tests are #[ignore] — build the bundle first:
+# The bundle-backed integration tests are #[ignore] — build the bundle first:
 cd js && npm install && node build-pi-full.mjs
 cargo test -p pocket-pi loads_bundled_pi_coding_agent   -- --ignored   # bundle evaluates
 cargo test -p pocket-pi binds_extension_into_session    -- --ignored   # extension binds to a session (offline)
