@@ -19,6 +19,22 @@ transport, bounded tool calls, durable session projection, and UI events. It
 does not ship the desktop TUI, Bash tool, arbitrary Node module loading, or the
 on-device TypeScript compiler.
 
+## Hardware profile
+
+The attached board was identified from its original firmware image and checked
+against the vendor examples:
+
+- Waveshare ESP32-P4-WIFI6-Touch-LCD-5;
+- ESP32-P4 revision 1.3, 32 MB flash and 32 MB external PSRAM;
+- 720 x 1280 HX8394 panel over two-lane MIPI-DSI, targeting RGB565;
+- GT911 capacitive touch controller; and
+- ESP32-C6 Wi-Fi coprocessor over SDIO using `esp_wifi_remote` and
+  `esp_hosted`.
+
+The first board-specific firmware milestone enables the 200 MHz PSRAM and
+probes its total/free heap before enabling either high-bandwidth peripheral.
+The vendor BSP is the source of truth for panel timing and pins.
+
 ## Hardware discovery gate
 
 ESP32-P4 does not contain a Wi-Fi radio. A P4 development board advertised with

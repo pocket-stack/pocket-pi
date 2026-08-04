@@ -1017,6 +1017,14 @@ name = "pocket-pi-embedded-core"
 version = "0.1.0"
 
 [[package]]
+name = "pocket-pi-embedded-net"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pocket-pi-p4"
 version = "0.1.0"
 dependencies = [
@@ -1025,6 +1033,7 @@ dependencies = [
  "esp-idf-svc",
  "log",
  "pocket-pi-embedded-core",
+ "pocket-pi-embedded-net",
  "pocketjs-core",
  "pocketjs-esp32p4-ppa",
 ]

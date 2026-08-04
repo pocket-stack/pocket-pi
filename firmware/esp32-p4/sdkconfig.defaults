@@ -1,5 +1,25 @@
-# Keep the first image board-neutral. PSRAM, display and esp-wifi-remote pins are
-# selected after the exact board profile is known.
+# Waveshare ESP32-P4-WIFI6-Touch-LCD-5 (ESP32-P4NRW32, rev 1.x).
+# These values follow the board vendor's ESP-IDF examples. Display and Wi-Fi
+# drivers are linked in later milestones; this image first proves that the
+# external memory is stable before they begin consuming it.
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+CONFIG_ESP32P4_REV_MIN_1=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="32MB"
+
+CONFIG_IDF_EXPERIMENTAL_FEATURES=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_SPEED_200M=y
+CONFIG_SPIRAM_XIP_FROM_PSRAM=y
+CONFIG_CACHE_L2_CACHE_256KB=y
+CONFIG_CACHE_L2_CACHE_LINE_128B=y
+
+# PocketJS renders RGB565 into the board framebuffer. One scanout buffer keeps
+# the first bring-up within the 32 MB PSRAM budget.
+CONFIG_BSP_LCD_DPI_BUFFER_NUMS=1
+CONFIG_BSP_LCD_COLOR_FORMAT_RGB565=y
+
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
 CONFIG_FREERTOS_IDLE_TASK_STACKSIZE=4096

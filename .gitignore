@@ -3,6 +3,7 @@ firmware/esp32-p4/target
 firmware/esp32-p4/.embuild
 firmware/esp32-p4/sdkconfig
 firmware/esp32-p4/sdkconfig.old
+.device-backups/
 **/*.rs.bk
 node_modules
 .DS_Store

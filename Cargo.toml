@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["crates/pocket-pi", "crates/pocket-pi-embedded-core"]
+members = [
+    "crates/pocket-pi",
+    "crates/pocket-pi-embedded-core",
+    "crates/pocket-pi-embedded-net",
+]
 # ESP-IDF owns its target, toolchain and lockfile. Keeping the firmware as a
 # nested workspace lets the normal desktop CI remain fast and deterministic.
 exclude = ["firmware/esp32-p4"]

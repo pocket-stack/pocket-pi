@@ -1,0 +1,15 @@
+dependencies:
+  esp_codec_dev:
+    public: true
+    version: 1.2.*
+  esp_lcd_touch_gt911: ^1
+  idf: '>=5.4'
+  waveshare/esp_lcd_hx8394: '*'
+description: Based on ESP32-P4 chip, waveshare electronics designed a 5-inch screen, highly integrated development board
+repository: git://github.com/WaveshareCloud/Waveshare-ESP32-components.git
+tags:
+- bsp
+targets:
+- esp32p4
+url: https://www.waveshare.com/esp32-p4-wifi6-touch-lcd-5.htm
+version: 1.0.1
