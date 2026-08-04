@@ -34,6 +34,20 @@ UART. The exact board profile must define:
 Until that profile is selected, the first firmware deliberately builds only a
 serial boot/memory/PSRAM probe. It must not guess pins.
 
+## Frontend runtime
+
+PocketJS already provides a dedicated ESP32-P4 RGB565 renderer at
+`engine/backends/esp32p4-ppa` plus a reusable ESP-IDF PPA component. The
+firmware pins PocketJS commit `4c5dc9e` and cross-compiles its retained UI core
+and portable P4 renderer now. The boot probe constructs the real renderer, not
+a local mock.
+
+The hardware adapter is deliberately still disabled. PocketJS leaves display
+initialization, DMA framebuffer allocation, panel rotation and presentation to
+the product BSP, and its PPA C adapter is supported on ESP-IDF 6.0 or newer.
+After board identification, the firmware will move to that IDF baseline, link
+the adapter, and select the panel BSP in the same change.
+
 ## Security and trading rollout
 
 1. Boot probe and display status with networking disabled.

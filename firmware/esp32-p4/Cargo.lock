@@ -36,6 +36,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "arrayvec"
+version = "0.7.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
+
+[[package]]
 name = "as-slice"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1019,6 +1025,24 @@ dependencies = [
  "esp-idf-svc",
  "log",
  "pocket-pi-embedded-core",
+ "pocketjs-core",
+ "pocketjs-esp32p4-ppa",
+]
+
+[[package]]
+name = "pocketjs-core"
+version = "0.1.0"
+source = "git+https://github.com/pocket-stack/pocketjs.git?rev=4c5dc9ef1dd26e6f49b036c210931d399f2b52b2#4c5dc9ef1dd26e6f49b036c210931d399f2b52b2"
+dependencies = [
+ "taffy",
+]
+
+[[package]]
+name = "pocketjs-esp32p4-ppa"
+version = "0.1.0"
+source = "git+https://github.com/pocket-stack/pocketjs.git?rev=4c5dc9ef1dd26e6f49b036c210931d399f2b52b2#4c5dc9ef1dd26e6f49b036c210931d399f2b52b2"
+dependencies = [
+ "pocketjs-core",
 ]
 
 [[package]]
@@ -1226,6 +1250,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
+name = "slotmap"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bdd58c3c93c3d278ca835519292445cb4b0d4dc59ccfdf7ceadaab3f8aeb4038"
+dependencies = [
+ "version_check",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1305,6 +1338,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "taffy"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dfde4e2f8595f222ceaae1fb16b4963952e9b33e358869dc4cd6316b0e0790cd"
+dependencies = [
+ "arrayvec",
+ "serde",
+ "slotmap",
 ]
 
 [[package]]
