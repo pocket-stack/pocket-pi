@@ -1,13 +1,15 @@
 use core::time::Duration;
 use std::io::Read;
 
+use embedded_svc::http::{client::Client as HttpClient, Method};
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::handle::RawHandle;
+use esp_idf_svc::http::client::{Configuration as HttpConfiguration, EspHttpConnection};
 use esp_idf_svc::netif::{EspNetif, NetifStack};
 use esp_idf_svc::nvs::{EspDefaultNvs, EspDefaultNvsPartition};
 use esp_idf_svc::wifi::{AuthMethod, ClientConfiguration, Configuration, WifiDriver};
-use pocket_pi_embedded_core::DeviceState;
+use pocket_pi_embedded_core::{AgentState, DeviceState, LinkState, SecretKind, SecretStorePolicy};
 use pocketjs_core::{spec, Ui};
 use pocketjs_esp32p4_ppa::{PpaOps, Rect, Renderer, RendererConfig, SrmTransform};
 
@@ -55,7 +57,7 @@ fn main() -> anyhow::Result<()> {
     // Keep the handles alive for the process lifetime. This first display
     // milestone uses the DSI engine's vertical color-bar pattern so panel
     // timing can be verified independently of the PocketJS framebuffer path.
-    let _display = match init_display_probe(&mut renderer, &ui) {
+    let mut display = match init_display_probe(&mut renderer, &ui, &state) {
         Ok(display) => {
             log::info!("MIPI-DSI panel probe active");
             Some(display)
@@ -69,6 +71,7 @@ fn main() -> anyhow::Result<()> {
     let _wifi = match init_wifi() {
         Ok(wifi) => {
             log::info!("C6-SDIO Wi-Fi and lwIP netif active");
+            state.set_network_online();
             Some(wifi)
         }
         Err(error) => {
@@ -82,6 +85,39 @@ fn main() -> anyhow::Result<()> {
         pocket_pi_embedded_net::codex::CODEX_BACKEND_BASE_URL,
         pocket_pi_embedded_net::robinhood::MCP_URL,
     );
+    let secret_policy = SecretStorePolicy::DEVELOPMENT;
+    log::warn!(
+        "long-lived token persistence enabled={} (HMAC NVS activation requires explicit approval)",
+        secret_policy.may_persist(SecretKind::CodexRefreshToken),
+    );
+    if _wifi.is_some() {
+        match probe_https_origins() {
+            Ok(reachability) => {
+                state.codex = match (reachability.codex_backend, reachability.openai_api) {
+                    (true, _) => LinkState::Online,
+                    (false, true) => LinkState::Degraded,
+                    (false, false) => LinkState::Offline,
+                };
+                state.robinhood = if reachability.robinhood {
+                    LinkState::Online
+                } else {
+                    LinkState::Offline
+                };
+                state.agent = if reachability.codex_backend || reachability.openai_api {
+                    AgentState::WaitingForAuth
+                } else {
+                    AgentState::NetworkBlocked
+                };
+                log::info!("HTTPS connectivity probe completed: {reachability:?}");
+            }
+            Err(error) => log::error!("HTTPS connectivity probe failed: {error:#}"),
+        }
+    }
+    if let Some(display) = display.as_mut() {
+        if let Err(error) = display.render_state(&mut renderer, &ui, &state) {
+            log::error!("PocketJS status projection failed: {error:#}");
+        }
+    }
 
     loop {
         log::info!(
@@ -94,6 +130,86 @@ fn main() -> anyhow::Result<()> {
         );
         std::thread::sleep(Duration::from_secs(5));
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct HttpsReachability {
+    openai_api: bool,
+    codex_backend: bool,
+    robinhood: bool,
+}
+
+fn probe_https_origins() -> anyhow::Result<HttpsReachability> {
+    let probes = [
+        ("control", "https://api.github.com/zen", true),
+        ("openai-api", "https://api.openai.com/v1/models", false),
+        (
+            "codex-backend",
+            "https://chatgpt.com/backend-api/models",
+            false,
+        ),
+        (
+            "robinhood-mcp",
+            pocket_pi_embedded_net::robinhood::MCP_URL,
+            false,
+        ),
+    ];
+
+    let mut control_ok = false;
+    let mut target_ok = 0u8;
+    let mut reachability = HttpsReachability::default();
+    for (name, url, control) in probes {
+        let configuration = HttpConfiguration {
+            timeout: Some(Duration::from_secs(10)),
+            crt_bundle_attach: Some(esp_idf_svc::sys::esp_crt_bundle_attach),
+            ..Default::default()
+        };
+        let mut client = HttpClient::wrap(EspHttpConnection::new(&configuration)?);
+        let request = match client.request(
+            Method::Get,
+            url,
+            &[
+                ("accept", "application/json"),
+                ("user-agent", "pocket-pi-p4/0.1"),
+            ],
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                log::warn!("HTTPS probe setup failed: origin={name} error={error}");
+                continue;
+            }
+        };
+        match request.submit() {
+            Ok(response) => {
+                let status = response.status();
+                if !(100..600).contains(&status) {
+                    log::warn!("HTTPS probe invalid status: origin={name} status={status}");
+                    continue;
+                }
+                log::info!("HTTPS probe complete: origin={name} status={status}");
+                if control {
+                    control_ok = true;
+                } else {
+                    target_ok = target_ok.saturating_add(1);
+                    match name {
+                        "openai-api" => reachability.openai_api = true,
+                        "codex-backend" => reachability.codex_backend = true,
+                        "robinhood-mcp" => reachability.robinhood = true,
+                        _ => {}
+                    }
+                }
+            }
+            Err(error) => {
+                log::warn!("HTTPS probe unavailable: origin={name} error={error}");
+            }
+        }
+    }
+
+    if !control_ok {
+        anyhow::bail!("control HTTPS origin was unreachable")
+    }
+    log::info!("target HTTPS reachability: {target_ok}/3");
+    Ok(reachability)
 }
 
 fn init_wifi() -> anyhow::Result<WifiConnection> {
@@ -303,7 +419,11 @@ struct DisplayProbe {
     _framebuffer: *mut u16,
 }
 
-fn init_display_probe(renderer: &mut Renderer, ui: &Ui) -> anyhow::Result<DisplayProbe> {
+fn init_display_probe(
+    renderer: &mut Renderer,
+    ui: &Ui,
+    state: &DeviceState,
+) -> anyhow::Result<DisplayProbe> {
     unsafe {
         let mut panel = core::ptr::null_mut();
         let mut io = core::ptr::null_mut();
@@ -326,7 +446,7 @@ fn init_display_probe(renderer: &mut Renderer, ui: &Ui) -> anyhow::Result<Displa
             PANEL_WIDTH as usize * PANEL_HEIGHT as usize,
         );
         let mut software = SoftwareOnly;
-        let words = boot_draw_list();
+        let words = dashboard_draw_list(state);
         let stats = renderer
             .render(
                 ui,
@@ -375,6 +495,45 @@ fn init_display_probe(renderer: &mut Renderer, ui: &Ui) -> anyhow::Result<Displa
     }
 }
 
+impl DisplayProbe {
+    fn render_state(
+        &mut self,
+        renderer: &mut Renderer,
+        ui: &Ui,
+        state: &DeviceState,
+    ) -> anyhow::Result<()> {
+        let pixels = unsafe {
+            core::slice::from_raw_parts_mut(
+                self._framebuffer,
+                PANEL_WIDTH as usize * PANEL_HEIGHT as usize,
+            )
+        };
+        let mut software = SoftwareOnly;
+        let words = dashboard_draw_list(state);
+        renderer
+            .render(
+                ui,
+                &words,
+                pixels,
+                PANEL_WIDTH as u32,
+                PANEL_HEIGHT as u32,
+                &mut software,
+            )
+            .ok_or_else(|| anyhow::anyhow!("PocketJS rejected the status framebuffer geometry"))?;
+
+        esp_result("esp_lcd_panel_draw_bitmap", unsafe {
+            esp_idf_svc::sys::esp_lcd_panel_draw_bitmap(
+                self._panel,
+                0,
+                0,
+                PANEL_WIDTH as i32,
+                PANEL_HEIGHT as i32,
+                self._framebuffer.cast(),
+            )
+        })
+    }
+}
+
 struct SoftwareOnly;
 
 impl PpaOps for SoftwareOnly {
@@ -411,7 +570,7 @@ impl PpaOps for SoftwareOnly {
     }
 }
 
-fn boot_draw_list() -> Vec<u32> {
+fn dashboard_draw_list(state: &DeviceState) -> Vec<u32> {
     let mut words = Vec::new();
     let mut rect = |x, y, width, height, color| {
         words.extend_from_slice(&[spec::draw_op::RECT, xy(x, y), wh(width, height), color]);
@@ -422,10 +581,10 @@ fn boot_draw_list() -> Vec<u32> {
     // the compiled JSX dashboard are loaded.
     rect(0, 0, 720, 1280, 0xfff1_f5f9);
     rect(0, 0, 720, 128, 0xff0f_172a);
-    rect(36, 42, 36, 36, 0xff10_b981);
-    rect(532, 48, 28, 28, 0xff10_b981);
-    rect(584, 48, 28, 28, 0xfff5_9e0b);
-    rect(636, 48, 28, 28, 0xffef_4444);
+    rect(36, 42, 36, 36, agent_state_color(state.agent));
+    rect(532, 48, 28, 28, link_state_color(state.wifi));
+    rect(584, 48, 28, 28, link_state_color(state.codex));
+    rect(636, 48, 28, 28, link_state_color(state.robinhood));
     rect(32, 164, 656, 264, 0xffff_ffff);
     rect(56, 196, 12, 196, 0xff10_b981);
     rect(96, 212, 540, 44, 0xffcbd_5e1);
@@ -445,6 +604,25 @@ fn boot_draw_list() -> Vec<u32> {
     }
     rect(32, 1172, 656, 76, 0xffe2_e8f0);
     words
+}
+
+const fn link_state_color(state: LinkState) -> u32 {
+    match state {
+        LinkState::Disabled => 0xff64_748b,
+        LinkState::Connecting => 0xfff5_9e0b,
+        LinkState::Online => 0xff10_b981,
+        LinkState::Degraded => 0xfff9_7316,
+        LinkState::Offline => 0xffef_4444,
+    }
+}
+
+const fn agent_state_color(state: AgentState) -> u32 {
+    match state {
+        AgentState::Stopped => 0xff64_748b,
+        AgentState::Starting | AgentState::WaitingForAuth => 0xfff5_9e0b,
+        AgentState::Idle | AgentState::Thinking | AgentState::Acting => 0xff10_b981,
+        AgentState::NetworkBlocked | AgentState::Faulted => 0xffef_4444,
+    }
 }
 
 const fn xy(x: i16, y: i16) -> u32 {

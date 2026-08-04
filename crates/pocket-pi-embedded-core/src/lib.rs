@@ -16,9 +16,11 @@ pub enum LinkState {
 pub enum AgentState {
     Stopped,
     Starting,
+    WaitingForAuth,
     Idle,
     Thinking,
     Acting,
+    NetworkBlocked,
     Faulted,
 }
 
@@ -29,6 +31,44 @@ pub enum CodexAuthMode {
     Unconfigured,
     CodingPlan,
     ApiKey,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SecretKind {
+    WifiPassword,
+    CodexRefreshToken,
+    OpenAiApiKey,
+    RobinhoodRefreshToken,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SecretProtection {
+    VolatileOnly,
+    PlaintextDevelopmentNvs,
+    HmacEncryptedNvs,
+}
+
+/// Persistence decisions are centralized so adding a new OAuth flow cannot
+/// silently write long-lived tokens into development NVS.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SecretStorePolicy {
+    pub protection: SecretProtection,
+}
+
+impl SecretStorePolicy {
+    pub const DEVELOPMENT: Self = Self {
+        protection: SecretProtection::PlaintextDevelopmentNvs,
+    };
+
+    pub const fn may_persist(self, kind: SecretKind) -> bool {
+        match self.protection {
+            SecretProtection::VolatileOnly => false,
+            SecretProtection::PlaintextDevelopmentNvs => {
+                matches!(kind, SecretKind::WifiPassword)
+            }
+            SecretProtection::HmacEncryptedNvs => true,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,6 +85,204 @@ pub enum OrderDecision {
     ConfirmationRequired,
     OrderLimitExceeded,
     DailyLimitExceeded,
+}
+
+/// Capabilities are classified by effect and authority. This prevents a
+/// model-visible tool registry from accidentally inheriting broker writes just
+/// because the transport can reach them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CapabilityEffect {
+    ReadOnly,
+    ProposalOnly,
+    DeterministicControl,
+    ExternalWrite,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CapabilityAuthority {
+    ModelCallable,
+    HostOnly,
+    Disabled,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CapabilityId {
+    ResearchSearch,
+    ResearchFetch,
+    SecCompanyFacts,
+    SecFiling,
+    NewsQuery,
+    IssuerRelations,
+    PortfolioAccounts,
+    PortfolioSnapshot,
+    PortfolioOrders,
+    ThesisCompose,
+    OrderPropose,
+    RiskEvaluate,
+    ApprovalConfirm,
+    ExecutionSubmit,
+    ExecutionReconcile,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CapabilityDescriptor {
+    pub id: CapabilityId,
+    pub effect: CapabilityEffect,
+    pub authority: CapabilityAuthority,
+}
+
+/// The initial production registry deliberately contains no model-callable
+/// external write. Execution exists as a named host capability so it can be
+/// audited and tested while remaining disabled.
+pub const CAPABILITY_CATALOG: [CapabilityDescriptor; 15] = [
+    capability(
+        CapabilityId::ResearchSearch,
+        CapabilityEffect::ReadOnly,
+        CapabilityAuthority::ModelCallable,
+    ),
+    capability(
+        CapabilityId::ResearchFetch,
+        CapabilityEffect::ReadOnly,
+        CapabilityAuthority::ModelCallable,
+    ),
+    capability(
+        CapabilityId::SecCompanyFacts,
+        CapabilityEffect::ReadOnly,
+        CapabilityAuthority::ModelCallable,
+    ),
+    capability(
+        CapabilityId::SecFiling,
+        CapabilityEffect::ReadOnly,
+        CapabilityAuthority::ModelCallable,
+    ),
+    capability(
+        CapabilityId::NewsQuery,
+        CapabilityEffect::ReadOnly,
+        CapabilityAuthority::ModelCallable,
+    ),
+    capability(
+        CapabilityId::IssuerRelations,
+        CapabilityEffect::ReadOnly,
+        CapabilityAuthority::ModelCallable,
+    ),
+    capability(
+        CapabilityId::PortfolioAccounts,
+        CapabilityEffect::ReadOnly,
+        CapabilityAuthority::ModelCallable,
+    ),
+    capability(
+        CapabilityId::PortfolioSnapshot,
+        CapabilityEffect::ReadOnly,
+        CapabilityAuthority::ModelCallable,
+    ),
+    capability(
+        CapabilityId::PortfolioOrders,
+        CapabilityEffect::ReadOnly,
+        CapabilityAuthority::ModelCallable,
+    ),
+    capability(
+        CapabilityId::ThesisCompose,
+        CapabilityEffect::ProposalOnly,
+        CapabilityAuthority::ModelCallable,
+    ),
+    capability(
+        CapabilityId::OrderPropose,
+        CapabilityEffect::ProposalOnly,
+        CapabilityAuthority::ModelCallable,
+    ),
+    capability(
+        CapabilityId::RiskEvaluate,
+        CapabilityEffect::DeterministicControl,
+        CapabilityAuthority::HostOnly,
+    ),
+    capability(
+        CapabilityId::ApprovalConfirm,
+        CapabilityEffect::DeterministicControl,
+        CapabilityAuthority::HostOnly,
+    ),
+    capability(
+        CapabilityId::ExecutionSubmit,
+        CapabilityEffect::ExternalWrite,
+        CapabilityAuthority::Disabled,
+    ),
+    capability(
+        CapabilityId::ExecutionReconcile,
+        CapabilityEffect::ReadOnly,
+        CapabilityAuthority::HostOnly,
+    ),
+];
+
+const fn capability(
+    id: CapabilityId,
+    effect: CapabilityEffect,
+    authority: CapabilityAuthority,
+) -> CapabilityDescriptor {
+    CapabilityDescriptor {
+        id,
+        effect,
+        authority,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EvidenceSource {
+    SearchDiscovery,
+    SecRegulatory,
+    IssuerFirstParty,
+    NewsSecondary,
+    BrokerAccount,
+    MarketData,
+}
+
+/// Heap-free reference to immutable evidence retained in the durable ledger.
+/// Full URLs/text stay off this compact state object.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EvidenceRef {
+    pub source: EvidenceSource,
+    pub source_id_hash: u64,
+    pub published_at_unix_ms: u64,
+    pub observed_at_unix_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OrderSide {
+    Buy,
+    Sell,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OrderKind {
+    Market,
+    Limit,
+}
+
+/// A model may create this value, but it cannot turn it into a broker request.
+/// Symbol and evidence hashes bind it to an immutable ledger record without
+/// putting variable-length strings in the device state machine.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OrderIntent {
+    pub intent_id: u64,
+    pub symbol_hash: u64,
+    pub side: OrderSide,
+    pub kind: OrderKind,
+    pub quantity_micros: u64,
+    pub limit_price_micros: Option<u64>,
+    pub evidence_set_hash: u64,
+    pub created_at_unix_ms: u64,
+    pub expires_at_unix_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExecutionState {
+    Draft,
+    Proposed,
+    RiskRejected,
+    AwaitingConfirmation,
+    Approved,
+    Submitting,
+    BrokerAccepted,
+    Reconciled,
+    Unknown,
 }
 
 /// Device-enforced limits are checked after the model proposes an order and
@@ -249,5 +487,49 @@ mod tests {
             policy.evaluate_order(5_000_000, 10_000_000, true),
             OrderDecision::Allowed
         );
+    }
+
+    #[test]
+    fn model_registry_never_contains_external_writes() {
+        assert!(CAPABILITY_CATALOG.iter().all(|capability| {
+            capability.effect != CapabilityEffect::ExternalWrite
+                || capability.authority != CapabilityAuthority::ModelCallable
+        }));
+        assert_eq!(
+            CAPABILITY_CATALOG
+                .iter()
+                .find(|capability| capability.id == CapabilityId::ExecutionSubmit)
+                .unwrap()
+                .authority,
+            CapabilityAuthority::Disabled
+        );
+    }
+
+    #[test]
+    fn order_intent_is_data_not_an_execution_state() {
+        let intent = OrderIntent {
+            intent_id: 7,
+            symbol_hash: 11,
+            side: OrderSide::Buy,
+            kind: OrderKind::Limit,
+            quantity_micros: 1_000_000,
+            limit_price_micros: Some(25_000_000),
+            evidence_set_hash: 13,
+            created_at_unix_ms: 100,
+            expires_at_unix_ms: 200,
+        };
+
+        assert!(intent.expires_at_unix_ms > intent.created_at_unix_ms);
+        assert_ne!(ExecutionState::Proposed, ExecutionState::Submitting);
+    }
+
+    #[test]
+    fn development_nvs_cannot_persist_account_tokens() {
+        let policy = SecretStorePolicy::DEVELOPMENT;
+
+        assert!(policy.may_persist(SecretKind::WifiPassword));
+        assert!(!policy.may_persist(SecretKind::CodexRefreshToken));
+        assert!(!policy.may_persist(SecretKind::OpenAiApiKey));
+        assert!(!policy.may_persist(SecretKind::RobinhoodRefreshToken));
     }
 }

@@ -75,6 +75,96 @@ pub struct TokenResponse {
     pub expires_in: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeviceAuthPhase {
+    Idle,
+    RequestingCode,
+    AwaitingUser,
+    Polling,
+    ExchangingToken,
+    Authenticated,
+    Expired,
+    Failed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeviceAuthSession {
+    pub phase: DeviceAuthPhase,
+    pub challenge: Option<DeviceCodeResponse>,
+    pub next_poll_at_unix_ms: u64,
+    pub expires_at_unix_ms: u64,
+}
+
+impl Default for DeviceAuthSession {
+    fn default() -> Self {
+        Self {
+            phase: DeviceAuthPhase::Idle,
+            challenge: None,
+            next_poll_at_unix_ms: 0,
+            expires_at_unix_ms: 0,
+        }
+    }
+}
+
+impl DeviceAuthSession {
+    pub fn begin(&mut self) {
+        self.phase = DeviceAuthPhase::RequestingCode;
+        self.challenge = None;
+        self.next_poll_at_unix_ms = 0;
+        self.expires_at_unix_ms = 0;
+    }
+
+    pub fn apply_challenge(
+        &mut self,
+        challenge: DeviceCodeResponse,
+        now_unix_ms: u64,
+        lifetime_ms: u64,
+    ) {
+        let interval_ms = u64::from(challenge.interval.max(1)).saturating_mul(1_000);
+        self.next_poll_at_unix_ms = now_unix_ms.saturating_add(interval_ms);
+        self.expires_at_unix_ms = now_unix_ms.saturating_add(lifetime_ms);
+        self.challenge = Some(challenge);
+        self.phase = DeviceAuthPhase::AwaitingUser;
+    }
+
+    pub fn should_poll(&mut self, now_unix_ms: u64) -> bool {
+        if self.challenge.is_none()
+            || !matches!(
+                self.phase,
+                DeviceAuthPhase::AwaitingUser | DeviceAuthPhase::Polling
+            )
+        {
+            return false;
+        }
+        if now_unix_ms >= self.expires_at_unix_ms {
+            self.phase = DeviceAuthPhase::Expired;
+            return false;
+        }
+        if now_unix_ms < self.next_poll_at_unix_ms {
+            return false;
+        }
+
+        let interval_ms =
+            u64::from(self.challenge.as_ref().unwrap().interval.max(1)).saturating_mul(1_000);
+        self.next_poll_at_unix_ms = now_unix_ms.saturating_add(interval_ms);
+        self.phase = DeviceAuthPhase::Polling;
+        true
+    }
+
+    pub fn authorization_received(&mut self) {
+        self.phase = DeviceAuthPhase::ExchangingToken;
+    }
+
+    pub fn authenticated(&mut self) {
+        self.phase = DeviceAuthPhase::Authenticated;
+        self.challenge = None;
+    }
+
+    pub fn fail(&mut self) {
+        self.phase = DeviceAuthPhase::Failed;
+    }
+}
+
 fn number_from_number_or_string<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -114,5 +204,47 @@ mod tests {
     #[test]
     fn api_key_and_coding_plan_use_different_origins() {
         assert_ne!(OPENAI_API_BASE_URL, CODEX_BACKEND_BASE_URL);
+    }
+
+    #[test]
+    fn device_auth_polling_is_bounded_and_expires() {
+        let mut session = DeviceAuthSession::default();
+        session.begin();
+        session.apply_challenge(
+            DeviceCodeResponse {
+                device_auth_id: "device".into(),
+                user_code: "ABCD-EFGH".into(),
+                interval: 5,
+            },
+            1_000,
+            20_000,
+        );
+
+        assert_eq!(session.phase, DeviceAuthPhase::AwaitingUser);
+        assert!(!session.should_poll(5_999));
+        assert!(session.should_poll(6_000));
+        assert!(!session.should_poll(6_001));
+        assert!(!session.should_poll(21_000));
+        assert_eq!(session.phase, DeviceAuthPhase::Expired);
+    }
+
+    #[test]
+    fn challenge_is_removed_after_authentication() {
+        let mut session = DeviceAuthSession::default();
+        session.begin();
+        session.apply_challenge(
+            DeviceCodeResponse {
+                device_auth_id: "device".into(),
+                user_code: "ABCD-EFGH".into(),
+                interval: 1,
+            },
+            0,
+            10_000,
+        );
+        session.authorization_received();
+        session.authenticated();
+
+        assert_eq!(session.phase, DeviceAuthPhase::Authenticated);
+        assert!(session.challenge.is_none());
     }
 }

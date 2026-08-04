@@ -86,6 +86,39 @@ logged. SSID visibility, selected profile number, DHCP address, and connection
 health may be logged, but the password must never be placed in source, build
 arguments, or a committed file.
 
+## HTTPS and network egress
+
+The attached board has completed a real certificate-verified HTTPS probe using
+ESP-IDF's CRT bundle:
+
+- the GitHub control origin returned HTTP 200;
+- the Robinhood Agentic MCP origin completed TLS and returned HTTP 405 to a
+  deliberately unsupported `GET`, proving that its HTTPS route is reachable;
+- the public OpenAI API and the ChatGPT/Codex backend timed out before TLS; and
+- the Mac on the same site network reaches those OpenAI origins through its
+  `utun4` default route, which the Wi-Fi-connected board does not inherit.
+
+This is an egress-routing failure, not a DNS, root-certificate, memory, or
+general ESP-IDF TLS failure. Production should route the board or its Wi-Fi
+VLAN through a trusted VPN gateway so HTTPS remains end-to-end between the P4
+and the provider. A development relay on the Mac can unblock integration, but
+it is not a 24/7 deployment dependency. A TLS-terminating cloud relay is not an
+equivalent security boundary because it can observe provider credentials and
+request bodies.
+
+The display projection must expose Wi-Fi, Codex and Robinhood link state
+independently. A healthy heartbeat or broker route must never be presented as
+an operational agent when the model route is unavailable.
+
+## Capability and authority boundary
+
+The model receives only read-only research/portfolio tools and proposal-only
+reasoning tools. Authentication is infrastructure, `risk.evaluate` is pure
+host code, approval is a short-lived host ticket, and `execution.submit` is a
+disabled host-only capability. The complete capability graph, evidence
+contract and order state machine are documented in
+[`agent-tool-architecture.md`](agent-tool-architecture.md).
+
 ## Security and trading rollout
 
 1. Boot probe and display status with networking disabled.
@@ -101,6 +134,11 @@ Secrets are provisioned after flashing and are never committed, embedded with
 credential in the board's default NVS partition, which is not yet encrypted.
 Encrypted NVS, a keys partition, and the final flash/secure-boot policy are a
 hard gate before Codex or Robinhood refresh tokens may be stored on-device.
+The embedded secret policy enforces that gate in code: development NVS may
+persist only the Wi-Fi password; Codex refresh tokens, OpenAI API keys and
+Robinhood refresh tokens remain volatile. Enabling HMAC-backed NVS encryption
+can burn an eFuse key, so preparing the partition/configuration is reversible
+but activating it on this physical board requires explicit approval.
 
 The Coding Plan experiment follows Pocket Pi's existing Pi dependency: Pi
 0.81.1 exposes an `openai-codex` headless device-code login for ChatGPT Plus/Pro.
