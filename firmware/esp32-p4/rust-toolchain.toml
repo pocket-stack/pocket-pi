@@ -1,0 +1,5 @@
+[toolchain]
+# Pin the cross-compiled std ABI. Tracking nightly broke on 2026-08-04 when
+# Rust std started requiring libc::AT_FDCWD, which ESP-IDF does not expose.
+channel = "nightly-2026-05-01"
+components = ["rust-src"]

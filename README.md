@@ -1,5 +1,10 @@
 # Pocket Pi
 
+> ESP32-P4 port: active development lives in
+> [`docs/esp32-p4-port.md`](docs/esp32-p4-port.md). The embedded target is a
+> bounded appliance profile; it does not claim the desktop runtime already fits
+> unchanged on the microcontroller.
+
 **Run the unmodified [pi](https://github.com/badlogic/pi-mono) coding-agent — and its extensions — inside QuickJS. No Node, no bun.**
 
 Pocket Pi is a small Rust runtime that embeds QuickJS and gives JavaScript exactly

@@ -1225,6 +1225,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "pocket-pi-embedded-core"
+version = "0.1.0"
+
+[[package]]
 name = "portable-atomic"
 version = "1.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

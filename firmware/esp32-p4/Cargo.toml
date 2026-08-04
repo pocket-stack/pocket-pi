@@ -1,0 +1,31 @@
+[workspace]
+
+[package]
+name = "pocket-pi-p4"
+version = "0.1.0"
+edition = "2021"
+resolver = "2"
+rust-version = "1.82"
+publish = false
+
+[[bin]]
+name = "pocket-pi-p4"
+harness = false
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+
+[profile.dev]
+debug = true
+opt-level = "z"
+
+[dependencies]
+anyhow = "1"
+log = "0.4"
+pocket-pi-embedded-core = { path = "../../crates/pocket-pi-embedded-core" }
+esp-idf-svc = { version = "0.52.1", features = ["critical-section"] }
+
+[build-dependencies]
+embuild = "0.33"
