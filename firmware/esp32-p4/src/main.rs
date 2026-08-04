@@ -1,5 +1,12 @@
 use core::time::Duration;
+use std::io::Read;
 
+use esp_idf_svc::eventloop::EspSystemEventLoop;
+use esp_idf_svc::hal::peripherals::Peripherals;
+use esp_idf_svc::handle::RawHandle;
+use esp_idf_svc::netif::{EspNetif, NetifStack};
+use esp_idf_svc::nvs::{EspDefaultNvs, EspDefaultNvsPartition};
+use esp_idf_svc::wifi::{AuthMethod, ClientConfiguration, Configuration, WifiDriver};
 use pocket_pi_embedded_core::DeviceState;
 use pocketjs_core::{spec, Ui};
 use pocketjs_esp32p4_ppa::{PpaOps, Rect, Renderer, RendererConfig, SrmTransform};
@@ -7,6 +14,11 @@ use pocketjs_esp32p4_ppa::{PpaOps, Rect, Renderer, RendererConfig, SrmTransform}
 const BOARD_NAME: &str = "Waveshare ESP32-P4-WIFI6-Touch-LCD-5";
 const PANEL_WIDTH: f32 = 720.0;
 const PANEL_HEIGHT: f32 = 1280.0;
+const WIFI_SSID_PRIMARY: &str = "<Y/OUR SPACE>_5g";
+const WIFI_SSID_FALLBACK: &str = "<Y/OUR SPACE>_2.4G";
+const WIFI_NVS_NAMESPACE: &str = "pocket_pi";
+const WIFI_NVS_PASSWORD_KEY: &str = "wifi_pass";
+const WIFI_PROVISION_PREFIX: &str = "PPI-WIFI-PASS:";
 
 fn main() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();
@@ -53,13 +65,23 @@ fn main() -> anyhow::Result<()> {
             None
         }
     };
+
+    let _wifi = match init_wifi() {
+        Ok(wifi) => {
+            log::info!("C6-SDIO Wi-Fi and lwIP netif active");
+            Some(wifi)
+        }
+        Err(error) => {
+            log::error!("C6-SDIO Wi-Fi radio probe failed: {error:#}");
+            None
+        }
+    };
     log::info!(
         "network targets staged: codex_api={} codex_plan={} robinhood_mcp={}",
         pocket_pi_embedded_net::codex::OPENAI_API_BASE_URL,
         pocket_pi_embedded_net::codex::CODEX_BACKEND_BASE_URL,
         pocket_pi_embedded_net::robinhood::MCP_URL,
     );
-    log::warn!("board profile selected; C6-SDIO Wi-Fi is not initialized yet");
 
     loop {
         log::info!(
@@ -72,6 +94,206 @@ fn main() -> anyhow::Result<()> {
         );
         std::thread::sleep(Duration::from_secs(5));
     }
+}
+
+fn init_wifi() -> anyhow::Result<WifiConnection> {
+    let peripherals = Peripherals::take()?;
+    let system_loop = EspSystemEventLoop::take()?;
+    let nvs = EspDefaultNvsPartition::take()?;
+    let password = load_or_provision_wifi_password(nvs.clone())?;
+    // A radio scan does not need a TCP/IP netif. Keeping this as a bare
+    // WifiDriver also avoids double-registering the remote STA interface: the
+    // C6 firmware owns it until the IP-connectivity milestone attaches lwIP.
+    let mut wifi = WifiDriver::new(peripherals.modem, system_loop.clone(), Some(nvs))?;
+
+    wifi.set_configuration(&Configuration::Client(ClientConfiguration::default()))?;
+    wifi.start()?;
+
+    let (access_points, total_found) = wifi.scan_n::<16>()?;
+    let strongest = access_points
+        .iter()
+        .max_by_key(|access_point| access_point.signal_strength);
+    if let Some(access_point) = strongest {
+        log::info!(
+            "C6-SDIO scan complete: total={} retained={} strongest_rssi={}dBm channel={}",
+            total_found,
+            access_points.len(),
+            access_point.signal_strength,
+            access_point.channel,
+        );
+    } else {
+        log::info!("C6-SDIO scan complete: no visible access points");
+    }
+
+    let primary_visible = access_points
+        .iter()
+        .any(|access_point| access_point.ssid.as_str() == WIFI_SSID_PRIMARY);
+    let fallback_visible = access_points
+        .iter()
+        .any(|access_point| access_point.ssid.as_str() == WIFI_SSID_FALLBACK);
+    log::info!(
+        "configured Wi-Fi visibility: primary={} fallback={}",
+        primary_visible,
+        fallback_visible,
+    );
+
+    // Scan while no lwIP interface is attached. The generic EspWifi wrapper
+    // creates both STA and AP netifs when soft-AP support is compiled in. The
+    // C6 remote transport on this P4 is STA-only, and attaching both makes its
+    // connect event add the same lwIP interface twice. Stop the radio, then
+    // attach exactly one STA netif using the same sequence as Espressif's
+    // esp_wifi_remote station example.
+    wifi.stop()?;
+    let stop_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while wifi.is_started()? {
+        if std::time::Instant::now() >= stop_deadline {
+            anyhow::bail!("C6 Wi-Fi driver did not stop before lwIP attach")
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    log::info!("C6 Wi-Fi driver stopped; attaching one lwIP STA netif");
+    let sta_netif = EspNetif::new(NetifStack::Sta)?;
+    esp_result("esp_netif_attach_wifi_station", unsafe {
+        esp_idf_svc::sys::esp_netif_attach_wifi_station(sta_netif.handle())
+    })?;
+    esp_result("esp_wifi_set_default_wifi_sta_handlers", unsafe {
+        esp_idf_svc::sys::esp_wifi_set_default_wifi_sta_handlers()
+    })?;
+
+    let candidates = if primary_visible {
+        [WIFI_SSID_PRIMARY, WIFI_SSID_FALLBACK]
+    } else {
+        [WIFI_SSID_FALLBACK, WIFI_SSID_PRIMARY]
+    };
+    let mut last_error = None;
+    for (index, ssid) in candidates.into_iter().enumerate() {
+        if (ssid == WIFI_SSID_PRIMARY && !primary_visible)
+            || (ssid == WIFI_SSID_FALLBACK && !fallback_visible)
+        {
+            continue;
+        }
+
+        let configuration = Configuration::Client(ClientConfiguration {
+            ssid: ssid.try_into()?,
+            bssid: None,
+            auth_method: AuthMethod::WPA2Personal,
+            password: password.as_str().try_into()?,
+            channel: None,
+            ..Default::default()
+        });
+        wifi.set_configuration(&configuration)?;
+        if !wifi.is_started()? {
+            wifi.start()?;
+        }
+
+        log::info!("Wi-Fi connection attempt profile={}", index + 1);
+        let attempt = (|| {
+            wifi.connect()?;
+            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+            while !wifi.is_connected()? || !sta_netif.is_up()? {
+                if std::time::Instant::now() >= deadline {
+                    anyhow::bail!("Wi-Fi association or DHCP timed out")
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Ok::<_, anyhow::Error>(())
+        })();
+        match attempt {
+            Ok(()) => {
+                let info = sta_netif.get_ip_info()?;
+                log::info!(
+                    "Wi-Fi connected: profile={} ip={} gateway={} dns={:?}",
+                    index + 1,
+                    info.ip,
+                    info.subnet.gateway,
+                    info.dns,
+                );
+                return Ok(WifiConnection {
+                    _driver: wifi,
+                    _sta_netif: sta_netif,
+                });
+            }
+            Err(error) => {
+                log::warn!("Wi-Fi profile {} failed: {error:#}", index + 1);
+                last_error = Some(error);
+                let _ = wifi.disconnect();
+            }
+        }
+    }
+
+    match last_error {
+        Some(error) => Err(error),
+        None => anyhow::bail!("neither configured Wi-Fi network is visible"),
+    }
+}
+
+struct WifiConnection {
+    _driver: WifiDriver<'static>,
+    _sta_netif: EspNetif,
+}
+
+fn load_or_provision_wifi_password(partition: EspDefaultNvsPartition) -> anyhow::Result<String> {
+    let storage = EspDefaultNvs::new(partition, WIFI_NVS_NAMESPACE, true)?;
+    let mut password_buf = [0u8; 64];
+    if let Some(password) = storage.get_str(WIFI_NVS_PASSWORD_KEY, &mut password_buf)? {
+        validate_wifi_password(password)?;
+        log::info!("Wi-Fi credential loaded from local NVS");
+        return Ok(password.to_owned());
+    }
+
+    log::warn!("Wi-Fi credential missing; send the one-line USB-UART provisioning frame now");
+    let stdin = std::io::stdin();
+    let mut stdin = stdin.lock();
+    let mut frame = Vec::with_capacity(96);
+    let mut byte = [0u8; 1];
+    loop {
+        match stdin.read(&mut byte) {
+            Ok(0) => {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            Ok(_) if byte[0] == b'\n' => {}
+            Ok(_) if byte[0] == b'\r' => continue,
+            Ok(_) if !byte[0].is_ascii_graphic() && byte[0] != b' ' => continue,
+            Ok(_) => {
+                if frame.len() >= 96 {
+                    frame.clear();
+                    log::warn!("Discarded oversized UART provisioning frame");
+                } else {
+                    frame.push(byte[0]);
+                }
+                continue;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        }
+
+        let line = core::str::from_utf8(&frame)?;
+        let Some(prefix_start) = line.find(WIFI_PROVISION_PREFIX) else {
+            log::warn!("Ignored non-provisioning UART input");
+            frame.clear();
+            continue;
+        };
+        let password = &line[prefix_start + WIFI_PROVISION_PREFIX.len()..];
+
+        validate_wifi_password(password)?;
+        storage.set_str(WIFI_NVS_PASSWORD_KEY, password)?;
+        log::info!("Wi-Fi credential stored in local NVS (value not logged)");
+        return Ok(password.to_owned());
+    }
+}
+
+fn validate_wifi_password(password: &str) -> anyhow::Result<()> {
+    if !(8..=63).contains(&password.len()) {
+        anyhow::bail!("Wi-Fi password must contain 8 to 63 bytes")
+    }
+    if !password.is_ascii() {
+        anyhow::bail!("Wi-Fi password must be ASCII")
+    }
+    Ok(())
 }
 
 #[derive(Debug)]

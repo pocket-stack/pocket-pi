@@ -58,11 +58,33 @@ firmware pins PocketJS commit `4c5dc9e` and cross-compiles its retained UI core
 and portable P4 renderer now. The boot probe constructs the real renderer, not
 a local mock.
 
-The hardware adapter is deliberately still disabled. PocketJS leaves display
-initialization, DMA framebuffer allocation, panel rotation and presentation to
-the product BSP, and its PPA C adapter is supported on ESP-IDF 6.0 or newer.
-After board identification, the firmware will move to that IDF baseline, link
-the adapter, and select the panel BSP in the same change.
+The Waveshare BSP now initializes the MIPI-DSI panel and exposes its native
+RGB565 framebuffer to the pinned PocketJS P4 renderer. The board proof renders
+a 720 x 1280 dashboard skeleton through PocketJS and presents it on the panel.
+It currently uses PocketJS's software fallback operations; enabling the PPA C
+adapter remains a later optimization because that adapter targets ESP-IDF 6.0
+or newer while this board build is on ESP-IDF 5.5.3.
+
+## Wi-Fi provisioning and connection
+
+The P4 host now brings up the ESP32-C6 over four-bit, 40 MHz SDIO, scans before
+attaching lwIP, then creates exactly one STA netif. The generic `EspWifi`
+wrapper cannot be used unchanged here: with soft-AP support compiled in it
+creates both STA and AP interfaces, while this remote board profile is
+STA-only. The duplicate interface reaches lwIP as a second `netif_add` during
+connect and asserts.
+
+The two configured site networks are ordered 5 GHz first with 2.4 GHz as the
+fallback. If no credential exists, firmware accepts one USB-to-UART frame:
+
+```text
+PPI-WIFI-PASS:<password>
+```
+
+The value is validated, written to the `pocket_pi` NVS namespace, and never
+logged. SSID visibility, selected profile number, DHCP address, and connection
+health may be logged, but the password must never be placed in source, build
+arguments, or a committed file.
 
 ## Security and trading rollout
 
@@ -74,8 +96,11 @@ the adapter, and select the panel BSP in the same change.
 6. Live orders only after hard limits, idempotency, an on-device kill switch,
    and recovery tests are verified.
 
-Secrets are provisioned after flashing and stored in encrypted NVS. They are
-never committed, embedded with `env!`, or printed in serial logs.
+Secrets are provisioned after flashing and are never committed, embedded with
+`env!`, or printed in serial logs. The current Wi-Fi milestone stores its
+credential in the board's default NVS partition, which is not yet encrypted.
+Encrypted NVS, a keys partition, and the final flash/secure-boot policy are a
+hard gate before Codex or Robinhood refresh tokens may be stored on-device.
 
 The Coding Plan experiment follows Pocket Pi's existing Pi dependency: Pi
 0.81.1 exposes an `openai-codex` headless device-code login for ChatGPT Plus/Pro.

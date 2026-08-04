@@ -36,3 +36,9 @@ embuild = "0.33"
 [[package.metadata.esp-idf-sys.extra_components]]
 component_dirs = ["components/esp32_p4_wifi6_touch_lcd_5"]
 bindings_header = "src/waveshare_bindings.h"
+
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "espressif/esp_wifi_remote", version = "0.14.*" }
+
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "espressif/esp_hosted", version = "1.4.*" }
