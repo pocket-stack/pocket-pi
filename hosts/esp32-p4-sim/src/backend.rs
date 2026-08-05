@@ -33,17 +33,6 @@ impl BackendChoice {
         }
     }
 
-    pub fn label(&self) -> String {
-        match self {
-            Self::Scripted => "SCRIPTED".into(),
-            Self::OpenAi { model, .. } => format!("OPENAI {model}"),
-            Self::Codex { model } => model
-                .as_ref()
-                .map(|model| format!("CODEX {model}"))
-                .unwrap_or_else(|| "LOCAL CODEX".into()),
-        }
-    }
-
     pub fn agent_config(&self) -> String {
         let (provider, model) = match self {
             Self::Scripted => ("openai", "simulated"),

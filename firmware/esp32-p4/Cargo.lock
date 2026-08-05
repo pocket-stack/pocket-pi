@@ -769,12 +769,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "grid"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b40ca9252762c466af32d0b1002e91e4e1bc5398f77455e55474deb466355ff5"
-
-[[package]]
 name = "hash32"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1069,22 +1063,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
-name = "pocket-mod"
+name = "pocket-pi-device-ui"
 version = "0.1.0"
-source = "git+https://github.com/pocket-stack/pocketjs.git?rev=4c5dc9ef1dd26e6f49b036c210931d399f2b52b2#4c5dc9ef1dd26e6f49b036c210931d399f2b52b2"
 dependencies = [
- "anyhow",
- "log",
  "pocketjs-core",
- "rquickjs",
-]
-
-[[package]]
-name = "pocket-pi-app-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -1104,11 +1086,9 @@ dependencies = [
  "embuild",
  "esp-idf-svc",
  "log",
- "pocket-mod",
- "pocket-pi-app-core",
+ "pocket-pi-device-ui",
  "pocket-pi-embedded",
  "pocket-pi-protocols",
- "pocket-ui-surface",
  "pocketjs-core",
  "pocketjs-esp32p4-ppa",
 ]
@@ -1119,17 +1099,6 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "pocket-ui-surface"
-version = "0.1.0"
-source = "git+https://github.com/pocket-stack/pocketjs.git?rev=4c5dc9ef1dd26e6f49b036c210931d399f2b52b2#4c5dc9ef1dd26e6f49b036c210931d399f2b52b2"
-dependencies = [
- "anyhow",
- "log",
- "pocket-mod",
- "pocketjs-core",
 ]
 
 [[package]]
@@ -1507,7 +1476,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dfde4e2f8595f222ceaae1fb16b4963952e9b33e358869dc4cd6316b0e0790cd"
 dependencies = [
  "arrayvec",
- "grid",
  "serde",
  "slotmap",
 ]

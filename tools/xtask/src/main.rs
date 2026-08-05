@@ -9,7 +9,7 @@ fn main() -> Result<()> {
     match (args.next().as_deref(), args.next().as_deref()) {
         (Some("build"), Some("macos")) => cargo(&root, ["build", "-p", "pocket-pi-macos"]),
         (Some("build"), Some("esp32-p4")) => {
-            build_guests(&root)?;
+            build_embedded_guest(&root)?;
             command(
                 Command::new("rustup")
                     .current_dir(root.join("firmware/esp32-p4"))
@@ -23,7 +23,7 @@ fn main() -> Result<()> {
             )
         }
         (Some("build"), Some("esp32-p4-sim")) => {
-            build_guests(&root)?;
+            build_embedded_guest(&root)?;
             cargo(&root, ["build", "-p", "pocket-pi-esp32-p4-sim"])
         }
         (Some("run"), Some("macos")) => {
@@ -31,12 +31,12 @@ fn main() -> Result<()> {
             cargo_with_args(&root, ["run", "-p", "pocket-pi-macos", "--"], &rest)
         }
         (Some("run"), Some("esp32-p4-sim")) => {
-            build_guests(&root)?;
+            build_embedded_guest(&root)?;
             let rest = args.collect::<Vec<_>>();
             cargo_with_args(&root, ["run", "-p", "pocket-pi-esp32-p4-sim", "--"], &rest)
         }
         (Some("snapshot"), Some("esp32-p4-sim")) => {
-            build_guests(&root)?;
+            build_embedded_guest(&root)?;
             let output = root.join("artifacts/screenshots/esp32-p4-sim.png");
             std::fs::create_dir_all(output.parent().unwrap())?;
             cargo_with_args(
@@ -54,7 +54,7 @@ fn main() -> Result<()> {
     }
 }
 
-fn build_guests(root: &Path) -> Result<()> {
+fn build_embedded_guest(root: &Path) -> Result<()> {
     let embedded = root.join("crates/pocket-pi-embedded/js");
     install_if_missing(&embedded)?;
     command(
@@ -62,23 +62,6 @@ fn build_guests(root: &Path) -> Result<()> {
             .current_dir(&embedded)
             .args(["run", "build"]),
         "building embedded Pi guest",
-    )?;
-
-    let app = root.join("apps/agent-shell");
-    install_if_missing(&app)?;
-    std::fs::create_dir_all(root.join("artifacts/ui"))?;
-    let build = app.join("node_modules/@pocketjs/framework/tools/build.ts");
-    command(
-        Command::new("bun")
-            .current_dir(root)
-            .arg(build)
-            .arg(root.join("apps/agent-shell/agent-shell.tsx"))
-            .arg("--framework=solid")
-            .arg("--density=2")
-            .arg("--no-config")
-            .arg(format!("--project-root={}", root.display()))
-            .arg(format!("--outdir={}", root.join("artifacts/ui").display())),
-        "building PocketJS agent shell",
     )
 }
 

@@ -3,56 +3,61 @@
 Pocket Pi is one runtime family with two agent profiles and three hosts.
 
 ```text
- full desktop profile                     embedded product profile
-    crates/pocket-pi                       crates/pocket-pi-embedded
-           │                                         │
-     hosts/macos                  AppSnapshot/AppCommand + agent-shell
-    (CLI host today)                              │
-                                      ┌───────────┴───────────┐
-                                      │                       │
-                              hosts/esp32-p4       hosts/esp32-p4-sim
+ full desktop profile                 embedded product profile
+ crates/pocket-pi                     crates/pocket-pi-embedded
+        │                                      │
+ hosts/macos                      crates/pocket-pi-device-ui
+                                                   │
+                                      ┌────────────┴────────────┐
+                                      │                         │
+                              firmware/esp32-p4       hosts/esp32-p4-sim
 ```
 
 ## Ownership
 
 - `crates/pocket-pi` runs the full, unmodified `pi-coding-agent` with its
   desktop Node/Web compatibility layer.
-- `crates/pocket-pi-embedded` runs the small upstream `pi-agent-core` loop. It
-  receives model and tool capabilities from native host traits.
-- `crates/pocket-pi-app-core` owns only versioned product state and commands.
-- `crates/pocket-pi-protocols` owns provider-neutral wire types.
-- `apps/agent-shell` owns the PocketJS UI. It cannot access files, network,
-  models or secrets directly.
-- A host is the composition root. It selects one agent profile and the concrete
-  storage, network, input and optional display adapters.
+- `crates/pocket-pi-embedded` runs the bounded upstream `pi-agent-core` loop.
+  Native host traits provide model and tool capabilities.
+- `crates/pocket-pi-device-ui` is the single source for the 720x1280 PocketJS
+  draw list, fonts, touch hit map, Chat, Workspace browser, keyboard, message
+  reader, system status and optional product projections. The host supplies the
+  mounted workspace root.
+- `crates/pocket-pi-protocols` owns model/provider transport protocols.
+- Each host is a composition root. It connects the embedded Agent, shared UI,
+  filesystem, input, display and model adapter.
 
-Dependencies point inward: hosts depend on runtimes and contracts; contracts
-never depend on hosts. Provider or product plugins stay outside the core.
+Dependencies point inward: hosts depend on the runtime, UI and protocols. The
+runtime and UI do not depend on a host. External products can populate a UI
+projection or register a native tool without putting provider clients in core.
 
-## Shared embedded product
+## ESP32 and simulator parity
 
-The ESP32-P4 firmware and macOS simulator share:
+The physical ESP32-P4 firmware and macOS simulator compile the same:
 
-- the embedded Pi JavaScript bundle;
-- the PocketJS UI JavaScript and pak;
-- the logical 360x640 UI viewport at 2x raster density;
-- `AppSnapshot` and `AppCommand`;
-- Agent and tool semantics.
+- `pocket-pi-embedded` Agent runtime;
+- `pocket-pi-device-ui` Rust source and exact font atlases;
+- `ScreenState::handle_tap` coordinate hit map;
+- 720x1280 PocketJS draw-list viewport.
 
-The simulator substitutes macOS filesystem, pointer and wgpu adapters. It does
-not execute the ESP32 RISC-V ELF and does not emulate board peripherals.
+The simulator maps a mouse pointer into the same 720x1280 coordinates used by
+the touch controller and calls the same `handle_tap` method. It substitutes
+macOS filesystem, wgpu display and model adapters; it does not emulate the
+ESP32 CPU or peripherals.
+
+The Robinhood-shaped tab in the shared UI is only a projection slot retained to
+match the current device UI. Pocket Pi contains no Robinhood client, credentials
+or trading tools.
 
 ## Runtime separation
 
-Agent and UI use separate QuickJS realms and exchange bounded native state;
-neither calls into the other. The simulator already runs the Agent realm on a
-worker thread so its UI stays responsive during model streaming. The physical
-host currently uses its self-contained offline adapter on the main loop; a
-blocking wireless adapter must run the Agent realm on a worker as well.
+Agent work runs on a worker thread. UI and touch remain responsive while model
+deltas are projected into `ChatProjection`. The UI never owns network access,
+model credentials or broker credentials.
 
 ## Build entry point
 
-`cargo xtask` is the only orchestration layer:
+`cargo xtask` is the orchestration layer:
 
 ```sh
 cargo xtask build macos

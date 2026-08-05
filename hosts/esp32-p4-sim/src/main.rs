@@ -1,17 +1,17 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use pocket3d::gpu::{Gpu, OffscreenTarget};
-use pocket_mod::Guest;
-use pocket_pi_app_core::{
-    decode_command, encode_snapshot, AppCommand, AppSnapshot, FileEntry, OpenFile, Role,
-    SystemState, Turn, View,
+use pocket_pi_device_ui::{
+    load_fonts, AgentState, ChatProjection, DeviceState, ModelBackendSettings, ModelSettings,
+    ScreenInteraction, ScreenState, ScreenView, SystemTelemetry, UartProvider, WirelessProvider,
 };
 use pocket_pi_embedded::{PiEmbedded, ToolHost, ToolResult};
-use pocket_ui_wgpu::{UiRenderer, UiSurface};
+use pocket_ui_wgpu::UiRenderer;
+use pocketjs_core::Ui;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
@@ -22,24 +22,16 @@ mod backend;
 
 use backend::BackendChoice;
 
-const UI_WIDTH: u32 = 360;
-const UI_HEIGHT: u32 = 640;
-const RASTER_DENSITY: u32 = 2;
-const ANALOG_CENTER: u32 = 0x8080;
-
-const BTN_UP: u32 = 0x0010;
-const BTN_RIGHT: u32 = 0x0020;
-const BTN_DOWN: u32 = 0x0040;
-const BTN_LEFT: u32 = 0x0080;
-const BTN_LTRIGGER: u32 = 0x0100;
-const BTN_RTRIGGER: u32 = 0x0200;
-const BTN_CIRCLE: u32 = 0x2000;
+const PANEL_WIDTH: u32 = 720;
+const PANEL_HEIGHT: u32 = 1280;
+const WINDOW_WIDTH: u32 = 360;
+const WINDOW_HEIGHT: u32 = 640;
 
 struct Args {
     screenshot: Option<PathBuf>,
     prompt: Option<String>,
     workspace: PathBuf,
-    view: View,
+    view: ScreenView,
     backend: BackendChoice,
 }
 
@@ -59,7 +51,7 @@ fn parse_args() -> Result<Args> {
     let mut prompt = None;
     let mut workspace =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/esp32-p4-sim/workspace");
-    let mut view = View::Chat;
+    let mut view = ScreenView::Chat;
     let mut backend = std::env::var("POCKET_PI_BACKEND").unwrap_or_else(|_| "scripted".into());
     let mut model = None;
     let mut args = std::env::args().skip(1);
@@ -70,8 +62,9 @@ fn parse_args() -> Result<Args> {
             "--workspace" => workspace = PathBuf::from(next(&mut args, "--workspace")?),
             "--view" => {
                 view = match next(&mut args, "--view")?.as_str() {
-                    "chat" => View::Chat,
-                    "workspace" => View::Workspace,
+                    "chat" => ScreenView::Chat,
+                    "workspace" | "files" => ScreenView::Files,
+                    "robinhood" => ScreenView::Robinhood,
                     value => return Err(anyhow!("unknown view: {value}")),
                 }
             }
@@ -104,29 +97,18 @@ fn prepare_workspace(root: &Path) -> Result<()> {
     }
     let notes = root.join("notes.txt");
     if !notes.exists() {
-        std::fs::write(notes, "Chat and workspace share one PocketJS UI bundle.\n")?;
+        std::fs::write(notes, "Physical ESP32 and simulator share one device UI.\n")?;
     }
     Ok(())
 }
 
-fn artifact(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../artifacts/ui")
-        .join(name)
-}
-
-fn boot_ui() -> Result<(Guest, UiSurface)> {
-    let js = std::fs::read_to_string(artifact("agent-shell.js"))
-        .context("missing agent-shell.js; run `cargo xtask build esp32-p4-sim`")?;
-    let pak = std::fs::read(artifact("agent-shell.pak"))
-        .context("missing agent-shell.pak; run `cargo xtask build esp32-p4-sim`")?;
-    let surface = UiSurface::new_with_density((UI_WIDTH as f32, UI_HEIGHT as f32), RASTER_DENSITY);
-    surface.set_svc_allowlist(["pocket-pi"]);
-    surface.feed_pak(&pak);
-    let guest = Guest::new()?;
-    surface.mount(&guest)?;
-    guest.eval("agent-shell", &js)?;
-    Ok((guest, surface))
+fn new_ui() -> Result<Ui> {
+    let mut ui = Ui::new();
+    ui.set_viewport(PANEL_WIDTH as f32, PANEL_HEIGHT as f32);
+    if !load_fonts(&mut ui) {
+        return Err(anyhow!("PocketJS rejected the shared Inter font atlases"));
+    }
+    Ok(ui)
 }
 
 enum AgentEvent {
@@ -181,178 +163,115 @@ fn spawn_agent(backend: BackendChoice) -> (Sender<String>, Receiver<AgentEvent>)
 }
 
 struct Product {
-    workspace: PathBuf,
-    snapshot: AppSnapshot,
+    chat: ChatProjection,
+    screen: ScreenState,
+    device: DeviceState,
     prompt_tx: Sender<String>,
     agent_rx: Receiver<AgentEvent>,
-    next_turn_id: u64,
+    busy: bool,
     dirty: bool,
 }
 
 impl Product {
-    fn new(workspace: PathBuf, backend: BackendChoice) -> Result<Self> {
-        let backend_label = backend.label();
+    fn new(workspace: PathBuf, backend: BackendChoice, view: ScreenView) -> Result<Self> {
+        let settings = settings_for(&backend);
         let (prompt_tx, agent_rx) = spawn_agent(backend);
-        let mut product = Self {
-            workspace,
-            snapshot: AppSnapshot {
-                active_view: View::Chat,
-                system: SystemState {
-                    backend: backend_label,
-                    network: "ONLINE".into(),
-                    free_ram_kib: 24 * 1024,
-                    fps: 60,
-                },
-                ..AppSnapshot::default()
+        let workspace = workspace
+            .to_str()
+            .ok_or_else(|| anyhow!("workspace path is not valid UTF-8"))?;
+        let mut screen = ScreenState::new(workspace);
+        screen.view = view;
+        screen.set_model_backend(&settings);
+        screen.set_telemetry(SystemTelemetry {
+            ram_used_percent: 25,
+            ram_free_bytes: 24 * 1024 * 1024,
+            cpu_percent: None,
+            ui_fps: 0,
+        });
+        screen.refresh_workspace();
+        Ok(Self {
+            chat: ChatProjection::new("TYPE A MESSAGE", "ESP32-P4 PI AGENT SIMULATOR READY."),
+            screen,
+            device: DeviceState {
+                agent: AgentState::Idle,
             },
             prompt_tx,
             agent_rx,
-            next_turn_id: 1,
+            busy: false,
             dirty: true,
-        };
-        let ready_turn_id = product.take_turn_id();
-        product.snapshot.chat.turns.push(Turn {
-            id: ready_turn_id,
-            role: Role::Assistant,
-            text: "ESP32-P4 embedded profile simulator is ready.".into(),
-            streaming: false,
-        });
-        product.refresh_workspace()?;
-        Ok(product)
+        })
     }
 
-    fn take_turn_id(&mut self) -> u64 {
-        let id = self.next_turn_id;
-        self.next_turn_id = self.next_turn_id.saturating_add(1);
-        id
-    }
-
-    fn refresh_workspace(&mut self) -> Result<()> {
-        let mut entries = Vec::new();
-        for item in std::fs::read_dir(&self.workspace)? {
-            let item = item?;
-            let metadata = item.metadata()?;
-            if !metadata.is_file() {
-                continue;
-            }
-            entries.push(FileEntry {
-                name: item.file_name().to_string_lossy().into_owned(),
-                size: metadata.len(),
-                modified_unix_seconds: metadata
-                    .modified()
-                    .ok()
-                    .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                    .map(|duration| duration.as_secs())
-                    .unwrap_or_default(),
-            });
+    fn send_prompt(&mut self, prompt: String) {
+        if self.busy || prompt.trim().is_empty() {
+            return;
         }
-        entries.sort_by(|left, right| left.name.cmp(&right.name));
-        self.snapshot.workspace.path = "/workspace".into();
-        self.snapshot.workspace.entries = entries;
-        self.changed();
-        Ok(())
-    }
-
-    fn changed(&mut self) {
-        self.snapshot.changed();
+        self.chat.push_pending(prompt.clone());
+        self.screen.show_latest_chat();
+        self.device.agent = AgentState::Thinking;
+        self.busy = true;
+        if self.prompt_tx.send(prompt).is_err() {
+            self.chat.fail_pending("AGENT WORKER IS NOT AVAILABLE");
+            self.device.agent = AgentState::Faulted;
+            self.busy = false;
+        }
         self.dirty = true;
     }
 
-    fn send_prompt(&mut self, text: String) {
-        if self.snapshot.chat.busy || text.trim().is_empty() {
-            return;
+    fn tap(&mut self, x: u16, y: u16, ui: &Ui) {
+        match self.screen.handle_tap(x, y, &self.chat, ui) {
+            ScreenInteraction::None => {}
+            ScreenInteraction::Redraw => self.dirty = true,
+            ScreenInteraction::SubmitPrompt(prompt) => self.send_prompt(prompt),
         }
-        let user_id = self.take_turn_id();
-        let assistant_id = self.take_turn_id();
-        self.snapshot.chat.turns.push(Turn {
-            id: user_id,
-            role: Role::User,
-            text: text.clone(),
-            streaming: false,
-        });
-        self.snapshot.chat.turns.push(Turn {
-            id: assistant_id,
-            role: Role::Assistant,
-            text: String::new(),
-            streaming: true,
-        });
-        if self.snapshot.chat.turns.len() > 10 {
-            let remove = self.snapshot.chat.turns.len() - 10;
-            self.snapshot.chat.turns.drain(0..remove);
-        }
-        self.snapshot.chat.busy = true;
-        self.prompt_tx.send(text).ok();
-        self.changed();
     }
 
-    fn handle(&mut self, command: AppCommand) -> Result<()> {
-        match command {
-            AppCommand::SwitchView { view } => self.snapshot.active_view = view,
-            AppCommand::SendPrompt { text } => {
-                self.send_prompt(text);
-                return Ok(());
-            }
-            AppCommand::OpenPath { name } => {
-                if name.contains('/') || name.contains('\\') {
-                    return Ok(());
-                }
-                let path = self.workspace.join(&name);
-                if path.is_file() {
-                    self.snapshot.workspace.open_file = Some(OpenFile {
-                        name,
-                        content: std::fs::read_to_string(path)
-                            .unwrap_or_else(|_| "<binary file>".into()),
-                    });
-                }
-            }
-            AppCommand::CloseFile => self.snapshot.workspace.open_file = None,
-        }
-        self.changed();
-        Ok(())
+    fn release_touch(&mut self) {
+        self.dirty |= self.screen.handle_touch_release();
     }
 
     fn poll_agent(&mut self) {
         while let Ok(event) = self.agent_rx.try_recv() {
             match event {
                 AgentEvent::Delta(delta) => {
-                    if let Some(turn) = self.snapshot.chat.turns.last_mut() {
-                        turn.text.push_str(&delta);
+                    if self.chat.append_model_delta(&delta) {
+                        self.screen.show_latest_chat();
                     }
                 }
                 AgentEvent::Done => {
-                    self.snapshot.chat.busy = false;
-                    if let Some(turn) = self.snapshot.chat.turns.last_mut() {
-                        turn.streaming = false;
-                    }
+                    self.chat.finish_pending();
+                    self.screen.refresh_workspace();
+                    self.device.agent = AgentState::Idle;
+                    self.busy = false;
                 }
                 AgentEvent::Failed(error) => {
-                    self.snapshot.chat.busy = false;
-                    if let Some(turn) = self.snapshot.chat.turns.last_mut() {
-                        turn.streaming = false;
-                        turn.text = format!("Agent failed: {error}");
-                    }
+                    self.chat.fail_pending(format!("AGENT FAILED: {error}"));
+                    self.device.agent = AgentState::Faulted;
+                    self.busy = false;
                 }
             }
-            self.changed();
+            self.dirty = true;
         }
     }
 
-    fn exchange(&mut self, surface: &UiSurface) {
-        for line in surface.svc_drain() {
-            match decode_command(&line) {
-                Ok(command) => {
-                    self.handle(command).ok();
-                }
-                Err(error) => log::warn!("invalid UI command: {error}"),
-            }
-        }
-        self.poll_agent();
-        if self.dirty {
-            if let Ok(message) = encode_snapshot(&self.snapshot) {
-                surface.svc_push(message);
-            }
-            self.dirty = false;
-        }
+    fn words(&self, ui: &Ui) -> Vec<u32> {
+        self.screen.draw_list(ui, &self.device, &self.chat)
+    }
+}
+
+fn settings_for(backend: &BackendChoice) -> ModelSettings {
+    let backend = match backend {
+        BackendChoice::OpenAi { .. } => ModelBackendSettings::Wireless {
+            provider: WirelessProvider::OpenAi,
+            api_key: String::new(),
+        },
+        BackendChoice::Scripted | BackendChoice::Codex { .. } => ModelBackendSettings::Uart {
+            provider: UartProvider::Codex,
+        },
+    };
+    ModelSettings {
+        backend,
+        model: None,
     }
 }
 
@@ -360,43 +279,37 @@ fn headless(
     output: PathBuf,
     workspace: PathBuf,
     prompt: Option<String>,
-    view: View,
+    view: ScreenView,
     backend: BackendChoice,
 ) -> Result<()> {
-    let (guest, surface) = boot_ui()?;
-    let mut product = Product::new(workspace, backend)?;
-    product.snapshot.active_view = view;
-    product.changed();
+    let ui = new_ui()?;
+    let mut product = Product::new(workspace, backend, view)?;
     let wait_for_turn = prompt.is_some();
     if let Some(prompt) = prompt {
         product.send_prompt(prompt);
     }
-    let gpu = Gpu::new_headless()?;
-    let target = OffscreenTarget::new(&gpu, UI_WIDTH * RASTER_DENSITY, UI_HEIGHT * RASTER_DENSITY);
-    let mut renderer = UiRenderer::new(&gpu, pocket3d::gpu::OFFSCREEN_FORMAT);
-    for frame in 0..7_500 {
-        product.exchange(&surface);
-        guest.frame(0)?;
-        surface.tick();
-        if frame >= 30 && (!wait_for_turn || !product.snapshot.chat.busy) {
+    for _ in 0..7_500 {
+        product.poll_agent();
+        if !wait_for_turn || !product.busy {
             break;
         }
         std::thread::sleep(Duration::from_millis(16));
     }
+
+    let gpu = Gpu::new_headless()?;
+    let target = OffscreenTarget::new(&gpu, PANEL_WIDTH, PANEL_HEIGHT);
+    let mut renderer = UiRenderer::new(&gpu, pocket3d::gpu::OFFSCREEN_FORMAT);
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
-    surface.with_ui(|ui| {
-        let words = ui.draw().words.clone();
-        renderer.render_words_scaled(
-            &gpu,
-            ui,
-            &words,
-            &mut encoder,
-            &target.view,
-            (UI_WIDTH * RASTER_DENSITY, UI_HEIGHT * RASTER_DENSITY),
-            RASTER_DENSITY as f32,
-            wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-        )
-    })?;
+    let words = product.words(&ui);
+    renderer.render_words(
+        &gpu,
+        &ui,
+        &words,
+        &mut encoder,
+        &target.view,
+        (PANEL_WIDTH, PANEL_HEIGHT),
+        wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+    )?;
     gpu.queue.submit([encoder.finish()]);
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent)?;
@@ -412,11 +325,9 @@ struct WindowState {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     renderer: UiRenderer,
-    guest: Guest,
-    ui: UiSurface,
+    ui: Ui,
     product: Product,
-    buttons: u32,
-    cursor: (u32, u32),
+    cursor: (u16, u16),
     touch_down: bool,
     frames: u32,
     fps_started: Instant,
@@ -425,7 +336,7 @@ struct WindowState {
 struct WindowApp {
     workspace: PathBuf,
     initial_prompt: Option<String>,
-    initial_view: View,
+    initial_view: ScreenView,
     backend: Option<BackendChoice>,
     state: Option<WindowState>,
     error: Option<anyhow::Error>,
@@ -434,7 +345,7 @@ struct WindowApp {
 fn windowed(
     workspace: PathBuf,
     prompt: Option<String>,
-    view: View,
+    view: ScreenView,
     backend: BackendChoice,
 ) -> Result<()> {
     let event_loop = EventLoop::new()?;
@@ -452,12 +363,12 @@ fn windowed(
 
 impl WindowApp {
     fn init(&mut self, event_loop: &ActiveEventLoop) -> Result<WindowState> {
-        let (guest, ui) = boot_ui()?;
+        let ui = new_ui()?;
         let window = Arc::new(
             event_loop.create_window(
                 Window::default_attributes()
                     .with_title("Pocket Pi — ESP32-P4 Simulator")
-                    .with_inner_size(winit::dpi::LogicalSize::new(UI_WIDTH, UI_HEIGHT))
+                    .with_inner_size(winit::dpi::LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT))
                     .with_resizable(false),
             )?,
         );
@@ -475,9 +386,7 @@ impl WindowApp {
             .backend
             .take()
             .ok_or_else(|| anyhow!("simulator backend was already consumed"))?;
-        let mut product = Product::new(self.workspace.clone(), backend)?;
-        product.snapshot.active_view = self.initial_view.clone();
-        product.changed();
+        let mut product = Product::new(self.workspace.clone(), backend, self.initial_view)?;
         if let Some(prompt) = self.initial_prompt.take() {
             product.send_prompt(prompt);
         }
@@ -487,10 +396,8 @@ impl WindowApp {
             surface,
             config,
             renderer,
-            guest,
             ui,
             product,
-            buttons: 0,
             cursor: (0, 0),
             touch_down: false,
             frames: 0,
@@ -499,25 +406,15 @@ impl WindowApp {
     }
 
     fn redraw(state: &mut WindowState) -> Result<()> {
-        state.product.exchange(&state.ui);
-        let touches = if state.touch_down {
-            vec![pack_touch(state.cursor.0, state.cursor.1)]
-        } else {
-            Vec::new()
-        };
-        state
-            .guest
-            .frame_with_touches(state.buttons, ANALOG_CENTER, &touches)?;
-        state.ui.tick();
-
+        state.product.poll_agent();
         state.frames += 1;
         let elapsed = state.fps_started.elapsed();
         if elapsed >= Duration::from_secs(1) {
-            state.product.snapshot.system.fps =
+            state.product.screen.telemetry.ui_fps =
                 (state.frames as f32 / elapsed.as_secs_f32()).round() as u16;
-            state.product.changed();
             state.frames = 0;
             state.fps_started = Instant::now();
+            state.product.dirty = true;
         }
 
         let frame = match state.surface.get_current_texture() {
@@ -530,40 +427,49 @@ impl WindowApp {
         };
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = state.gpu.device.create_command_encoder(&Default::default());
-        let scale = state.config.width as f32 / UI_WIDTH as f32;
-        state.ui.with_ui(|ui| {
-            let words = ui.draw().words.clone();
-            state.renderer.render_words_scaled(
-                &state.gpu,
-                ui,
-                &words,
-                &mut encoder,
-                &view,
-                (state.config.width, state.config.height),
-                scale,
-                wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-            )
-        })?;
+        let scale = state.config.width as f32 / PANEL_WIDTH as f32;
+        let words = state.product.words(&state.ui);
+        state.renderer.render_words_scaled(
+            &state.gpu,
+            &state.ui,
+            &words,
+            &mut encoder,
+            &view,
+            (state.config.width, state.config.height),
+            scale,
+            wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+        )?;
         state.gpu.queue.submit([encoder.finish()]);
         state.window.pre_present_notify();
         frame.present();
+        state.product.dirty = false;
         state.window.request_redraw();
         Ok(())
+    }
+
+    fn update_cursor(state: &mut WindowState, x: f64, y: f64) {
+        let x = x * PANEL_WIDTH as f64 / state.config.width as f64;
+        let y = y * PANEL_HEIGHT as f64 / state.config.height as f64;
+        state.cursor = (
+            x.clamp(0.0, (PANEL_WIDTH - 1) as f64) as u16,
+            y.clamp(0.0, (PANEL_HEIGHT - 1) as f64) as u16,
+        );
     }
 }
 
 impl ApplicationHandler for WindowApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.state.is_none() {
-            match self.init(event_loop) {
-                Ok(state) => {
-                    state.window.request_redraw();
-                    self.state = Some(state);
-                }
-                Err(error) => {
-                    self.error = Some(error);
-                    event_loop.exit();
-                }
+        if self.state.is_some() {
+            return;
+        }
+        match self.init(event_loop) {
+            Ok(state) => {
+                state.window.request_redraw();
+                self.state = Some(state);
+            }
+            Err(error) => {
+                self.error = Some(error);
+                event_loop.exit();
             }
         }
     }
@@ -575,30 +481,29 @@ impl ApplicationHandler for WindowApp {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::CursorMoved { position, .. } => {
-                let scale = state.config.width as f64 / UI_WIDTH as f64;
-                state.cursor = (
-                    (position.x / scale).clamp(0.0, (UI_WIDTH - 1) as f64) as u32,
-                    (position.y / scale).clamp(0.0, (UI_HEIGHT - 1) as f64) as u32,
-                );
+                Self::update_cursor(state, position.x, position.y);
             }
             WindowEvent::MouseInput {
                 button: MouseButton::Left,
-                state: element,
+                state: ElementState::Pressed,
                 ..
-            } => state.touch_down = element == ElementState::Pressed,
+            } if !state.touch_down => {
+                state.touch_down = true;
+                state.product.tap(state.cursor.0, state.cursor.1, &state.ui);
+            }
+            WindowEvent::MouseInput {
+                button: MouseButton::Left,
+                state: ElementState::Released,
+                ..
+            } => {
+                state.touch_down = false;
+                state.product.release_touch();
+            }
             WindowEvent::KeyboardInput { event, .. } => {
-                if let PhysicalKey::Code(code) = event.physical_key {
-                    if code == KeyCode::Escape {
-                        event_loop.exit();
-                        return;
-                    }
-                    if let Some(button) = button_for(code) {
-                        if event.state == ElementState::Pressed {
-                            state.buttons |= button;
-                        } else {
-                            state.buttons &= !button;
-                        }
-                    }
+                if event.state == ElementState::Pressed
+                    && matches!(event.physical_key, PhysicalKey::Code(KeyCode::Escape))
+                {
+                    event_loop.exit();
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -612,19 +517,62 @@ impl ApplicationHandler for WindowApp {
     }
 }
 
-fn pack_touch(x: u32, y: u32) -> u32 {
-    0x8000_0000 | ((y & 0x3ff) << 10) | (x & 0x3ff)
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn button_for(code: KeyCode) -> Option<u32> {
-    Some(match code {
-        KeyCode::ArrowUp => BTN_UP,
-        KeyCode::ArrowRight => BTN_RIGHT,
-        KeyCode::ArrowDown => BTN_DOWN,
-        KeyCode::ArrowLeft => BTN_LEFT,
-        KeyCode::KeyQ => BTN_LTRIGGER,
-        KeyCode::KeyW => BTN_RTRIGGER,
-        KeyCode::Enter | KeyCode::Space => BTN_CIRCLE,
-        _ => return None,
-    })
+    #[test]
+    fn bottom_navigation_uses_the_physical_screen_hit_map() {
+        let temp = tempfile::tempdir().unwrap();
+        let ui = new_ui().unwrap();
+        let mut product = Product::new(
+            temp.path().to_owned(),
+            BackendChoice::Scripted,
+            ScreenView::Chat,
+        )
+        .unwrap();
+
+        product.tap(360, 1220, &ui);
+
+        assert_eq!(product.screen.view, ScreenView::Files);
+    }
+
+    #[test]
+    fn mouse_coordinates_drive_the_same_keyboard_as_touch() {
+        let temp = tempfile::tempdir().unwrap();
+        let ui = new_ui().unwrap();
+        let mut screen = ScreenState::new(temp.path().to_str().unwrap());
+        let chat = ChatProjection::new("YOU", "PI");
+
+        assert_eq!(
+            screen.handle_tap(360, 1100, &chat, &ui),
+            ScreenInteraction::Redraw
+        );
+        assert_eq!(
+            screen.handle_tap(54, 396, &chat, &ui),
+            ScreenInteraction::Redraw
+        );
+        assert_eq!(
+            screen.handle_tap(640, 820, &chat, &ui),
+            ScreenInteraction::SubmitPrompt("q".into())
+        );
+    }
+
+    #[test]
+    fn workspace_row_opens_the_physical_file_viewer() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("memory.md"), "shared-ui").unwrap();
+        let ui = new_ui().unwrap();
+        let mut product = Product::new(
+            temp.path().to_owned(),
+            BackendChoice::Scripted,
+            ScreenView::Chat,
+        )
+        .unwrap();
+
+        product.tap(360, 1220, &ui);
+        product.tap(120, 220, &ui);
+
+        assert_eq!(product.screen.view, ScreenView::Viewer);
+    }
 }

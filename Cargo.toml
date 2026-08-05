@@ -2,8 +2,8 @@
 resolver = "2"
 members = [
     "crates/pocket-pi",
-    "crates/pocket-pi-app-core",
     "crates/pocket-pi-embedded",
+    "crates/pocket-pi-device-ui",
     "crates/pocket-pi-protocols",
     "hosts/macos",
     "hosts/esp32-p4-sim",
