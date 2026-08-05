@@ -2,8 +2,12 @@
 resolver = "2"
 members = [
     "crates/pocket-pi",
-    "crates/pocket-pi-embedded-core",
-    "crates/pocket-pi-embedded-net",
+    "crates/pocket-pi-app-core",
+    "crates/pocket-pi-embedded",
+    "crates/pocket-pi-protocols",
+    "hosts/macos",
+    "hosts/esp32-p4-sim",
+    "tools/xtask",
 ]
 # ESP-IDF owns its target, toolchain and lockfile. Keeping the firmware as a
 # nested workspace lets the normal desktop CI remain fast and deterministic.
@@ -13,6 +17,12 @@ exclude = ["firmware/esp32-p4"]
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/pocket-stack/pocket-pi"
+
+[workspace.dependencies]
+anyhow = "1"
+log = "0.4"
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
 
 [profile.release]
 opt-level = 2

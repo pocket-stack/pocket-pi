@@ -1,0 +1,25 @@
+{
+  "$schema": "https://pocketjs.dev/schema/pocket-2.json",
+  "pocket": 2,
+  "id": "dev.pocket-stack.pocket-pi.agent-shell",
+  "name": "pocket-pi-agent-shell",
+  "title": "Pocket Pi",
+  "version": "0.1.0",
+  "engine": {
+    "capabilities": {
+      "requires": ["text.glyphs.baked", "input.buttons"],
+      "enhances": ["input.touch"]
+    }
+  },
+  "app": {
+    "entry": "apps/agent-shell/agent-shell.tsx",
+    "output": "agent-shell",
+    "framework": "solid",
+    "viewport": {
+      "fixed": {
+        "logical": [360, 640],
+        "presentation": "native"
+      }
+    }
+  }
+}

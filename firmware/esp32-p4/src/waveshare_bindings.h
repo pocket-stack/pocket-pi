@@ -7,3 +7,7 @@
 
 #include "bsp/esp-bsp.h"
 #include "bsp/display.h"
+#include "bsp/touch.h"
+
+esp_err_t pi_p4_touch_new(esp_lcd_touch_handle_t *ret_touch);
+bool pi_p4_touch_read(esp_lcd_touch_handle_t touch, uint16_t *x, uint16_t *y);

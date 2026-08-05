@@ -1,0 +1,18 @@
+{
+  "name": "pocket-pi-agent-shell",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@pocketjs/framework": "0.7.0",
+    "opentype.js": "^1.3.4",
+    "solid-js": "^1.9.9"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.28.0",
+    "@babel/preset-typescript": "^7.27.0",
+    "@tailwindcss/cli": "^4.1.0",
+    "babel-preset-solid": "^1.9.9",
+    "tailwindcss": "^4.1.0",
+    "typescript": "^5.9.0"
+  }
+}

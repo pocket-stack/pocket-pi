@@ -1,5 +1,21 @@
 # Pocket Pi
 
+Pocket Pi is one Pi runtime family with a full desktop profile, a bounded
+embedded profile, and a macOS simulator for the ESP32-P4 product.
+
+```sh
+cargo xtask build macos
+cargo xtask build esp32-p4
+cargo xtask build esp32-p4-sim
+cargo xtask run esp32-p4-sim
+cargo xtask snapshot esp32-p4-sim
+```
+
+The ESP32 host and simulator run the same embedded `pi-agent-core` and the same
+PocketJS Chat + Workspace UI. The simulator replaces only hardware adapters; it
+does not pretend to execute the ESP32 firmware ELF. See
+[`ARCHITECTURE.md`](ARCHITECTURE.md).
+
 > ESP32-P4 port: active development lives in
 > [`docs/esp32-p4-port.md`](docs/esp32-p4-port.md). The embedded target is a
 > bounded appliance profile; it does not claim the desktop runtime already fits

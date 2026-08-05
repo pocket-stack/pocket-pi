@@ -1,177 +1,40 @@
-# ESP32-P4 port
+# ESP32-P4 host
 
-This branch treats the P4 device as a durable appliance rather than a tiny
-desktop. The existing desktop `PiRuntime` remains intact while an embedded
-profile is built from the parts that fit and are safe on-device.
+Pocket Pi has two agent profiles and three hosts:
 
-## Why the existing runtime cannot simply be cross-compiled
+| Target | Agent profile | Runs on |
+|---|---|---|
+| `macos` | full `pi-coding-agent` | macOS |
+| `esp32-p4` | bounded `pi-agent-core` | ESP32-P4 |
+| `esp32-p4-sim` | bounded `pi-agent-core` | macOS |
 
-The current runtime loads the full unmodified coding-agent bundle into QuickJS.
-On a desktop diagnostic build, a freshly booted runtime used about 46.6 MB of
-QuickJS-managed memory and about 55.7 MB of allocator memory before doing a
-model turn. It also relies on desktop facilities including subprocesses, a
-filesystem-backed Node resolver, `ureq`/Rustls, and on-device TypeScript
-transpilation. Those are incompatible with a reliable 24/7 P4 appliance even on
-a board fitted with PSRAM.
+The ESP host and simulator consume the same embedded agent bundle, PocketJS
+application bundle, application state protocol, and logical 360x640 viewport.
+Only their platform adapters differ.
 
-The embedded profile therefore keeps the agent state machine, streaming model
-transport, bounded tool calls, durable session projection, and UI events. It
-does not ship the desktop TUI, Bash tool, arbitrary Node module loading, or the
-on-device TypeScript compiler.
-
-## Hardware profile
-
-The attached board was identified from its original firmware image and checked
-against the vendor examples:
-
-- Waveshare ESP32-P4-WIFI6-Touch-LCD-5;
-- ESP32-P4 revision 1.3, 32 MB flash and 32 MB external PSRAM;
-- 720 x 1280 HX8394 panel over two-lane MIPI-DSI, targeting RGB565;
-- GT911 capacitive touch controller; and
-- ESP32-C6 Wi-Fi coprocessor over SDIO using `esp_wifi_remote` and
-  `esp_hosted`.
-
-The first board-specific firmware milestone enables the 200 MHz PSRAM and
-probes its total/free heap before enabling either high-bandwidth peripheral.
-The vendor BSP is the source of truth for panel timing and pins.
-
-## Hardware discovery gate
-
-ESP32-P4 does not contain a Wi-Fi radio. A P4 development board advertised with
-Wi-Fi uses a companion radio, commonly an ESP32-C6, connected over SDIO, SPI or
-UART. The exact board profile must define:
-
-- flash and PSRAM size/mode;
-- Wi-Fi companion model, transport, reset pin and handshake pins;
-- display controller, resolution, pixel bus and backlight pin;
-- touch controller and I2C pins, if present;
-- native USB or USB-to-UART programming path.
-
-Until that profile is selected, the first firmware deliberately builds only a
-serial boot/memory/PSRAM probe. It must not guess pins.
-
-## Frontend runtime
-
-PocketJS already provides a dedicated ESP32-P4 RGB565 renderer at
-`engine/backends/esp32p4-ppa` plus a reusable ESP-IDF PPA component. The
-firmware pins PocketJS commit `4c5dc9e` and cross-compiles its retained UI core
-and portable P4 renderer now. The boot probe constructs the real renderer, not
-a local mock.
-
-The Waveshare BSP now initializes the MIPI-DSI panel and exposes its native
-RGB565 framebuffer to the pinned PocketJS P4 renderer. The board proof renders
-a 720 x 1280 dashboard skeleton through PocketJS and presents it on the panel.
-It currently uses PocketJS's software fallback operations; enabling the PPA C
-adapter remains a later optimization because that adapter targets ESP-IDF 6.0
-or newer while this board build is on ESP-IDF 5.5.3.
-
-## Wi-Fi provisioning and connection
-
-The P4 host now brings up the ESP32-C6 over four-bit, 40 MHz SDIO, scans before
-attaching lwIP, then creates exactly one STA netif. The generic `EspWifi`
-wrapper cannot be used unchanged here: with soft-AP support compiled in it
-creates both STA and AP interfaces, while this remote board profile is
-STA-only. The duplicate interface reaches lwIP as a second `netif_add` during
-connect and asserts.
-
-The two configured site networks are ordered 5 GHz first with 2.4 GHz as the
-fallback. If no credential exists, firmware accepts one USB-to-UART frame:
-
-```text
-PPI-WIFI-PASS:<password>
-```
-
-The value is validated, written to the `pocket_pi` NVS namespace, and never
-logged. SSID visibility, selected profile number, DHCP address, and connection
-health may be logged, but the password must never be placed in source, build
-arguments, or a committed file.
-
-## HTTPS and network egress
-
-The attached board has completed a real certificate-verified HTTPS probe using
-ESP-IDF's CRT bundle:
-
-- the GitHub control origin returned HTTP 200;
-- the Robinhood Agentic MCP origin completed TLS and returned HTTP 405 to a
-  deliberately unsupported `GET`, proving that its HTTPS route is reachable;
-- the public OpenAI API and the ChatGPT/Codex backend timed out before TLS; and
-- the Mac on the same site network reaches those OpenAI origins through its
-  `utun4` default route, which the Wi-Fi-connected board does not inherit.
-
-This is an egress-routing failure, not a DNS, root-certificate, memory, or
-general ESP-IDF TLS failure. Production should route the board or its Wi-Fi
-VLAN through a trusted VPN gateway so HTTPS remains end-to-end between the P4
-and the provider. A development relay on the Mac can unblock integration, but
-it is not a 24/7 deployment dependency. A TLS-terminating cloud relay is not an
-equivalent security boundary because it can observe provider credentials and
-request bodies.
-
-The display projection must expose Wi-Fi, Codex and Robinhood link state
-independently. A healthy heartbeat or broker route must never be presented as
-an operational agent when the model route is unavailable.
-
-## Capability and authority boundary
-
-The model receives only read-only research/portfolio tools and proposal-only
-reasoning tools. Authentication is infrastructure, `risk.evaluate` is pure
-host code, approval is a short-lived host ticket, and `execution.submit` is a
-disabled host-only capability. The complete capability graph, evidence
-contract and order state machine are documented in
-[`agent-tool-architecture.md`](agent-tool-architecture.md).
-
-## Security and trading rollout
-
-1. Boot probe and display status with networking disabled.
-2. Wi-Fi companion connectivity and verified HTTPS.
-3. Codex auth experiment. Show `Coding Plan` and `API key` as distinct modes.
-4. Robinhood Agentic MCP OAuth with read-only portfolio synchronization.
-5. Paper trading or confirmation-gated order intents.
-6. Live orders only after hard limits, idempotency, an on-device kill switch,
-   and recovery tests are verified.
-
-Secrets are provisioned after flashing and are never committed, embedded with
-`env!`, or printed in serial logs. The current Wi-Fi milestone stores its
-credential in the board's default NVS partition, which is not yet encrypted.
-Encrypted NVS, a keys partition, and the final flash/secure-boot policy are a
-hard gate before Codex or Robinhood refresh tokens may be stored on-device.
-The embedded secret policy enforces that gate in code: development NVS may
-persist only the Wi-Fi password; Codex refresh tokens, OpenAI API keys and
-Robinhood refresh tokens remain volatile. Enabling HMAC-backed NVS encryption
-can burn an eFuse key, so preparing the partition/configuration is reversible
-but activating it on this physical board requires explicit approval.
-
-The Coding Plan experiment follows Pocket Pi's existing Pi dependency: Pi
-0.81.1 exposes an `openai-codex` headless device-code login for ChatGPT Plus/Pro.
-The P4 port will reimplement only its device authorization, PKCE, refresh, and
-SSE request path in Rust using the hardware RNG and ESP-IDF TLS. It will not
-bring the Node-only OAuth server or the full provider SDK onto the device. API
-key mode targets the public OpenAI API and remains an explicit fallback.
-
-Robinhood uses Streamable HTTP MCP at
-`https://agent.robinhood.com/mcp/trading`. Its published authorization metadata
-advertises Authorization Code with PKCE S256, refresh tokens, and dynamic client
-registration. Initial Agentic account onboarding must be completed in a desktop
-browser. The firmware starts by exposing only `get_accounts` and `get_portfolio`;
-order tools stay behind the device-enforced `TradingPolicy`, whose default is
-read-only.
-
-## Build
-
-The firmware is an independent ESP-IDF workspace so desktop CI remains
-unchanged:
+The physical host boots with a small offline model adapter so the firmware is
+self-contained. OpenAI, OpenRouter, Anthropic or UART adapters are host choices;
+they are not compiled into the UI or embedded agent core.
 
 ```sh
-cd firmware/esp32-p4
-cargo build --release
+cargo xtask build macos
+cargo xtask build esp32-p4
+cargo xtask build esp32-p4-sim
+cargo xtask run esp32-p4-sim
+cargo xtask snapshot esp32-p4-sim
 ```
 
-Once the board enumerates over USB:
+The simulator is a product-level simulator, not a CPU emulator. It recompiles
+the embedded Rust profile for macOS and substitutes host filesystem, input and
+wgpu display adapters. ESP-IDF, PSRAM, PPA, MIPI-DSI, touch-controller and Wi-Fi
+driver behavior still require a physical-board test.
 
-```sh
-cargo run --release
-```
+## Shared UI contract
 
-The configured runner invokes `espflash flash --monitor`.
+`pocket-pi-app-core` owns the versioned `AppSnapshot` and `AppCommand` wire
+types. `apps/agent-shell` receives snapshots and emits commands over the
+PocketJS service mailbox. The UI has no filesystem, model, network or secret
+access of its own.
 
-The firmware pins its Rust nightly. Update that pin only together with a clean
-P4 build; upstream nightly `std` and ESP-IDF's libc do not always move in lockstep.
+The first shared UI contains Chat and Workspace. Provider-specific product
+features do not belong in Pocket Pi core.

@@ -1,0 +1,27 @@
+#!/bin/sh
+
+set -eu
+
+firmware_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+sysroot=
+for candidate in \
+    "$firmware_root"/.embuild/espressif/tools/riscv32-esp-elf/*/riscv32-esp-elf/riscv32-esp-elf
+do
+    if [ -f "$candidate/include/stdio.h" ]; then
+        sysroot=$candidate
+        break
+    fi
+done
+
+if [ -z "$sysroot" ]; then
+    echo "ESP32-P4 sysroot is missing; run cargo once so esp-idf-sys installs it" >&2
+    exit 1
+fi
+
+if [ -n "${BINDGEN_EXTRA_CLANG_ARGS:-}" ]; then
+    export BINDGEN_EXTRA_CLANG_ARGS="--sysroot=$sysroot $BINDGEN_EXTRA_CLANG_ARGS"
+else
+    export BINDGEN_EXTRA_CLANG_ARGS="--sysroot=$sysroot"
+fi
+
+exec cargo "$@"

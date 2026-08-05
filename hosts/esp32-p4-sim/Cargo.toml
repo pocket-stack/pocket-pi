@@ -1,0 +1,21 @@
+[package]
+name = "pocket-pi-esp32-p4-sim"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+env_logger = "0.11"
+log.workspace = true
+pocket-pi-app-core = { path = "../../crates/pocket-pi-app-core" }
+pocket-pi-embedded = { path = "../../crates/pocket-pi-embedded" }
+pocket-mod = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "4c5dc9ef1dd26e6f49b036c210931d399f2b52b2" }
+pocket-ui-wgpu = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "4c5dc9ef1dd26e6f49b036c210931d399f2b52b2" }
+pocket3d = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "4c5dc9ef1dd26e6f49b036c210931d399f2b52b2", default-features = false }
+pollster = "0.4"
+serde_json.workspace = true
+wgpu = "25"
+winit = "0.30"

@@ -1,5 +1,6 @@
 use core::time::Duration;
 use std::io::Read;
+use std::sync::{mpsc, Arc};
 
 use embedded_svc::http::{client::Client as HttpClient, Method};
 use esp_idf_svc::eventloop::EspSystemEventLoop;
@@ -9,33 +10,88 @@ use esp_idf_svc::http::client::{Configuration as HttpConfiguration, EspHttpConne
 use esp_idf_svc::netif::{EspNetif, NetifStack};
 use esp_idf_svc::nvs::{EspDefaultNvs, EspDefaultNvsPartition};
 use esp_idf_svc::wifi::{AuthMethod, ClientConfiguration, Configuration, WifiDriver};
-use pocket_pi_embedded_core::{AgentState, DeviceState, LinkState, SecretKind, SecretStorePolicy};
-use pocketjs_core::{spec, Ui};
+use pocket_mod::Guest;
+use pocket_pi_app_core::{
+    decode_command, encode_snapshot, AppCommand, AppSnapshot, FileEntry, OpenFile, Role,
+    SystemState, Turn,
+};
+use pocket_pi_embedded::{ModelBackend, PiEmbedded, ToolHost, ToolResult};
+use pocket_ui_surface::UiSurface;
 use pocketjs_esp32p4_ppa::{PpaOps, Rect, Renderer, RendererConfig, SrmTransform};
 
 const BOARD_NAME: &str = "Waveshare ESP32-P4-WIFI6-Touch-LCD-5";
-const PANEL_WIDTH: f32 = 720.0;
-const PANEL_HEIGHT: f32 = 1280.0;
+const PANEL_WIDTH: u32 = 720;
+const PANEL_HEIGHT: u32 = 1280;
+const LOGICAL_WIDTH: f32 = 360.0;
+const LOGICAL_HEIGHT: f32 = 640.0;
+const UI_JS: &str = include_str!("../../../artifacts/ui/agent-shell.js");
+const UI_PAK: &[u8] = include_bytes!("../../../artifacts/ui/agent-shell.pak");
 const WIFI_SSID_PRIMARY: &str = "<Y/OUR SPACE>_5g";
 const WIFI_SSID_FALLBACK: &str = "<Y/OUR SPACE>_2.4G";
 const WIFI_NVS_NAMESPACE: &str = "pocket_pi";
 const WIFI_NVS_PASSWORD_KEY: &str = "wifi_pass";
 const WIFI_PROVISION_PREFIX: &str = "PPI-WIFI-PASS:";
+const ANALOG_CENTER: u32 = 0x8080;
 
 fn main() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
 
-    let mut state = DeviceState::default();
-    state.begin_boot();
+    let surface = UiSurface::new_with_density((LOGICAL_WIDTH, LOGICAL_HEIGHT), 2);
+    surface.set_svc_allowlist(["pocket-pi"]);
+    surface.feed_pak(UI_PAK);
+    let guest = Guest::new()?;
+    surface.mount(&guest)?;
+    guest.eval("agent-shell", UI_JS)?;
 
-    // Construct both objects here so the real PocketJS P4 renderer remains in
-    // the cross-compiled firmware rather than a mock UI path. The panel BSP
-    // will attach this logical viewport to the MIPI-DSI framebuffer next.
-    let mut ui = Ui::new();
-    ui.set_viewport(PANEL_WIDTH, PANEL_HEIGHT);
-    let mut renderer = Renderer::new(RendererConfig::default())
-        .ok_or_else(|| anyhow::anyhow!("invalid PocketJS renderer configuration"))?;
+    let mut state = AppSnapshot {
+        system: SystemState {
+            backend: "EMBEDDED".into(),
+            network: "CONNECTING".into(),
+            free_ram_kib: memory_snapshot().free_heap / 1024,
+            fps: 0,
+        },
+        ..AppSnapshot::default()
+    };
+    state.workspace.path = "/workspace".into();
+    state.workspace.entries = vec![
+        FileEntry {
+            name: "memory.md".into(),
+            size: 69,
+            modified_unix_seconds: 0,
+        },
+        FileEntry {
+            name: "notes.txt".into(),
+            size: 48,
+            modified_unix_seconds: 0,
+        },
+    ];
+    state.chat.turns.push(Turn {
+        id: 1,
+        role: Role::Assistant,
+        text: "Pocket Pi ESP32-P4 host is ready.".into(),
+        streaming: false,
+    });
+    surface.svc_push(encode_snapshot(&state)?);
+    guest.frame(0)?;
+    surface.tick();
+
+    let (delta_tx, delta_rx) = mpsc::channel();
+    let agent = PiEmbedded::new(
+        r#"{"provider":"offline","model":"esp32-p4","systemPrompt":"You are Pocket Pi."}"#,
+        Arc::new(OfflineModel),
+        Arc::new(NoTools),
+        Arc::new(move |delta| {
+            delta_tx.send(delta).ok();
+        }),
+    )
+    .map_err(anyhow::Error::msg)?;
+
+    let mut renderer = Renderer::new(RendererConfig {
+        scale: 2,
+        ..RendererConfig::default()
+    })
+    .ok_or_else(|| anyhow::anyhow!("invalid PocketJS renderer configuration"))?;
 
     let memory = memory_snapshot();
     log::info!("Pocket Pi ESP32-P4 hardware probe: {BOARD_NAME}");
@@ -47,17 +103,17 @@ fn main() -> anyhow::Result<()> {
         memory.psram_total,
         memory.psram_free,
     );
-    log::info!("device state: {state:?}");
     log::info!(
-        "PocketJS P4 renderer ready: viewport={:?} scale={}",
-        ui.viewport(),
+        "PocketJS agent shell ready: logical={}x{} scale={}",
+        LOGICAL_WIDTH,
+        LOGICAL_HEIGHT,
         renderer.config().scale,
     );
 
     // Keep the handles alive for the process lifetime. This first display
     // milestone uses the DSI engine's vertical color-bar pattern so panel
     // timing can be verified independently of the PocketJS framebuffer path.
-    let mut display = match init_display_probe(&mut renderer, &ui, &state) {
+    let mut display = match init_display_probe(&mut renderer, &surface) {
         Ok(display) => {
             log::info!("MIPI-DSI panel probe active");
             Some(display)
@@ -71,7 +127,7 @@ fn main() -> anyhow::Result<()> {
     let _wifi = match init_wifi() {
         Ok(wifi) => {
             log::info!("C6-SDIO Wi-Fi and lwIP netif active");
-            state.set_network_online();
+            state.system.network = "ONLINE".into();
             Some(wifi)
         }
         Err(error) => {
@@ -80,63 +136,170 @@ fn main() -> anyhow::Result<()> {
         }
     };
     log::info!(
-        "network targets staged: codex_api={} codex_plan={} robinhood_mcp={}",
-        pocket_pi_embedded_net::codex::OPENAI_API_BASE_URL,
-        pocket_pi_embedded_net::codex::CODEX_BACKEND_BASE_URL,
-        pocket_pi_embedded_net::robinhood::MCP_URL,
-    );
-    let secret_policy = SecretStorePolicy::DEVELOPMENT;
-    log::warn!(
-        "long-lived token persistence enabled={} (HMAC NVS activation requires explicit approval)",
-        secret_policy.may_persist(SecretKind::CodexRefreshToken),
+        "network targets staged: openai={} codex_plan={}",
+        pocket_pi_protocols::model::OPENAI_API_BASE_URL,
+        pocket_pi_protocols::model::CODEX_BACKEND_BASE_URL,
     );
     if _wifi.is_some() {
         match probe_https_origins() {
             Ok(reachability) => {
-                state.codex = match (reachability.codex_backend, reachability.openai_api) {
-                    (true, _) => LinkState::Online,
-                    (false, true) => LinkState::Degraded,
-                    (false, false) => LinkState::Offline,
-                };
-                state.robinhood = if reachability.robinhood {
-                    LinkState::Online
+                state.system.backend = if reachability.codex_backend {
+                    "CODEX PLAN"
+                } else if reachability.openai_api {
+                    "OPENAI API"
                 } else {
-                    LinkState::Offline
-                };
-                state.agent = if reachability.codex_backend || reachability.openai_api {
-                    AgentState::WaitingForAuth
-                } else {
-                    AgentState::NetworkBlocked
-                };
+                    "OFFLINE"
+                }
+                .into();
                 log::info!("HTTPS connectivity probe completed: {reachability:?}");
             }
             Err(error) => log::error!("HTTPS connectivity probe failed: {error:#}"),
         }
     }
+    state.changed();
+    surface.svc_push(encode_snapshot(&state)?);
+    guest.frame(0)?;
+    surface.tick();
     if let Some(display) = display.as_mut() {
-        if let Err(error) = display.render_state(&mut renderer, &ui, &state) {
+        if let Err(error) = display.render(&mut renderer, &surface) {
             log::error!("PocketJS status projection failed: {error:#}");
         }
     }
 
+    let mut touch_down = false;
+    let mut last_heartbeat = std::time::Instant::now();
     loop {
-        log::info!(
-            "heartbeat heap={} psram_free={} agent={:?}",
-            unsafe { esp_idf_svc::sys::esp_get_free_heap_size() },
-            unsafe {
-                esp_idf_svc::sys::heap_caps_get_free_size(esp_idf_svc::sys::MALLOC_CAP_SPIRAM)
-            },
-            state.agent,
-        );
-        std::thread::sleep(Duration::from_secs(5));
+        let touches = display
+            .as_mut()
+            .and_then(DisplayProbe::read_touch)
+            .map(|(x, y)| vec![pack_touch(x as u32 / 2, y as u32 / 2)])
+            .unwrap_or_default();
+        let is_touch_down = !touches.is_empty();
+        guest.frame_with_touches(0, ANALOG_CENTER, &touches)?;
+        surface.tick();
+
+        let mut redraw = touch_down != is_touch_down;
+        touch_down = is_touch_down;
+        for line in surface.svc_drain() {
+            match decode_command(&line) {
+                Ok(command) => {
+                    handle_command(command, &mut state, &agent, &delta_rx)?;
+                    redraw = true;
+                }
+                Err(error) => log::warn!("invalid UI command: {error}"),
+            }
+        }
+        if redraw {
+            state.system.free_ram_kib = memory_snapshot().free_heap / 1024;
+            state.changed();
+            surface.svc_push(encode_snapshot(&state)?);
+            guest.frame(0)?;
+            surface.tick();
+            if let Some(display) = display.as_mut() {
+                display.render(&mut renderer, &surface)?;
+            }
+        }
+        if last_heartbeat.elapsed() >= Duration::from_secs(5) {
+            log::info!(
+                "heartbeat heap={} psram_free={}",
+                unsafe { esp_idf_svc::sys::esp_get_free_heap_size() },
+                unsafe {
+                    esp_idf_svc::sys::heap_caps_get_free_size(esp_idf_svc::sys::MALLOC_CAP_SPIRAM)
+                },
+            );
+            last_heartbeat = std::time::Instant::now();
+        }
+        std::thread::sleep(Duration::from_millis(30));
     }
+}
+
+struct OfflineModel;
+
+impl ModelBackend for OfflineModel {
+    fn complete(
+        &self,
+        _request_json: &str,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> Result<String, String> {
+        let text =
+            "Embedded Pi is running. Configure a model adapter to replace this offline reply.";
+        on_delta(text);
+        Ok(r#"{"text":"Embedded Pi is running. Configure a model adapter to replace this offline reply."}"#.into())
+    }
+}
+
+struct NoTools;
+
+impl ToolHost for NoTools {
+    fn execute(&self, _call_id: &str, name: &str, _args_json: &str) -> ToolResult {
+        ToolResult {
+            text: format!("tool not configured: {name}"),
+            is_error: true,
+            terminate: false,
+        }
+    }
+}
+
+fn handle_command(
+    command: AppCommand,
+    state: &mut AppSnapshot,
+    agent: &PiEmbedded,
+    delta_rx: &mpsc::Receiver<String>,
+) -> anyhow::Result<()> {
+    match command {
+        AppCommand::SwitchView { view } => state.active_view = view,
+        AppCommand::SendPrompt { text } if !text.trim().is_empty() => {
+            let next_id = state.chat.turns.last().map(|turn| turn.id + 1).unwrap_or(1);
+            state.chat.busy = true;
+            state.chat.turns.push(Turn {
+                id: next_id,
+                role: Role::User,
+                text: text.clone(),
+                streaming: false,
+            });
+            agent.prompt(&text).map_err(anyhow::Error::msg)?;
+            agent.pump().map_err(anyhow::Error::msg)?;
+            let reply = delta_rx.try_iter().collect::<String>();
+            state.chat.turns.push(Turn {
+                id: next_id + 1,
+                role: Role::Assistant,
+                text: reply,
+                streaming: false,
+            });
+            state.chat.busy = false;
+            if state.chat.turns.len() > 10 {
+                state.chat.turns.drain(0..state.chat.turns.len() - 10);
+            }
+        }
+        AppCommand::OpenPath { name } => {
+            let content = match name.as_str() {
+                "memory.md" => {
+                    Some("# Pocket Pi memory\n\nThis workspace belongs to the embedded agent.")
+                }
+                "notes.txt" => Some("Chat and workspace use one shared PocketJS UI."),
+                _ => None,
+            };
+            if let Some(content) = content {
+                state.workspace.open_file = Some(OpenFile {
+                    name,
+                    content: content.into(),
+                });
+            }
+        }
+        AppCommand::CloseFile => state.workspace.open_file = None,
+        AppCommand::SendPrompt { .. } => {}
+    }
+    Ok(())
+}
+
+fn pack_touch(x: u32, y: u32) -> u32 {
+    0x8000_0000 | ((y & 0x3ff) << 10) | (x & 0x3ff)
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct HttpsReachability {
     openai_api: bool,
     codex_backend: bool,
-    robinhood: bool,
 }
 
 fn probe_https_origins() -> anyhow::Result<HttpsReachability> {
@@ -146,11 +309,6 @@ fn probe_https_origins() -> anyhow::Result<HttpsReachability> {
         (
             "codex-backend",
             "https://chatgpt.com/backend-api/models",
-            false,
-        ),
-        (
-            "robinhood-mcp",
-            pocket_pi_embedded_net::robinhood::MCP_URL,
             false,
         ),
     ];
@@ -194,7 +352,6 @@ fn probe_https_origins() -> anyhow::Result<HttpsReachability> {
                     match name {
                         "openai-api" => reachability.openai_api = true,
                         "codex-backend" => reachability.codex_backend = true,
-                        "robinhood-mcp" => reachability.robinhood = true,
                         _ => {}
                     }
                 }
@@ -208,7 +365,7 @@ fn probe_https_origins() -> anyhow::Result<HttpsReachability> {
     if !control_ok {
         anyhow::bail!("control HTTPS origin was unreachable")
     }
-    log::info!("target HTTPS reachability: {target_ok}/3");
+    log::info!("target HTTPS reachability: {target_ok}/2");
     Ok(reachability)
 }
 
@@ -416,18 +573,22 @@ fn validate_wifi_password(password: &str) -> anyhow::Result<()> {
 struct DisplayProbe {
     _panel: esp_idf_svc::sys::esp_lcd_panel_handle_t,
     _io: esp_idf_svc::sys::esp_lcd_panel_io_handle_t,
-    _framebuffer: *mut u16,
+    _touch: esp_idf_svc::sys::esp_lcd_touch_handle_t,
+    _framebuffers: [*mut u16; 3],
+    next_framebuffer: usize,
 }
 
 fn init_display_probe(
     renderer: &mut Renderer,
-    ui: &Ui,
-    state: &DeviceState,
+    surface: &UiSurface,
 ) -> anyhow::Result<DisplayProbe> {
     unsafe {
         let mut panel = core::ptr::null_mut();
         let mut io = core::ptr::null_mut();
-        let mut framebuffer = core::ptr::null_mut();
+        let mut touch = core::ptr::null_mut();
+        let mut framebuffer_0 = core::ptr::null_mut();
+        let mut framebuffer_1 = core::ptr::null_mut();
+        let mut framebuffer_2 = core::ptr::null_mut();
 
         esp_result(
             "bsp_display_new",
@@ -435,27 +596,29 @@ fn init_display_probe(
         )?;
         esp_result(
             "esp_lcd_dpi_panel_get_frame_buffer",
-            esp_idf_svc::sys::esp_lcd_dpi_panel_get_frame_buffer(panel, 1, &mut framebuffer),
+            esp_idf_svc::sys::esp_lcd_dpi_panel_get_frame_buffer(
+                panel,
+                3,
+                &mut framebuffer_0,
+                &mut framebuffer_1,
+                &mut framebuffer_2,
+            ),
         )?;
-        if framebuffer.is_null() {
+        let framebuffers = [framebuffer_0, framebuffer_1, framebuffer_2];
+        if framebuffers.iter().any(|framebuffer| framebuffer.is_null()) {
             anyhow::bail!("esp_lcd_dpi_panel_get_frame_buffer returned a null buffer")
         }
 
         let pixels = core::slice::from_raw_parts_mut(
-            framebuffer.cast::<u16>(),
+            framebuffers[0].cast::<u16>(),
             PANEL_WIDTH as usize * PANEL_HEIGHT as usize,
         );
         let mut software = SoftwareOnly;
-        let words = dashboard_draw_list(state);
-        let stats = renderer
-            .render(
-                ui,
-                &words,
-                pixels,
-                PANEL_WIDTH as u32,
-                PANEL_HEIGHT as u32,
-                &mut software,
-            )
+        let stats = surface
+            .with_ui(|ui| {
+                let words = ui.draw().words.clone();
+                renderer.render(ui, &words, pixels, PANEL_WIDTH, PANEL_HEIGHT, &mut software)
+            })
             .ok_or_else(|| anyhow::anyhow!("PocketJS rejected the panel framebuffer geometry"))?;
 
         esp_result(
@@ -477,48 +640,50 @@ fn init_display_probe(
                 0,
                 PANEL_WIDTH as i32,
                 PANEL_HEIGHT as i32,
-                framebuffer,
+                framebuffers[0],
             ),
         )?;
         esp_result(
             "bsp_display_backlight_on",
             esp_idf_svc::sys::bsp_display_backlight_on(),
         )?;
+        esp_result(
+            "pi_p4_touch_new",
+            esp_idf_svc::sys::pi_p4_touch_new(&mut touch),
+        )?;
 
-        log::info!("PocketJS framebuffer probe: address={framebuffer:p} stats={stats:?}");
+        log::info!(
+            "PocketJS triple-buffer probe: fb0={:p} fb1={:p} fb2={:p} stats={stats:?}",
+            framebuffers[0],
+            framebuffers[1],
+            framebuffers[2]
+        );
 
         Ok(DisplayProbe {
             _panel: panel,
             _io: io,
-            _framebuffer: framebuffer.cast(),
+            _touch: touch,
+            _framebuffers: framebuffers.map(|framebuffer| framebuffer.cast()),
+            next_framebuffer: 1,
         })
     }
 }
 
 impl DisplayProbe {
-    fn render_state(
-        &mut self,
-        renderer: &mut Renderer,
-        ui: &Ui,
-        state: &DeviceState,
-    ) -> anyhow::Result<()> {
+    fn render(&mut self, renderer: &mut Renderer, surface: &UiSurface) -> anyhow::Result<()> {
+        let framebuffer = self._framebuffers[self.next_framebuffer];
         let pixels = unsafe {
             core::slice::from_raw_parts_mut(
-                self._framebuffer,
+                framebuffer,
                 PANEL_WIDTH as usize * PANEL_HEIGHT as usize,
             )
         };
         let mut software = SoftwareOnly;
-        let words = dashboard_draw_list(state);
-        renderer
-            .render(
-                ui,
-                &words,
-                pixels,
-                PANEL_WIDTH as u32,
-                PANEL_HEIGHT as u32,
-                &mut software,
-            )
+        surface
+            .with_ui(|ui| {
+                let words = ui.draw().words.clone();
+                renderer.render(ui, &words, pixels, PANEL_WIDTH, PANEL_HEIGHT, &mut software)
+            })
             .ok_or_else(|| anyhow::anyhow!("PocketJS rejected the status framebuffer geometry"))?;
 
         esp_result("esp_lcd_panel_draw_bitmap", unsafe {
@@ -528,9 +693,17 @@ impl DisplayProbe {
                 0,
                 PANEL_WIDTH as i32,
                 PANEL_HEIGHT as i32,
-                self._framebuffer.cast(),
+                framebuffer.cast(),
             )
-        })
+        })?;
+        self.next_framebuffer = (self.next_framebuffer + 1) % self._framebuffers.len();
+        Ok(())
+    }
+
+    fn read_touch(&mut self) -> Option<(u16, u16)> {
+        let mut x = 0u16;
+        let mut y = 0u16;
+        unsafe { esp_idf_svc::sys::pi_p4_touch_read(self._touch, &mut x, &mut y).then_some((x, y)) }
     }
 }
 
@@ -568,69 +741,6 @@ impl PpaOps for SoftwareOnly {
     ) -> bool {
         false
     }
-}
-
-fn dashboard_draw_list(state: &DeviceState) -> Vec<u32> {
-    let mut words = Vec::new();
-    let mut rect = |x, y, width, height, color| {
-        words.extend_from_slice(&[spec::draw_op::RECT, xy(x, y), wh(width, height), color]);
-    };
-
-    // A credential-free dashboard skeleton. It proves the exact PocketJS
-    // DrawList -> RGB565 -> native DSI framebuffer route before QuickJS and
-    // the compiled JSX dashboard are loaded.
-    rect(0, 0, 720, 1280, 0xfff1_f5f9);
-    rect(0, 0, 720, 128, 0xff0f_172a);
-    rect(36, 42, 36, 36, agent_state_color(state.agent));
-    rect(532, 48, 28, 28, link_state_color(state.wifi));
-    rect(584, 48, 28, 28, link_state_color(state.codex));
-    rect(636, 48, 28, 28, link_state_color(state.robinhood));
-    rect(32, 164, 656, 264, 0xffff_ffff);
-    rect(56, 196, 12, 196, 0xff10_b981);
-    rect(96, 212, 540, 44, 0xffcbd_5e1);
-    rect(96, 280, 408, 72, 0xff0f_172a);
-    rect(32, 460, 656, 680, 0xffff_ffff);
-    for row in 0..4 {
-        let y = 504 + row * 144;
-        rect(56, y, 128, 72, 0xffe2_e8f0);
-        rect(220, y, 248, 48, 0xff94_a3b8);
-        rect(
-            532,
-            y,
-            116,
-            48,
-            if row == 2 { 0xffef_4444 } else { 0xff10_b981 },
-        );
-    }
-    rect(32, 1172, 656, 76, 0xffe2_e8f0);
-    words
-}
-
-const fn link_state_color(state: LinkState) -> u32 {
-    match state {
-        LinkState::Disabled => 0xff64_748b,
-        LinkState::Connecting => 0xfff5_9e0b,
-        LinkState::Online => 0xff10_b981,
-        LinkState::Degraded => 0xfff9_7316,
-        LinkState::Offline => 0xffef_4444,
-    }
-}
-
-const fn agent_state_color(state: AgentState) -> u32 {
-    match state {
-        AgentState::Stopped => 0xff64_748b,
-        AgentState::Starting | AgentState::WaitingForAuth => 0xfff5_9e0b,
-        AgentState::Idle | AgentState::Thinking | AgentState::Acting => 0xff10_b981,
-        AgentState::NetworkBlocked | AgentState::Faulted => 0xffef_4444,
-    }
-}
-
-const fn xy(x: i16, y: i16) -> u32 {
-    x as u16 as u32 | ((y as u16 as u32) << 16)
-}
-
-const fn wh(width: u16, height: u16) -> u32 {
-    width as u32 | ((height as u32) << 16)
 }
 
 fn esp_result(operation: &str, code: esp_idf_svc::sys::esp_err_t) -> anyhow::Result<()> {

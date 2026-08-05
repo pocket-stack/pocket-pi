@@ -24,12 +24,15 @@ opt-level = "z"
 [dependencies]
 anyhow = "1"
 log = "0.4"
-pocket-pi-embedded-core = { path = "../../crates/pocket-pi-embedded-core" }
-pocket-pi-embedded-net = { path = "../../crates/pocket-pi-embedded-net" }
+pocket-pi-app-core = { path = "../../crates/pocket-pi-app-core" }
+pocket-pi-embedded = { path = "../../crates/pocket-pi-embedded" }
+pocket-pi-protocols = { path = "../../crates/pocket-pi-protocols" }
 esp-idf-svc = { version = "0.52.1", features = ["critical-section"] }
 embedded-svc = "0.29"
 pocketjs-core = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "4c5dc9ef1dd26e6f49b036c210931d399f2b52b2" }
 pocketjs-esp32p4-ppa = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "4c5dc9ef1dd26e6f49b036c210931d399f2b52b2" }
+pocket-mod = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "4c5dc9ef1dd26e6f49b036c210931d399f2b52b2" }
+pocket-ui-surface = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "4c5dc9ef1dd26e6f49b036c210931d399f2b52b2" }
 
 [build-dependencies]
 embuild = "0.33"
