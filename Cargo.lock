@@ -2514,10 +2514,13 @@ dependencies = [
  "pocket-mod",
  "pocket-pi-app-core",
  "pocket-pi-embedded",
+ "pocket-pi-protocols",
  "pocket-ui-wgpu",
  "pocket3d",
  "pollster",
  "serde_json",
+ "tempfile",
+ "ureq",
  "wgpu",
  "winit",
 ]
@@ -3296,6 +3299,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tempfile"
+version = "3.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
+dependencies = [
+ "fastrand",
+ "getrandom 0.4.3",
+ "once_cell",
+ "rustix 1.1.4",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "termcolor"
 version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3490,6 +3506,8 @@ dependencies = [
  "once_cell",
  "rustls",
  "rustls-pki-types",
+ "serde",
+ "serde_json",
  "url",
  "webpki-roots 0.26.11",
 ]

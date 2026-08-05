@@ -10,13 +10,17 @@ use pocket_pi_app_core::{
     decode_command, encode_snapshot, AppCommand, AppSnapshot, FileEntry, OpenFile, Role,
     SystemState, Turn, View,
 };
-use pocket_pi_embedded::{ModelBackend, PiEmbedded, ToolHost, ToolResult};
+use pocket_pi_embedded::{PiEmbedded, ToolHost, ToolResult};
 use pocket_ui_wgpu::{UiRenderer, UiSurface};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
+
+mod backend;
+
+use backend::BackendChoice;
 
 const UI_WIDTH: u32 = 360;
 const UI_HEIGHT: u32 = 640;
@@ -36,6 +40,7 @@ struct Args {
     prompt: Option<String>,
     workspace: PathBuf,
     view: View,
+    backend: BackendChoice,
 }
 
 fn main() -> Result<()> {
@@ -43,9 +48,9 @@ fn main() -> Result<()> {
     let args = parse_args()?;
     prepare_workspace(&args.workspace)?;
     if let Some(path) = args.screenshot {
-        headless(path, args.workspace, args.prompt, args.view)
+        headless(path, args.workspace, args.prompt, args.view, args.backend)
     } else {
-        windowed(args.workspace, args.prompt, args.view)
+        windowed(args.workspace, args.prompt, args.view, args.backend)
     }
 }
 
@@ -55,6 +60,8 @@ fn parse_args() -> Result<Args> {
     let mut workspace =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/esp32-p4-sim/workspace");
     let mut view = View::Chat;
+    let mut backend = std::env::var("POCKET_PI_BACKEND").unwrap_or_else(|_| "scripted".into());
+    let mut model = None;
     let mut args = std::env::args().skip(1);
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -68,6 +75,8 @@ fn parse_args() -> Result<Args> {
                     value => return Err(anyhow!("unknown view: {value}")),
                 }
             }
+            "--backend" => backend = next(&mut args, "--backend")?,
+            "--model" => model = Some(next(&mut args, "--model")?),
             other => return Err(anyhow!("unknown argument: {other}")),
         }
     }
@@ -76,6 +85,7 @@ fn parse_args() -> Result<Args> {
         prompt,
         workspace,
         view,
+        backend: BackendChoice::from_name(&backend, model).map_err(anyhow::Error::msg)?,
     })
 }
 
@@ -125,23 +135,6 @@ enum AgentEvent {
     Failed(String),
 }
 
-struct ScriptedBackend;
-
-impl ModelBackend for ScriptedBackend {
-    fn complete(
-        &self,
-        _request_json: &str,
-        on_delta: &mut dyn FnMut(&str),
-    ) -> Result<String, String> {
-        let text = "Embedded Pi is running the real pi-agent-core profile. Chat and workspace are rendered by the shared PocketJS UI.";
-        for word in text.split_inclusive(' ') {
-            on_delta(word);
-            std::thread::sleep(Duration::from_millis(35));
-        }
-        Ok(serde_json::json!({"text": text}).to_string())
-    }
-}
-
 struct NoTools;
 
 impl ToolHost for NoTools {
@@ -154,14 +147,16 @@ impl ToolHost for NoTools {
     }
 }
 
-fn spawn_agent() -> (Sender<String>, Receiver<AgentEvent>) {
+fn spawn_agent(backend: BackendChoice) -> (Sender<String>, Receiver<AgentEvent>) {
     let (prompt_tx, prompt_rx) = mpsc::channel::<String>();
     let (event_tx, event_rx) = mpsc::channel::<AgentEvent>();
+    let config = backend.agent_config();
+    let backend = backend.build();
     std::thread::spawn(move || {
         let delta_tx = event_tx.clone();
         let runtime = PiEmbedded::new(
-            r#"{"provider":"openai","model":"simulated","systemPrompt":"You are Pocket Pi in the ESP32 simulator."}"#,
-            Arc::new(ScriptedBackend),
+            &config,
+            backend,
             Arc::new(NoTools),
             Arc::new(move |delta| {
                 delta_tx.send(AgentEvent::Delta(delta)).ok();
@@ -195,14 +190,15 @@ struct Product {
 }
 
 impl Product {
-    fn new(workspace: PathBuf) -> Result<Self> {
-        let (prompt_tx, agent_rx) = spawn_agent();
+    fn new(workspace: PathBuf, backend: BackendChoice) -> Result<Self> {
+        let backend_label = backend.label();
+        let (prompt_tx, agent_rx) = spawn_agent(backend);
         let mut product = Self {
             workspace,
             snapshot: AppSnapshot {
                 active_view: View::Chat,
                 system: SystemState {
-                    backend: "EMBEDDED SIM".into(),
+                    backend: backend_label,
                     network: "ONLINE".into(),
                     free_ram_kib: 24 * 1024,
                     fps: 60,
@@ -360,21 +356,31 @@ impl Product {
     }
 }
 
-fn headless(output: PathBuf, workspace: PathBuf, prompt: Option<String>, view: View) -> Result<()> {
+fn headless(
+    output: PathBuf,
+    workspace: PathBuf,
+    prompt: Option<String>,
+    view: View,
+    backend: BackendChoice,
+) -> Result<()> {
     let (guest, surface) = boot_ui()?;
-    let mut product = Product::new(workspace)?;
+    let mut product = Product::new(workspace, backend)?;
     product.snapshot.active_view = view;
     product.changed();
+    let wait_for_turn = prompt.is_some();
     if let Some(prompt) = prompt {
         product.send_prompt(prompt);
     }
     let gpu = Gpu::new_headless()?;
     let target = OffscreenTarget::new(&gpu, UI_WIDTH * RASTER_DENSITY, UI_HEIGHT * RASTER_DENSITY);
     let mut renderer = UiRenderer::new(&gpu, pocket3d::gpu::OFFSCREEN_FORMAT);
-    for _ in 0..30 {
+    for frame in 0..7_500 {
         product.exchange(&surface);
         guest.frame(0)?;
         surface.tick();
+        if frame >= 30 && (!wait_for_turn || !product.snapshot.chat.busy) {
+            break;
+        }
         std::thread::sleep(Duration::from_millis(16));
     }
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
@@ -420,16 +426,23 @@ struct WindowApp {
     workspace: PathBuf,
     initial_prompt: Option<String>,
     initial_view: View,
+    backend: Option<BackendChoice>,
     state: Option<WindowState>,
     error: Option<anyhow::Error>,
 }
 
-fn windowed(workspace: PathBuf, prompt: Option<String>, view: View) -> Result<()> {
+fn windowed(
+    workspace: PathBuf,
+    prompt: Option<String>,
+    view: View,
+    backend: BackendChoice,
+) -> Result<()> {
     let event_loop = EventLoop::new()?;
     let mut app = WindowApp {
         workspace,
         initial_prompt: prompt,
         initial_view: view,
+        backend: Some(backend),
         state: None,
         error: None,
     };
@@ -458,7 +471,11 @@ impl WindowApp {
         config.present_mode = wgpu::PresentMode::AutoVsync;
         surface.configure(&gpu.device, &config);
         let renderer = UiRenderer::new(&gpu, config.format);
-        let mut product = Product::new(self.workspace.clone())?;
+        let backend = self
+            .backend
+            .take()
+            .ok_or_else(|| anyhow!("simulator backend was already consumed"))?;
+        let mut product = Product::new(self.workspace.clone(), backend)?;
         product.snapshot.active_view = self.initial_view.clone();
         product.changed();
         if let Some(prompt) = self.initial_prompt.take() {

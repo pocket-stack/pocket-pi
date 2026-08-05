@@ -11,6 +11,10 @@ cargo xtask run esp32-p4-sim
 cargo xtask snapshot esp32-p4-sim
 ```
 
+The ESP simulator defaults to an offline model. Select a real host adapter with
+`--backend openai` (`OPENAI_API_KEY` required) or `--backend codex` (reuses the
+Mac's local Codex login). See [`docs/esp32-p4-port.md`](docs/esp32-p4-port.md).
+
 The ESP32 host and simulator run the same embedded `pi-agent-core` and the same
 PocketJS Chat + Workspace UI. The simulator replaces only hardware adapters; it
 does not pretend to execute the ESP32 firmware ELF. See
