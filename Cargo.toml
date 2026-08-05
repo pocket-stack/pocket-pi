@@ -5,6 +5,7 @@ members = [
     "crates/pocket-pi-embedded",
     "crates/pocket-pi-device-ui",
     "crates/pocket-pi-protocols",
+    "crates/pocket-pi-tools",
     "hosts/macos",
     "hosts/esp32-p4-sim",
     "tools/xtask",

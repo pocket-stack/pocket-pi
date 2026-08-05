@@ -64,6 +64,11 @@ pub enum ScreenInteraction {
     SubmitPrompt(String),
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct UiCapabilities {
+    pub portfolio: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum KeyboardMode {
     Letters,
@@ -266,6 +271,7 @@ pub struct ScreenState {
     pub view: ScreenView,
     pub browser: WorkspaceBrowser,
     pub telemetry: SystemTelemetry,
+    pub capabilities: UiCapabilities,
     schedule: ScheduleProjection,
     portfolios: PortfolioCollection,
     account_index: usize,
@@ -284,10 +290,15 @@ pub struct ScreenState {
 
 impl ScreenState {
     pub fn new(workspace_root: &str) -> Self {
+        Self::with_capabilities(workspace_root, UiCapabilities::default())
+    }
+
+    pub fn with_capabilities(workspace_root: &str, capabilities: UiCapabilities) -> Self {
         Self {
             view: ScreenView::Chat,
             browser: WorkspaceBrowser::new(workspace_root),
             telemetry: SystemTelemetry::default(),
+            capabilities,
             schedule: ScheduleProjection::default(),
             portfolios: PortfolioCollection::default(),
             account_index: 0,
@@ -349,13 +360,13 @@ impl ScreenState {
         if !matches!(self.view, ScreenView::Viewer | ScreenView::MessageReader)
             && y as i16 >= BOTTOM_BAR_Y
         {
-            let next = match x {
-                0..=239 => ScreenView::Chat,
-                240..=479 => {
+            let next = match (self.capabilities.portfolio, x) {
+                (true, 0..=239) | (false, 0..=359) => ScreenView::Chat,
+                (true, 240..=479) | (false, _) => {
                     self.browser.refresh();
                     ScreenView::Files
                 }
-                _ => ScreenView::Robinhood,
+                (true, _) => ScreenView::Robinhood,
             };
             let changed = self.view != next;
             self.view = next;
@@ -724,9 +735,16 @@ impl ScreenState {
                 chat,
                 self.chat_scroll,
                 &self.schedule,
+                self.capabilities.portfolio,
                 self.telemetry,
             ),
-            ScreenView::Files => files_draw_list(ui, state, &self.browser, self.telemetry),
+            ScreenView::Files => files_draw_list(
+                ui,
+                state,
+                &self.browser,
+                self.capabilities.portfolio,
+                self.telemetry,
+            ),
             ScreenView::Robinhood => robinhood_draw_list(
                 ui,
                 state,
@@ -824,6 +842,7 @@ fn chat_draw_list(
     chat: &ChatProjection,
     scroll: usize,
     schedule: &ScheduleProjection,
+    portfolio_enabled: bool,
     telemetry: SystemTelemetry,
 ) -> Vec<u32> {
     let mut words = base_words(ui, state, "ESP32 PI AGENT", telemetry);
@@ -854,7 +873,7 @@ fn chat_draw_list(
     chat_scroll_buttons(ui, &mut words);
     schedule_panel(ui, &mut words, schedule);
     compose_button(ui, &mut words);
-    bottom_bar(ui, &mut words, ScreenView::Chat);
+    bottom_bar(ui, &mut words, ScreenView::Chat, portfolio_enabled);
     words
 }
 
@@ -1289,7 +1308,7 @@ fn robinhood_draw_list(
     }
 
     realized_pnl_card(ui, &mut words, portfolio, span);
-    bottom_bar(ui, &mut words, ScreenView::Robinhood);
+    bottom_bar(ui, &mut words, ScreenView::Robinhood, true);
     words
 }
 
@@ -1693,7 +1712,7 @@ fn accounts_draw_list(
         }
     }
     account_scroll_buttons(ui, &mut words, portfolios.accounts.len());
-    bottom_bar(ui, &mut words, ScreenView::Robinhood);
+    bottom_bar(ui, &mut words, ScreenView::Robinhood, true);
     words
 }
 
@@ -1734,7 +1753,7 @@ fn activities_draw_list(
         }
     }
     activity_scroll_buttons(ui, &mut words);
-    bottom_bar(ui, &mut words, ScreenView::Robinhood);
+    bottom_bar(ui, &mut words, ScreenView::Robinhood, true);
     words
 }
 
@@ -1818,7 +1837,7 @@ fn positions_draw_list(
         }
     }
     position_scroll_buttons(ui, &mut words, portfolio.positions.len());
-    bottom_bar(ui, &mut words, ScreenView::Robinhood);
+    bottom_bar(ui, &mut words, ScreenView::Robinhood, true);
     words
 }
 
@@ -1838,6 +1857,7 @@ fn files_draw_list(
     ui: &Ui,
     state: &DeviceState,
     browser: &WorkspaceBrowser,
+    portfolio_enabled: bool,
     telemetry: SystemTelemetry,
 ) -> Vec<u32> {
     let title = if browser.can_go_up() {
@@ -1924,7 +1944,7 @@ fn files_draw_list(
         push_text(ui, &mut words, status, 56, 1056, 32, 0xffb9_1c1c);
     }
     scroll_buttons(ui, &mut words);
-    bottom_bar(ui, &mut words, ScreenView::Files);
+    bottom_bar(ui, &mut words, ScreenView::Files, portfolio_enabled);
     words
 }
 
@@ -2085,13 +2105,20 @@ fn message_reader_draw_list(
     words
 }
 
-fn bottom_bar(ui: &Ui, words: &mut Vec<u32>, active: ScreenView) {
+fn bottom_bar(ui: &Ui, words: &mut Vec<u32>, active: ScreenView, portfolio_enabled: bool) {
     rect(words, 0, BOTTOM_BAR_Y, PANEL_WIDTH, 108, 0xff0f_172a);
-    let tabs = [
-        (10, 220, "CHAT", ScreenView::Chat),
-        (250, 220, "FILES", ScreenView::Files),
-        (490, 220, "ROBIN", ScreenView::Robinhood),
-    ];
+    let tabs = if portfolio_enabled {
+        vec![
+            (10, 220, "CHAT", ScreenView::Chat),
+            (250, 220, "FILES", ScreenView::Files),
+            (490, 220, "ROBIN", ScreenView::Robinhood),
+        ]
+    } else {
+        vec![
+            (10, 340, "CHAT", ScreenView::Chat),
+            (370, 340, "FILES", ScreenView::Files),
+        ]
+    };
     for (x, width, label, view) in tabs {
         rect(
             words,
@@ -2109,7 +2136,8 @@ fn bottom_bar(ui: &Ui, words: &mut Vec<u32>, active: ScreenView) {
                 0xff1e_293b
             },
         );
-        push_text_bold(ui, words, label, x + 68, BOTTOM_BAR_Y + 44, 8, 0xffff_ffff);
+        let label_x = if portfolio_enabled { x + 68 } else { x + 128 };
+        push_text_bold(ui, words, label, label_x, BOTTOM_BAR_Y + 44, 8, 0xffff_ffff);
     }
 }
 

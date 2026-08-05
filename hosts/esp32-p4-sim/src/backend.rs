@@ -175,6 +175,7 @@ impl ModelBackend for CodexBackend {
         }
         let text = String::from_utf8(output.stdout)
             .map_err(|error| format!("local Codex returned non-UTF-8 output: {error}"))?;
+        log::debug!("local Codex raw decision: {}", text.trim());
         let call_id = format!(
             "sim_{}",
             std::time::SystemTime::now()
@@ -183,6 +184,7 @@ impl ModelBackend for CodexBackend {
                 .unwrap_or_default()
         );
         let result = codex_decision::parse_response(&text, &tools, &call_id)?;
+        log::debug!("local Codex parsed decision: {result}");
         if let Some(text) = serde_json::from_str::<Value>(&result)
             .ok()
             .and_then(|value| value.get("text").and_then(Value::as_str).map(str::to_owned))

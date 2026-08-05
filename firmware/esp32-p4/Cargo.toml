@@ -24,9 +24,11 @@ opt-level = "z"
 [dependencies]
 anyhow = "1"
 log = "0.4"
+serde_json = "1"
 pocket-pi-device-ui = { path = "../../crates/pocket-pi-device-ui" }
 pocket-pi-embedded = { path = "../../crates/pocket-pi-embedded" }
 pocket-pi-protocols = { path = "../../crates/pocket-pi-protocols" }
+pocket-pi-tools = { path = "../../crates/pocket-pi-tools" }
 esp-idf-svc = { version = "0.52.1", features = ["critical-section"] }
 embedded-svc = "0.29"
 pocketjs-core = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "4c5dc9ef1dd26e6f49b036c210931d399f2b52b2" }
@@ -44,3 +46,6 @@ remote_component = { name = "espressif/esp_wifi_remote", version = "0.14.*" }
 
 [[package.metadata.esp-idf-sys.extra_components]]
 remote_component = { name = "espressif/esp_hosted", version = "1.4.*" }
+
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "joltwallet/littlefs", version = "1.14.*" }

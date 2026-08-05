@@ -9,7 +9,8 @@ use pocket_pi_device_ui::{
     load_fonts, AgentState, ChatProjection, DeviceState, ModelBackendSettings, ModelSettings,
     ScreenInteraction, ScreenState, ScreenView, SystemTelemetry, UartProvider, WirelessProvider,
 };
-use pocket_pi_embedded::{PiEmbedded, ToolHost, ToolResult};
+use pocket_pi_embedded::PiEmbedded;
+use pocket_pi_tools::{CoreToolHost, PlatformTools};
 use pocket_ui_wgpu::UiRenderer;
 use pocketjs_core::Ui;
 use winit::application::ApplicationHandler;
@@ -117,19 +118,36 @@ enum AgentEvent {
     Failed(String),
 }
 
-struct NoTools;
+struct SimPlatform;
 
-impl ToolHost for NoTools {
-    fn execute(&self, _call_id: &str, name: &str, _args_json: &str) -> ToolResult {
-        ToolResult {
-            text: format!("tool not configured in simulator: {name}"),
-            is_error: true,
-            terminate: false,
-        }
+impl PlatformTools for SimPlatform {
+    fn device_status(&self) -> serde_json::Value {
+        serde_json::json!({
+            "status":"ok",
+            "board":"esp32-p4-sim",
+            "piHarness":"pi-agent-core",
+            "jsRuntime":"QuickJS via PocketJS host",
+            "simulated":true
+        })
+    }
+
+    fn wifi_status(&self) -> serde_json::Value {
+        serde_json::json!({
+            "status":"connected",
+            "ssid":"macOS host network",
+            "simulated":true
+        })
+    }
+
+    fn reboot(&self) -> Result<serde_json::Value, String> {
+        Ok(serde_json::json!({"status":"scheduled","simulated":true}))
     }
 }
 
-fn spawn_agent(backend: BackendChoice) -> (Sender<String>, Receiver<AgentEvent>) {
+fn spawn_agent(
+    backend: BackendChoice,
+    tools: Arc<CoreToolHost>,
+) -> (Sender<String>, Receiver<AgentEvent>) {
     let (prompt_tx, prompt_rx) = mpsc::channel::<String>();
     let (event_tx, event_rx) = mpsc::channel::<AgentEvent>();
     let config = backend.agent_config();
@@ -139,7 +157,7 @@ fn spawn_agent(backend: BackendChoice) -> (Sender<String>, Receiver<AgentEvent>)
         let runtime = PiEmbedded::new(
             &config,
             backend,
-            Arc::new(NoTools),
+            tools,
             Arc::new(move |delta| {
                 delta_tx.send(AgentEvent::Delta(delta)).ok();
             }),
@@ -168,6 +186,8 @@ struct Product {
     device: DeviceState,
     prompt_tx: Sender<String>,
     agent_rx: Receiver<AgentEvent>,
+    tools: Arc<CoreToolHost>,
+    last_schedule_poll: Instant,
     busy: bool,
     dirty: bool,
 }
@@ -175,7 +195,8 @@ struct Product {
 impl Product {
     fn new(workspace: PathBuf, backend: BackendChoice, view: ScreenView) -> Result<Self> {
         let settings = settings_for(&backend);
-        let (prompt_tx, agent_rx) = spawn_agent(backend);
+        let tools = Arc::new(CoreToolHost::new(workspace.clone(), Arc::new(SimPlatform)));
+        let (prompt_tx, agent_rx) = spawn_agent(backend, Arc::clone(&tools));
         let workspace = workspace
             .to_str()
             .ok_or_else(|| anyhow!("workspace path is not valid UTF-8"))?;
@@ -197,6 +218,8 @@ impl Product {
             },
             prompt_tx,
             agent_rx,
+            tools,
+            last_schedule_poll: Instant::now(),
             busy: false,
             dirty: true,
         })
@@ -250,6 +273,23 @@ impl Product {
                     self.busy = false;
                 }
             }
+            self.dirty = true;
+        }
+        if self.last_schedule_poll.elapsed() >= Duration::from_secs(1) {
+            let schedule = self.tools.schedule_projection();
+            self.screen
+                .set_schedule(pocket_pi_device_ui::ScheduleProjection {
+                    name: schedule.name,
+                    prompt: schedule.prompt,
+                    next_in_seconds: schedule.next_in_seconds,
+                    every_minutes: schedule.every_minutes,
+                });
+            if !self.busy {
+                if let Some(wake) = self.tools.claim_due() {
+                    self.send_prompt(wake.prompt);
+                }
+            }
+            self.last_schedule_poll = Instant::now();
             self.dirty = true;
         }
     }
@@ -535,6 +575,14 @@ mod tests {
         product.tap(360, 1220, &ui);
 
         assert_eq!(product.screen.view, ScreenView::Files);
+        product.screen.view = ScreenView::Chat;
+        product.tap(650, 1220, &ui);
+        assert_eq!(product.screen.view, ScreenView::Files);
+
+        product.screen.capabilities = pocket_pi_device_ui::UiCapabilities { portfolio: true };
+        product.screen.view = ScreenView::Chat;
+        product.tap(650, 1220, &ui);
+        assert_eq!(product.screen.view, ScreenView::Robinhood);
     }
 
     #[test]

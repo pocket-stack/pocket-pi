@@ -20,6 +20,11 @@ PocketJS Chat + Workspace UI. The simulator replaces only hardware adapters; it
 does not pretend to execute the ESP32 firmware ELF. See
 [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
+They also register the same portable native tools. A model running through the
+simulator reads and mutates the Mac workspace through the ESP32
+`read/write/edit/find/grep/ls` contracts, rather than through unrestricted Mac
+filesystem or shell access.
+
 > ESP32-P4 port: active development lives in
 > [`docs/esp32-p4-port.md`](docs/esp32-p4-port.md). The embedded target is a
 > bounded appliance profile; it does not claim the desktop runtime already fits

@@ -15,9 +15,12 @@ use pocket_pi_device_ui::{
     load_fonts, AgentState, ChatProjection, DeviceState, ScreenInteraction, ScreenState,
     SystemTelemetry,
 };
-use pocket_pi_embedded::{ModelBackend, PiEmbedded, ToolHost, ToolResult};
+use pocket_pi_embedded::{ModelBackend, PiEmbedded};
+use pocket_pi_tools::{CoreToolHost, PlatformTools};
 use pocketjs_core::Ui;
 use pocketjs_esp32p4_ppa::{PpaOps, Rect, Renderer, RendererConfig, SrmTransform};
+
+mod storage;
 
 const BOARD_NAME: &str = "Waveshare ESP32-P4-WIFI6-Touch-LCD-5";
 const PANEL_WIDTH: u32 = 720;
@@ -37,16 +40,21 @@ fn main() -> anyhow::Result<()> {
     if !load_fonts(&mut ui) {
         anyhow::bail!("PocketJS rejected the shared Inter font atlases")
     }
+    let _workspace = storage::mount_workspace()?;
 
     let mut device = DeviceState {
         agent: AgentState::Starting,
     };
     let mut chat = ChatProjection::new("TYPE A MESSAGE", "BOOTING PI AGENT...");
-    let mut screen = ScreenState::new("/workspace");
+    let mut screen = ScreenState::new(storage::WORKSPACE_ROOT);
     screen.refresh_workspace();
     screen.set_telemetry(system_telemetry(0));
 
-    let (prompt_tx, agent_rx) = spawn_agent();
+    let tools = Arc::new(CoreToolHost::new(
+        storage::WORKSPACE_ROOT,
+        Arc::new(EspPlatform),
+    ));
+    let (prompt_tx, agent_rx) = spawn_agent(Arc::clone(&tools));
     device.agent = AgentState::Idle;
     chat.set_latest_assistant("ESP32-P4 PI AGENT READY.");
 
@@ -146,6 +154,24 @@ fn main() -> anyhow::Result<()> {
 
         if last_telemetry.elapsed() >= Duration::from_secs(2) {
             screen.set_telemetry(system_telemetry(0));
+            let schedule = tools.schedule_projection();
+            screen.set_schedule(pocket_pi_device_ui::ScheduleProjection {
+                name: schedule.name,
+                prompt: schedule.prompt,
+                next_in_seconds: schedule.next_in_seconds,
+                every_minutes: schedule.every_minutes,
+            });
+            if device.agent == AgentState::Idle {
+                if let Some(wake) = tools.claim_due() {
+                    chat.push_pending(wake.prompt.clone());
+                    screen.show_latest_chat();
+                    device.agent = AgentState::Thinking;
+                    if prompt_tx.send(wake.prompt).is_err() {
+                        chat.fail_pending("AGENT WORKER IS NOT AVAILABLE");
+                        device.agent = AgentState::Faulted;
+                    }
+                }
+            }
             redraw = true;
             last_telemetry = Instant::now();
         }
@@ -175,7 +201,7 @@ enum AgentEvent {
     Failed(String),
 }
 
-fn spawn_agent() -> (mpsc::Sender<String>, mpsc::Receiver<AgentEvent>) {
+fn spawn_agent(tools: Arc<CoreToolHost>) -> (mpsc::Sender<String>, mpsc::Receiver<AgentEvent>) {
     let (prompt_tx, prompt_rx) = mpsc::channel::<String>();
     let (event_tx, event_rx) = mpsc::channel::<AgentEvent>();
     std::thread::spawn(move || {
@@ -183,7 +209,7 @@ fn spawn_agent() -> (mpsc::Sender<String>, mpsc::Receiver<AgentEvent>) {
         let runtime = PiEmbedded::new(
             r#"{"provider":"offline","model":"esp32-p4","systemPrompt":"You are Pocket Pi."}"#,
             Arc::new(OfflineModel),
-            Arc::new(NoTools),
+            tools,
             Arc::new(move |delta| {
                 delta_tx.send(AgentEvent::Delta(delta)).ok();
             }),
@@ -223,15 +249,54 @@ impl ModelBackend for OfflineModel {
     }
 }
 
-struct NoTools;
+struct EspPlatform;
 
-impl ToolHost for NoTools {
-    fn execute(&self, _call_id: &str, name: &str, _args_json: &str) -> ToolResult {
-        ToolResult {
-            text: format!("tool not configured: {name}"),
-            is_error: true,
-            terminate: false,
+impl PlatformTools for EspPlatform {
+    fn device_status(&self) -> serde_json::Value {
+        serde_json::json!({
+            "status":"ok",
+            "board":"esp32-p4",
+            "piHarness":"pi-agent-core",
+            "jsRuntime":"QuickJS via PocketJS host",
+            "freeHeapBytes":unsafe { esp_idf_svc::sys::esp_get_free_heap_size() },
+            "freePsramBytes":unsafe {
+                esp_idf_svc::sys::heap_caps_get_free_size(
+                    esp_idf_svc::sys::MALLOC_CAP_SPIRAM,
+                )
+            }
+        })
+    }
+
+    fn wifi_status(&self) -> serde_json::Value {
+        let mut access_point = unsafe { core::mem::zeroed::<esp_idf_svc::sys::wifi_ap_record_t>() };
+        let status = unsafe { esp_idf_svc::sys::esp_wifi_sta_get_ap_info(&mut access_point) };
+        if status != esp_idf_svc::sys::ESP_OK {
+            return serde_json::json!({"status":"offline","espError":status});
         }
+        let ssid_end = access_point
+            .ssid
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(access_point.ssid.len());
+        let ssid = String::from_utf8_lossy(&access_point.ssid[..ssid_end]);
+        serde_json::json!({
+            "status":"connected",
+            "ssid":ssid,
+            "rssiDbm":access_point.rssi,
+            "channel":access_point.primary
+        })
+    }
+
+    fn reboot(&self) -> Result<serde_json::Value, String> {
+        std::thread::Builder::new()
+            .name("delayed-reboot".to_owned())
+            .stack_size(4 * 1024)
+            .spawn(|| {
+                std::thread::sleep(Duration::from_millis(750));
+                unsafe { esp_idf_svc::sys::esp_restart() }
+            })
+            .map_err(|error| format!("schedule reboot: {error}"))?;
+        Ok(serde_json::json!({"status":"scheduled","delayMs":750}))
     }
 }
 

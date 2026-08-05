@@ -12,6 +12,7 @@ The physical host and simulator use the exact same
 `pocket-pi-device-ui` crate: one 720x1280 draw list, one set of fonts, and one
 touch hit map. Simulator mouse clicks are converted to physical panel
 coordinates and dispatched through the same `ScreenState::handle_tap` method.
+Without a portfolio plugin the shared UI displays only Chat and Files.
 
 The physical host currently boots with a small offline model adapter so the
 firmware remains self-contained. OpenAI, OpenRouter, Anthropic and UART are host
@@ -40,7 +41,17 @@ OPENAI_API_KEY=... cargo xtask run esp32-p4-sim \
 
 # Local Codex using the Mac's existing Coding Plan login
 cargo xtask run esp32-p4-sim --backend codex
+
+# Real Agent -> native write tool -> simulated LittleFS workspace
+cargo xtask run esp32-p4-sim --backend codex \
+  --workspace target/esp32-workspace
 ```
+
+The Mac simulator and physical firmware register the same core tool contracts:
+`read/write/edit/find/grep/ls`, bounded `bash`, `device.status`,
+`time.now`, `workspace.context`, and the four `schedule.*` operations.
+The Pi runtime obtains these definitions directly from the executable tool
+registry, so advertised and executable tools cannot drift.
 
 The simulator is a product-level simulator, not a CPU emulator. ESP-IDF, PSRAM,
 PPA, MIPI-DSI, touch-controller and Wi-Fi driver behavior still require a
@@ -52,5 +63,5 @@ physical-board test.
 workspace browser and data projections. Each host supplies a mounted workspace
 root and its model adapter. External plugins own provider clients and
 credentials. The Robinhood-shaped screen is retained solely as an optional
-projection slot so the shared UI matches the current ESP32 device; this
+projection slot; it is hidden until the host enables that capability. This
 repository does not contain Robinhood networking or trading logic.

@@ -1089,8 +1089,10 @@ dependencies = [
  "pocket-pi-device-ui",
  "pocket-pi-embedded",
  "pocket-pi-protocols",
+ "pocket-pi-tools",
  "pocketjs-core",
  "pocketjs-esp32p4-ppa",
+ "serde_json",
 ]
 
 [[package]]
@@ -1098,6 +1100,17 @@ name = "pocket-pi-protocols"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "pocket-pi-tools"
+version = "0.1.0"
+dependencies = [
+ "globset",
+ "log",
+ "pocket-pi-embedded",
+ "regex",
  "serde_json",
 ]
 

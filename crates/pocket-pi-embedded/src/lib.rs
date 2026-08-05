@@ -14,12 +14,14 @@ pub trait ModelBackend: Send + Sync {
 }
 
 pub trait ToolHost: Send + Sync {
+    fn definitions(&self) -> Vec<serde_json::Value>;
     fn execute(&self, call_id: &str, name: &str, args_json: &str) -> ToolResult;
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ToolResult {
     pub text: String,
+    pub details: serde_json::Value,
     pub is_error: bool,
     pub terminate: bool,
 }
@@ -28,6 +30,7 @@ impl ToolResult {
     pub fn text(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
+            details: serde_json::Value::Null,
             ..Self::default()
         }
     }
@@ -35,6 +38,7 @@ impl ToolResult {
     fn to_json(&self) -> String {
         serde_json::json!({
             "text": self.text,
+            "details": self.details,
             "isError": self.is_error,
             "terminate": self.terminate,
         })
@@ -54,6 +58,7 @@ impl PiEmbedded {
         tools: Arc<dyn ToolHost>,
         on_delta: Arc<dyn Fn(String) + Send + Sync>,
     ) -> Result<Self, String> {
+        let config_json = config_with_tools(config_json, tools.definitions())?;
         let runtime = Runtime::new().map_err(|error| error.to_string())?;
         // The limit bounds QuickJS recursion; it does not pre-allocate this
         // memory. ESP hosts may lower it after measuring their native task.
@@ -66,12 +71,14 @@ impl PiEmbedded {
                 "modelComplete",
                 Function::new(ctx.clone(), move |request: String| -> String {
                     let mut emit = |delta: &str| on_delta(delta.to_owned());
-                    backend
-                        .complete(&request, &mut emit)
-                        .unwrap_or_else(|error| {
-                            serde_json::json!({"text": format!("model backend failed: {error}")})
-                                .to_string()
-                        })
+                    match backend.complete(&request, &mut emit) {
+                        Ok(response) => response,
+                        Err(error) => {
+                            let text = format!("model backend failed: {error}");
+                            emit(&text);
+                            serde_json::json!({"text":text}).to_string()
+                        }
+                    }
                 })
                 .map_err(|error| error.to_string())?,
             )
@@ -102,7 +109,7 @@ impl PiEmbedded {
                 .get("PocketPiEmbedded")
                 .map_err(|error| format!("PocketPiEmbedded missing: {error}"))?;
             let boot: Function = agent.get("boot").map_err(|error| error.to_string())?;
-            boot.call::<_, ()>((config_json.to_owned(),))
+            boot.call::<_, ()>((config_json,))
                 .catch(&ctx)
                 .map_err(|error| format!("embedded boot: {error}"))
         })?;
@@ -146,6 +153,29 @@ impl PiEmbedded {
     }
 }
 
+fn config_with_tools(
+    config_json: &str,
+    definitions: Vec<serde_json::Value>,
+) -> Result<String, String> {
+    let mut config: serde_json::Value =
+        serde_json::from_str(config_json).map_err(|error| format!("embedded config: {error}"))?;
+    let object = config
+        .as_object_mut()
+        .ok_or_else(|| "embedded config must be a JSON object".to_owned())?;
+    let mut names = std::collections::BTreeSet::new();
+    for definition in &definitions {
+        let name = definition
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "tool definition is missing a string name".to_owned())?;
+        if !names.insert(name.to_owned()) {
+            return Err(format!("duplicate tool definition: {name}"));
+        }
+    }
+    object.insert("tools".to_owned(), serde_json::Value::Array(definitions));
+    serde_json::to_string(&config).map_err(|error| format!("serialize embedded config: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,9 +196,29 @@ mod tests {
     struct Tools;
 
     impl ToolHost for Tools {
+        fn definitions(&self) -> Vec<serde_json::Value> {
+            vec![serde_json::json!({
+                "name":"echo",
+                "description":"Echo",
+                "parameters":{"type":"object","properties":{}}
+            })]
+        }
+
         fn execute(&self, _call_id: &str, name: &str, _args_json: &str) -> ToolResult {
             ToolResult::text(format!("called {name}"))
         }
+    }
+
+    #[test]
+    fn tool_definitions_replace_caller_supplied_tools() {
+        let config = config_with_tools(
+            r#"{"model":"offline","tools":[{"name":"wrong"}]}"#,
+            Tools.definitions(),
+        )
+        .unwrap();
+        let config: serde_json::Value = serde_json::from_str(&config).unwrap();
+        assert_eq!(config["tools"][0]["name"], "echo");
+        assert_eq!(config["tools"].as_array().unwrap().len(), 1);
     }
 
     #[test]

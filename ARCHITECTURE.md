@@ -24,6 +24,8 @@ Pocket Pi is one runtime family with two agent profiles and three hosts.
   reader, system status and optional product projections. The host supplies the
   mounted workspace root.
 - `crates/pocket-pi-protocols` owns model/provider transport protocols.
+- `crates/pocket-pi-tools` owns the portable native ESP tool registry:
+  filesystem tools, bounded bash, workspace context, time and schedules.
 - Each host is a composition root. It connects the embedded Agent, shared UI,
   filesystem, input, display and model adapter.
 
@@ -45,9 +47,14 @@ the touch controller and calls the same `handle_tap` method. It substitutes
 macOS filesystem, wgpu display and model adapters; it does not emulate the
 ESP32 CPU or peripherals.
 
-The Robinhood-shaped tab in the shared UI is only a projection slot retained to
-match the current device UI. Pocket Pi contains no Robinhood client, credentials
-or trading tools.
+Both embedded hosts construct the same `CoreToolHost`. The simulator executes
+filesystem and schedule operations against its Mac workspace directory using
+the exact ESP constraints. Only `device.status`, `wifi status` and
+`reboot` cross a small `PlatformTools` adapter.
+
+Optional product tabs are capability-driven. Pocket Pi defaults to Chat and
+Files; a Robinhood product may enable its portfolio projection and third tab.
+Pocket Pi contains no Robinhood client, credentials or trading tools.
 
 ## Runtime separation
 
