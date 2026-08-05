@@ -23,44 +23,9 @@ impl Default for DeviceState {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WirelessProvider {
-    OpenAi,
-    OpenRouter,
-    Anthropic,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum UartProvider {
-    #[default]
-    Codex,
-    ClaudeCode,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ModelBackendSettings {
-    Wireless {
-        provider: WirelessProvider,
-        api_key: String,
-    },
-    Uart {
-        provider: UartProvider,
-    },
-}
-
-impl Default for ModelBackendSettings {
-    fn default() -> Self {
-        Self::Uart {
-            provider: UartProvider::Codex,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct ModelSettings {
-    pub backend: ModelBackendSettings,
-    pub model: Option<String>,
-}
+pub use pocket_pi_protocols::model::{
+    ModelBackendSettings, ModelSettings, UartProvider, WirelessProvider,
+};
 
 #[derive(Clone, Debug, Default)]
 pub struct ScheduleProjection {
@@ -68,6 +33,38 @@ pub struct ScheduleProjection {
     pub prompt: String,
     pub next_in_seconds: Option<u64>,
     pub every_minutes: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WifiNetworkProjection {
+    pub ssid: String,
+    pub rssi_dbm: i16,
+    pub secured: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WifiSettingsProjection {
+    pub connected_ssid: Option<String>,
+    pub ip_address: Option<String>,
+    pub rssi_dbm: Option<i16>,
+    pub scanning: bool,
+    pub networks: Vec<WifiNetworkProjection>,
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SettingsProjection {
+    pub wifi: WifiSettingsProjection,
+    pub firmware_version: String,
+    pub workspace_free_bytes: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SettingsCommand {
+    ScanWifi,
+    ConnectWifi { ssid: String, password: String },
+    ForgetWifi,
+    Restart,
 }
 
 #[derive(Clone, Debug, Default)]

@@ -1,5 +1,4 @@
 use core::time::Duration;
-use std::io::Read;
 use std::sync::{mpsc, Arc};
 use std::time::Instant;
 
@@ -13,23 +12,24 @@ use esp_idf_svc::nvs::{EspDefaultNvs, EspDefaultNvsPartition};
 use esp_idf_svc::wifi::{AuthMethod, ClientConfiguration, Configuration, WifiDriver};
 use pocket_pi_device_ui::{
     load_fonts, AgentState, ChatProjection, DeviceState, ScreenInteraction, ScreenState,
-    SystemTelemetry,
+    SettingsCommand, SettingsProjection, SystemTelemetry,
 };
 use pocket_pi_embedded::{ModelBackend, PiEmbedded};
+use pocket_pi_protocols::model::{ModelBackendSettings, ModelSettings};
 use pocket_pi_tools::{CoreToolHost, PlatformTools};
 use pocketjs_core::Ui;
 use pocketjs_esp32p4_ppa::{PpaOps, Rect, Renderer, RendererConfig, SrmTransform};
 
+mod backend;
 mod storage;
+mod transport;
 
 const BOARD_NAME: &str = "Waveshare ESP32-P4-WIFI6-Touch-LCD-5";
 const PANEL_WIDTH: u32 = 720;
 const PANEL_HEIGHT: u32 = 1280;
-const WIFI_SSID_PRIMARY: &str = "<Y/OUR SPACE>_5g";
-const WIFI_SSID_FALLBACK: &str = "<Y/OUR SPACE>_2.4G";
 const WIFI_NVS_NAMESPACE: &str = "pocket_pi";
+const WIFI_NVS_SSID_KEY: &str = "wifi_ssid";
 const WIFI_NVS_PASSWORD_KEY: &str = "wifi_pass";
-const WIFI_PROVISION_PREFIX: &str = "PPI-WIFI-PASS:";
 
 fn main() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();
@@ -49,14 +49,6 @@ fn main() -> anyhow::Result<()> {
     let mut screen = ScreenState::new(storage::WORKSPACE_ROOT);
     screen.refresh_workspace();
     screen.set_telemetry(system_telemetry(0));
-
-    let tools = Arc::new(CoreToolHost::new(
-        storage::WORKSPACE_ROOT,
-        Arc::new(EspPlatform),
-    ));
-    let (prompt_tx, agent_rx) = spawn_agent(Arc::clone(&tools));
-    device.agent = AgentState::Idle;
-    chat.set_latest_assistant("ESP32-P4 PI AGENT READY.");
 
     let mut renderer = Renderer::new(RendererConfig::default())
         .ok_or_else(|| anyhow::anyhow!("invalid PocketJS renderer configuration"))?;
@@ -78,7 +70,24 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
-    let wifi = match init_wifi() {
+    let uart = Arc::new(
+        transport::UartLineTransport::new()
+            .map_err(|error| anyhow::anyhow!("initialize UART transport: {error}"))?,
+    );
+    let runtime_config =
+        match transport::request_runtime_config(uart.as_ref(), Duration::from_secs(5)) {
+            Ok(config) => config,
+            Err(error) => {
+                log::warn!("No UART runtime config received: {error}");
+                transport::RuntimeConfig::default()
+            }
+        };
+    screen.set_model_backend(&runtime_config.model);
+
+    let mut wifi = match init_wifi(
+        runtime_config.wifi_ssid.as_deref(),
+        runtime_config.wifi_password.as_deref(),
+    ) {
         Ok(wifi) => {
             log::info!("C6-SDIO Wi-Fi and lwIP netif active");
             Some(wifi)
@@ -88,20 +97,57 @@ fn main() -> anyhow::Result<()> {
             None
         }
     };
+    let mut settings = wifi
+        .as_ref()
+        .map(|wifi| wifi.projection("READY"))
+        .unwrap_or_else(|| SettingsProjection {
+            firmware_version: env!("CARGO_PKG_VERSION").into(),
+            wifi: pocket_pi_device_ui::WifiSettingsProjection {
+                status: "WI-FI DRIVER UNAVAILABLE".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+    screen.set_settings(settings.clone());
     log::info!(
         "network targets staged: openai={} codex_plan={}",
         pocket_pi_protocols::model::OPENAI_API_BASE_URL,
         pocket_pi_protocols::model::CODEX_BACKEND_BASE_URL,
     );
-    if wifi.is_some() {
+    if wifi.as_ref().is_some_and(WifiConnection::is_connected) {
         match probe_https_origins() {
             Ok(reachability) => log::info!("HTTPS connectivity probe completed: {reachability:?}"),
             Err(error) => log::error!("HTTPS connectivity probe failed: {error:#}"),
         }
     }
 
+    let backend: Arc<dyn ModelBackend> = match runtime_config.model.backend {
+        ModelBackendSettings::Uart { .. } => {
+            let transport: Arc<dyn transport::LineTransport> = uart;
+            Arc::new(backend::UartBackend::new(transport))
+        }
+        ModelBackendSettings::Wireless { provider } => Arc::new(
+            backend::WirelessBackend::new(
+                provider,
+                runtime_config
+                    .model_api_key
+                    .ok_or_else(|| anyhow::anyhow!("wireless backend is missing API key"))?,
+            )
+            .map_err(anyhow::Error::msg)?,
+        ),
+    };
+    let tools = Arc::new(CoreToolHost::new(
+        storage::WORKSPACE_ROOT,
+        Arc::new(EspPlatform),
+    ));
+    let (prompt_tx, agent_rx) =
+        spawn_agent(Arc::clone(&tools), backend, runtime_config.model.clone());
+    device.agent = AgentState::Idle;
+    chat.set_latest_assistant("ESP32-P4 PI AGENT READY.");
+
     let mut touch_was_down = false;
     let mut redraw = true;
+    let mut pending_settings = None;
     let mut last_telemetry = Instant::now();
     let mut last_heartbeat = Instant::now();
     loop {
@@ -139,6 +185,15 @@ fn main() -> anyhow::Result<()> {
                                 chat.fail_pending("AGENT WORKER IS NOT AVAILABLE");
                                 device.agent = AgentState::Faulted;
                             }
+                            redraw = true;
+                        }
+                        ScreenInteraction::Settings(command) => {
+                            if command == SettingsCommand::ScanWifi {
+                                settings.wifi.scanning = true;
+                                settings.wifi.status = "SCANNING...".into();
+                                screen.set_settings(settings.clone());
+                            }
+                            pending_settings = Some(command);
                             redraw = true;
                         }
                     }
@@ -181,6 +236,44 @@ fn main() -> anyhow::Result<()> {
             }
             redraw = false;
         }
+        if let Some(command) = pending_settings.take() {
+            match command {
+                SettingsCommand::ScanWifi => match wifi.as_mut() {
+                    Some(wifi) => match wifi.scan() {
+                        Ok(networks) => {
+                            settings = wifi.projection("SCAN COMPLETE");
+                            settings.wifi.networks = networks;
+                        }
+                        Err(error) => {
+                            settings.wifi.scanning = false;
+                            settings.wifi.status = format!("SCAN FAILED: {error}");
+                        }
+                    },
+                    None => settings.wifi.status = "WI-FI DRIVER UNAVAILABLE".into(),
+                },
+                SettingsCommand::ConnectWifi { ssid, password } => match wifi.as_mut() {
+                    Some(wifi) => match wifi.connect(&ssid, &password) {
+                        Ok(()) => settings = wifi.projection("CONNECTED"),
+                        Err(error) => settings.wifi.status = format!("CONNECT FAILED: {error}"),
+                    },
+                    None => settings.wifi.status = "WI-FI DRIVER UNAVAILABLE".into(),
+                },
+                SettingsCommand::ForgetWifi => match wifi.as_mut() {
+                    Some(wifi) => match wifi.forget() {
+                        Ok(()) => settings = wifi.projection("NETWORK FORGOTTEN"),
+                        Err(error) => settings.wifi.status = format!("FORGET FAILED: {error}"),
+                    },
+                    None => settings.wifi.status = "WI-FI DRIVER UNAVAILABLE".into(),
+                },
+                SettingsCommand::Restart => {
+                    let _ = EspPlatform.reboot();
+                    settings.wifi.status = "RESTARTING...".into();
+                }
+            }
+            settings.wifi.scanning = false;
+            screen.set_settings(settings.clone());
+            redraw = true;
+        }
         if last_heartbeat.elapsed() >= Duration::from_secs(5) {
             let memory = memory_snapshot();
             log::info!(
@@ -201,14 +294,27 @@ enum AgentEvent {
     Failed(String),
 }
 
-fn spawn_agent(tools: Arc<CoreToolHost>) -> (mpsc::Sender<String>, mpsc::Receiver<AgentEvent>) {
+fn spawn_agent(
+    tools: Arc<CoreToolHost>,
+    backend: Arc<dyn ModelBackend>,
+    model: ModelSettings,
+) -> (mpsc::Sender<String>, mpsc::Receiver<AgentEvent>) {
     let (prompt_tx, prompt_rx) = mpsc::channel::<String>();
     let (event_tx, event_rx) = mpsc::channel::<AgentEvent>();
     std::thread::spawn(move || {
         let delta_tx = event_tx.clone();
+        let provider = match model.backend {
+            ModelBackendSettings::Uart { .. } => "uart",
+            ModelBackendSettings::Wireless { provider } => provider.id(),
+        };
+        let config = serde_json::json!({
+            "provider":provider,
+            "model":model.resolved_model().unwrap_or_else(|_| "unknown".into()),
+            "systemPrompt":"You are Pocket Pi on an ESP32-P4. Be concise."
+        });
         let runtime = PiEmbedded::new(
-            r#"{"provider":"offline","model":"esp32-p4","systemPrompt":"You are Pocket Pi."}"#,
-            Arc::new(OfflineModel),
+            &config.to_string(),
+            backend,
             tools,
             Arc::new(move |delta| {
                 delta_tx.send(AgentEvent::Delta(delta)).ok();
@@ -230,23 +336,6 @@ fn spawn_agent(tools: Arc<CoreToolHost>) -> (mpsc::Sender<String>, mpsc::Receive
         }
     });
     (prompt_tx, event_rx)
-}
-
-struct OfflineModel;
-
-impl ModelBackend for OfflineModel {
-    fn complete(
-        &self,
-        _request_json: &str,
-        on_delta: &mut dyn FnMut(&str),
-    ) -> Result<String, String> {
-        let text =
-            "Embedded Pi is running. Configure a model adapter to replace this offline reply.";
-        for word in text.split_inclusive(' ') {
-            on_delta(word);
-        }
-        Ok(r#"{"text":"Embedded Pi is running. Configure a model adapter to replace this offline reply."}"#.into())
-    }
 }
 
 struct EspPlatform;
@@ -373,62 +462,24 @@ fn probe_https_origins() -> anyhow::Result<HttpsReachability> {
     Ok(reachability)
 }
 
-fn init_wifi() -> anyhow::Result<WifiConnection> {
+fn init_wifi(
+    provisioned_ssid: Option<&str>,
+    provisioned_password: Option<&str>,
+) -> anyhow::Result<WifiConnection> {
     let peripherals = Peripherals::take()?;
     let system_loop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
-    let password = load_or_provision_wifi_password(nvs.clone())?;
-    // A radio scan does not need a TCP/IP netif. Keeping this as a bare
-    // WifiDriver also avoids double-registering the remote STA interface: the
-    // C6 firmware owns it until the IP-connectivity milestone attaches lwIP.
-    let mut wifi = WifiDriver::new(peripherals.modem, system_loop.clone(), Some(nvs))?;
-
-    wifi.set_configuration(&Configuration::Client(ClientConfiguration::default()))?;
-    wifi.start()?;
-
-    let (access_points, total_found) = wifi.scan_n::<16>()?;
-    let strongest = access_points
-        .iter()
-        .max_by_key(|access_point| access_point.signal_strength);
-    if let Some(access_point) = strongest {
-        log::info!(
-            "C6-SDIO scan complete: total={} retained={} strongest_rssi={}dBm channel={}",
-            total_found,
-            access_points.len(),
-            access_point.signal_strength,
-            access_point.channel,
-        );
-    } else {
-        log::info!("C6-SDIO scan complete: no visible access points");
-    }
-
-    let primary_visible = access_points
-        .iter()
-        .any(|access_point| access_point.ssid.as_str() == WIFI_SSID_PRIMARY);
-    let fallback_visible = access_points
-        .iter()
-        .any(|access_point| access_point.ssid.as_str() == WIFI_SSID_FALLBACK);
-    log::info!(
-        "configured Wi-Fi visibility: primary={} fallback={}",
-        primary_visible,
-        fallback_visible,
-    );
-
-    // Scan while no lwIP interface is attached. The generic EspWifi wrapper
-    // creates both STA and AP netifs when soft-AP support is compiled in. The
-    // C6 remote transport on this P4 is STA-only, and attaching both makes its
-    // connect event add the same lwIP interface twice. Stop the radio, then
-    // attach exactly one STA netif using the same sequence as Espressif's
-    // esp_wifi_remote station example.
-    wifi.stop()?;
-    let stop_deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while wifi.is_started()? {
-        if std::time::Instant::now() >= stop_deadline {
+    let mut driver = WifiDriver::new(peripherals.modem, system_loop, Some(nvs.clone()))?;
+    driver.set_configuration(&Configuration::Client(ClientConfiguration::default()))?;
+    driver.start()?;
+    driver.stop()?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while driver.is_started()? {
+        if Instant::now() >= deadline {
             anyhow::bail!("C6 Wi-Fi driver did not stop before lwIP attach")
         }
         std::thread::sleep(Duration::from_millis(25));
     }
-    log::info!("C6 Wi-Fi driver stopped; attaching one lwIP STA netif");
     let sta_netif = EspNetif::new(NetifStack::Sta)?;
     esp_result("esp_netif_attach_wifi_station", unsafe {
         esp_idf_svc::sys::esp_netif_attach_wifi_station(sta_netif.handle())
@@ -436,134 +487,169 @@ fn init_wifi() -> anyhow::Result<WifiConnection> {
     esp_result("esp_wifi_set_default_wifi_sta_handlers", unsafe {
         esp_idf_svc::sys::esp_wifi_set_default_wifi_sta_handlers()
     })?;
-
-    let candidates = if primary_visible {
-        [WIFI_SSID_PRIMARY, WIFI_SSID_FALLBACK]
-    } else {
-        [WIFI_SSID_FALLBACK, WIFI_SSID_PRIMARY]
+    let mut wifi = WifiConnection {
+        driver,
+        sta_netif,
+        nvs,
     };
-    let mut last_error = None;
-    for (index, ssid) in candidates.into_iter().enumerate() {
-        if (ssid == WIFI_SSID_PRIMARY && !primary_visible)
-            || (ssid == WIFI_SSID_FALLBACK && !fallback_visible)
-        {
-            continue;
-        }
-
-        let configuration = Configuration::Client(ClientConfiguration {
-            ssid: ssid.try_into()?,
-            bssid: None,
-            auth_method: AuthMethod::WPA2Personal,
-            password: password.as_str().try_into()?,
-            channel: None,
-            ..Default::default()
-        });
-        wifi.set_configuration(&configuration)?;
-        if !wifi.is_started()? {
-            wifi.start()?;
-        }
-
-        log::info!("Wi-Fi connection attempt profile={}", index + 1);
-        let attempt = (|| {
-            wifi.connect()?;
-            let deadline = std::time::Instant::now() + Duration::from_secs(15);
-            while !wifi.is_connected()? || !sta_netif.is_up()? {
-                if std::time::Instant::now() >= deadline {
-                    anyhow::bail!("Wi-Fi association or DHCP timed out")
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Ok::<_, anyhow::Error>(())
-        })();
-        match attempt {
-            Ok(()) => {
-                let info = sta_netif.get_ip_info()?;
-                log::info!(
-                    "Wi-Fi connected: profile={} ip={} gateway={} dns={:?}",
-                    index + 1,
-                    info.ip,
-                    info.subnet.gateway,
-                    info.dns,
-                );
-                return Ok(WifiConnection {
-                    _driver: wifi,
-                    _sta_netif: sta_netif,
-                });
-            }
-            Err(error) => {
-                log::warn!("Wi-Fi profile {} failed: {error:#}", index + 1);
-                last_error = Some(error);
-                let _ = wifi.disconnect();
+    match load_wifi_credentials(wifi.nvs.clone(), provisioned_ssid, provisioned_password) {
+        Ok((ssid, password)) => {
+            if let Err(error) = wifi.connect(&ssid, &password) {
+                log::warn!("saved Wi-Fi did not connect: {error:#}");
             }
         }
+        Err(error) => log::warn!("Wi-Fi is not configured: {error:#}"),
     }
-
-    match last_error {
-        Some(error) => Err(error),
-        None => anyhow::bail!("neither configured Wi-Fi network is visible"),
-    }
+    Ok(wifi)
 }
 
 struct WifiConnection {
-    _driver: WifiDriver<'static>,
-    _sta_netif: EspNetif,
+    driver: WifiDriver<'static>,
+    sta_netif: EspNetif,
+    nvs: EspDefaultNvsPartition,
 }
 
-fn load_or_provision_wifi_password(partition: EspDefaultNvsPartition) -> anyhow::Result<String> {
-    let storage = EspDefaultNvs::new(partition, WIFI_NVS_NAMESPACE, true)?;
-    let mut password_buf = [0u8; 64];
-    if let Some(password) = storage.get_str(WIFI_NVS_PASSWORD_KEY, &mut password_buf)? {
-        validate_wifi_password(password)?;
-        log::info!("Wi-Fi credential loaded from local NVS");
-        return Ok(password.to_owned());
+impl WifiConnection {
+    fn is_connected(&self) -> bool {
+        self.driver.is_connected().unwrap_or(false) && self.sta_netif.is_up().unwrap_or(false)
     }
 
-    log::warn!("Wi-Fi credential missing; send the one-line USB-UART provisioning frame now");
-    let stdin = std::io::stdin();
-    let mut stdin = stdin.lock();
-    let mut frame = Vec::with_capacity(96);
-    let mut byte = [0u8; 1];
-    loop {
-        match stdin.read(&mut byte) {
-            Ok(0) => {
-                std::thread::sleep(Duration::from_millis(50));
-                continue;
-            }
-            Ok(_) if byte[0] == b'\n' => {}
-            Ok(_) if byte[0] == b'\r' => continue,
-            Ok(_) if !byte[0].is_ascii_graphic() && byte[0] != b' ' => continue,
-            Ok(_) => {
-                if frame.len() >= 96 {
-                    frame.clear();
-                    log::warn!("Discarded oversized UART provisioning frame");
-                } else {
-                    frame.push(byte[0]);
-                }
-                continue;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(50));
-                continue;
-            }
-            Err(error) => return Err(error.into()),
+    fn scan(&mut self) -> anyhow::Result<Vec<pocket_pi_device_ui::WifiNetworkProjection>> {
+        if !self.driver.is_started()? {
+            self.driver.start()?;
         }
-
-        let line = core::str::from_utf8(&frame)?;
-        let Some(prefix_start) = line.find(WIFI_PROVISION_PREFIX) else {
-            log::warn!("Ignored non-provisioning UART input");
-            frame.clear();
-            continue;
-        };
-        let password = &line[prefix_start + WIFI_PROVISION_PREFIX.len()..];
-
-        validate_wifi_password(password)?;
-        storage.set_str(WIFI_NVS_PASSWORD_KEY, password)?;
-        log::info!("Wi-Fi credential stored in local NVS (value not logged)");
-        return Ok(password.to_owned());
+        let (access_points, _) = self.driver.scan_n::<16>()?;
+        let mut networks = access_points
+            .into_iter()
+            .filter(|access_point| !access_point.ssid.is_empty())
+            .map(|access_point| pocket_pi_device_ui::WifiNetworkProjection {
+                ssid: access_point.ssid.as_str().to_owned(),
+                rssi_dbm: access_point.signal_strength as i16,
+                secured: access_point.auth_method != Some(AuthMethod::None),
+            })
+            .collect::<Vec<_>>();
+        networks.sort_by_key(|network| core::cmp::Reverse(network.rssi_dbm));
+        networks.dedup_by(|left, right| left.ssid == right.ssid);
+        networks.truncate(5);
+        Ok(networks)
     }
+
+    fn connect(&mut self, ssid: &str, password: &str) -> anyhow::Result<()> {
+        validate_wifi_ssid(ssid)?;
+        if !password.is_empty() {
+            validate_wifi_password(password)?;
+        }
+        if self.driver.is_connected()? {
+            self.driver.disconnect()?;
+        }
+        self.driver
+            .set_configuration(&Configuration::Client(ClientConfiguration {
+                ssid: ssid.try_into()?,
+                bssid: None,
+                auth_method: if password.is_empty() {
+                    AuthMethod::None
+                } else {
+                    AuthMethod::WPA2Personal
+                },
+                password: password.try_into()?,
+                channel: None,
+                ..Default::default()
+            }))?;
+        if !self.driver.is_started()? {
+            self.driver.start()?;
+        }
+        self.driver.connect()?;
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !self.driver.is_connected()? || !self.sta_netif.is_up()? {
+            if Instant::now() >= deadline {
+                anyhow::bail!("Wi-Fi association or DHCP timed out")
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let storage = EspDefaultNvs::new(self.nvs.clone(), WIFI_NVS_NAMESPACE, true)?;
+        storage.set_str(WIFI_NVS_SSID_KEY, ssid)?;
+        storage.set_str(WIFI_NVS_PASSWORD_KEY, password)?;
+        Ok(())
+    }
+
+    fn forget(&mut self) -> anyhow::Result<()> {
+        if self.driver.is_connected()? {
+            self.driver.disconnect()?;
+        }
+        let storage = EspDefaultNvs::new(self.nvs.clone(), WIFI_NVS_NAMESPACE, true)?;
+        storage.remove(WIFI_NVS_SSID_KEY)?;
+        storage.remove(WIFI_NVS_PASSWORD_KEY)?;
+        Ok(())
+    }
+
+    fn projection(&self, status: impl Into<String>) -> pocket_pi_device_ui::SettingsProjection {
+        let mut projection = pocket_pi_device_ui::SettingsProjection {
+            firmware_version: env!("CARGO_PKG_VERSION").into(),
+            workspace_free_bytes: None,
+            ..Default::default()
+        };
+        projection.wifi.status = status.into();
+        let mut access_point = unsafe { core::mem::zeroed::<esp_idf_svc::sys::wifi_ap_record_t>() };
+        if unsafe { esp_idf_svc::sys::esp_wifi_sta_get_ap_info(&mut access_point) }
+            == esp_idf_svc::sys::ESP_OK
+        {
+            let end = access_point
+                .ssid
+                .iter()
+                .position(|byte| *byte == 0)
+                .unwrap_or(access_point.ssid.len());
+            projection.wifi.connected_ssid =
+                Some(String::from_utf8_lossy(&access_point.ssid[..end]).into_owned());
+            projection.wifi.rssi_dbm = Some(access_point.rssi as i16);
+            projection.wifi.ip_address = self
+                .sta_netif
+                .get_ip_info()
+                .ok()
+                .map(|info| info.ip.to_string());
+        }
+        projection
+    }
+}
+
+fn load_wifi_credentials(
+    partition: EspDefaultNvsPartition,
+    provisioned_ssid: Option<&str>,
+    provisioned_password: Option<&str>,
+) -> anyhow::Result<(String, String)> {
+    let storage = EspDefaultNvs::new(partition, WIFI_NVS_NAMESPACE, true)?;
+    if let (Some(ssid), Some(password)) = (provisioned_ssid, provisioned_password) {
+        validate_wifi_ssid(ssid)?;
+        validate_wifi_password(password)?;
+        storage.set_str(WIFI_NVS_SSID_KEY, ssid)?;
+        storage.set_str(WIFI_NVS_PASSWORD_KEY, password)?;
+        return Ok((ssid.to_owned(), password.to_owned()));
+    }
+    if provisioned_ssid.is_some() || provisioned_password.is_some() {
+        anyhow::bail!("Wi-Fi SSID and password must be supplied together")
+    }
+    let mut ssid_buf = [0u8; 33];
+    let mut password_buf = [0u8; 64];
+    let ssid = storage.get_str(WIFI_NVS_SSID_KEY, &mut ssid_buf)?;
+    let password = storage.get_str(WIFI_NVS_PASSWORD_KEY, &mut password_buf)?;
+    if let (Some(ssid), Some(password)) = (ssid, password) {
+        validate_wifi_ssid(ssid)?;
+        validate_wifi_password(password)?;
+        return Ok((ssid.to_owned(), password.to_owned()));
+    }
+    anyhow::bail!("Wi-Fi credentials are not configured")
+}
+
+fn validate_wifi_ssid(ssid: &str) -> anyhow::Result<()> {
+    if ssid.is_empty() || ssid.len() > 32 {
+        anyhow::bail!("Wi-Fi SSID must contain 1 to 32 bytes")
+    }
+    Ok(())
 }
 
 fn validate_wifi_password(password: &str) -> anyhow::Result<()> {
+    if password.is_empty() {
+        return Ok(());
+    }
     if !(8..=63).contains(&password.len()) {
         anyhow::bail!("Wi-Fi password must contain 8 to 63 bytes")
     }

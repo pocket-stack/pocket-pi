@@ -11,12 +11,13 @@ cargo xtask run esp32-p4-sim
 cargo xtask snapshot esp32-p4-sim
 ```
 
-The ESP simulator defaults to an offline model. Select a real host adapter with
-`--backend openai` (`OPENAI_API_KEY` required) or `--backend codex` (reuses the
-Mac's local Codex login). See [`docs/esp32-p4-port.md`](docs/esp32-p4-port.md).
+The ESP simulator defaults to an offline model. Select `--backend codex` to
+reuse the Mac's Coding Plan login, or `openai`, `openrouter`, or `anthropic` for
+a direct API-key path. See [`docs/esp32-p4-port.md`](docs/esp32-p4-port.md).
 
 The ESP32 host and simulator run the same embedded `pi-agent-core` and the same
-PocketJS Chat + Workspace UI. The simulator replaces only hardware adapters; it
+PocketJS Chat + Workspace + Settings UI. Settings is an embedded-device feature
+and is not linked into the normal macOS Pocket Pi host. The simulator replaces only hardware adapters; it
 does not pretend to execute the ESP32 firmware ELF. See
 [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
@@ -24,6 +25,11 @@ They also register the same portable native tools. A model running through the
 simulator reads and mutates the Mac workspace through the ESP32
 `read/write/edit/find/grep/ls` contracts, rather than through unrestricted Mac
 filesystem or shell access.
+
+The physical firmware selects either `UartBackend` (Mac Codex or Claude Code)
+or `WirelessBackend` (OpenAI, OpenRouter, or Anthropic). Wi-Fi credentials are
+managed on-device from Settings and stored in ESP32 NVS; model API keys never
+enter PocketJS UI state.
 
 > ESP32-P4 port: active development lives in
 > [`docs/esp32-p4-port.md`](docs/esp32-p4-port.md). The embedded target is a

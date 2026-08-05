@@ -2515,6 +2515,7 @@ dependencies = [
 name = "pocket-pi-device-ui"
 version = "0.1.0"
 dependencies = [
+ "pocket-pi-protocols",
  "pocketjs-core",
 ]
 

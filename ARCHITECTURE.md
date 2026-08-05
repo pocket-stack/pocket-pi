@@ -21,7 +21,7 @@ Pocket Pi is one runtime family with two agent profiles and three hosts.
   Native host traits provide model and tool capabilities.
 - `crates/pocket-pi-device-ui` is the single source for the 720x1280 PocketJS
   draw list, fonts, touch hit map, Chat, Workspace browser, keyboard, message
-  reader, system status and optional product projections. The host supplies the
+  reader, device Settings, system status and optional product projections. The host supplies the
   mounted workspace root.
 - `crates/pocket-pi-protocols` owns model/provider transport protocols.
 - `crates/pocket-pi-tools` owns the portable native ESP tool registry:
@@ -52,9 +52,26 @@ filesystem and schedule operations against its Mac workspace directory using
 the exact ESP constraints. Only `device.status`, `wifi status` and
 `reboot` cross a small `PlatformTools` adapter.
 
-Optional product tabs are capability-driven. Pocket Pi defaults to Chat and
-Files; a Robinhood product may enable its portfolio projection and third tab.
+Optional product tabs are capability-driven. The full macOS host does not link
+the device UI. Embedded products enable Chat, Files and Settings; a Robinhood
+product may additionally enable its portfolio projection.
 Pocket Pi contains no Robinhood client, credentials or trading tools.
+
+Settings follows the same host boundary as the rest of the device UI. PocketJS
+emits `SettingsCommand` values and renders `SettingsProjection`; only the ESP
+host calls ESP-IDF Wi-Fi/NVS/restart APIs. The simulator handles the same
+commands with deterministic hardware projections. Password input is transient,
+masked, cleared after submit, and never enters the Agent workspace or context.
+
+The physical model boundary has two implementations:
+
+- `UartBackend` sends framed model decisions to the Mac bridge, which can use a
+  logged-in Codex or Claude Code CLI.
+- `WirelessBackend` sends direct HTTPS requests over board Wi-Fi to OpenAI,
+  OpenRouter, or Anthropic.
+
+Provider JSON and streaming decoders live in `pocket-pi-protocols`; ESP-IDF and
+desktop HTTP transports stay in their hosts.
 
 ## Runtime separation
 

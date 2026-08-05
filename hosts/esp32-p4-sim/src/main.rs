@@ -7,7 +7,8 @@ use anyhow::{anyhow, Result};
 use pocket3d::gpu::{Gpu, OffscreenTarget};
 use pocket_pi_device_ui::{
     load_fonts, AgentState, ChatProjection, DeviceState, ModelBackendSettings, ModelSettings,
-    ScreenInteraction, ScreenState, ScreenView, SystemTelemetry, UartProvider, WirelessProvider,
+    ScreenInteraction, ScreenState, ScreenView, SettingsCommand, SettingsProjection,
+    SystemTelemetry, UartProvider, WifiNetworkProjection,
 };
 use pocket_pi_embedded::PiEmbedded;
 use pocket_pi_tools::{CoreToolHost, PlatformTools};
@@ -65,6 +66,7 @@ fn parse_args() -> Result<Args> {
                 view = match next(&mut args, "--view")?.as_str() {
                     "chat" => ScreenView::Chat,
                     "workspace" | "files" => ScreenView::Files,
+                    "settings" => ScreenView::Settings,
                     "robinhood" => ScreenView::Robinhood,
                     value => return Err(anyhow!("unknown view: {value}")),
                 }
@@ -187,6 +189,7 @@ struct Product {
     prompt_tx: Sender<String>,
     agent_rx: Receiver<AgentEvent>,
     tools: Arc<CoreToolHost>,
+    settings: SettingsProjection,
     last_schedule_poll: Instant,
     busy: bool,
     dirty: bool,
@@ -194,15 +197,26 @@ struct Product {
 
 impl Product {
     fn new(workspace: PathBuf, backend: BackendChoice, view: ScreenView) -> Result<Self> {
-        let settings = settings_for(&backend);
+        let model_settings = settings_for(&backend);
         let tools = Arc::new(CoreToolHost::new(workspace.clone(), Arc::new(SimPlatform)));
         let (prompt_tx, agent_rx) = spawn_agent(backend, Arc::clone(&tools));
         let workspace = workspace
             .to_str()
             .ok_or_else(|| anyhow!("workspace path is not valid UTF-8"))?;
         let mut screen = ScreenState::new(workspace);
+        let settings = SettingsProjection {
+            wifi: pocket_pi_device_ui::WifiSettingsProjection {
+                connected_ssid: Some("macOS host network".into()),
+                ip_address: Some("192.0.2.2".into()),
+                rssi_dbm: Some(-42),
+                status: "SIMULATED ESP32 WI-FI".into(),
+                ..Default::default()
+            },
+            firmware_version: env!("CARGO_PKG_VERSION").into(),
+            workspace_free_bytes: None,
+        };
         screen.view = view;
-        screen.set_model_backend(&settings);
+        screen.set_model_backend(&model_settings);
         screen.set_telemetry(SystemTelemetry {
             ram_used_percent: 25,
             ram_free_bytes: 24 * 1024 * 1024,
@@ -210,6 +224,7 @@ impl Product {
             ui_fps: 0,
         });
         screen.refresh_workspace();
+        screen.set_settings(settings.clone());
         Ok(Self {
             chat: ChatProjection::new("TYPE A MESSAGE", "ESP32-P4 PI AGENT SIMULATOR READY."),
             screen,
@@ -219,6 +234,7 @@ impl Product {
             prompt_tx,
             agent_rx,
             tools,
+            settings,
             last_schedule_poll: Instant::now(),
             busy: false,
             dirty: true,
@@ -246,7 +262,54 @@ impl Product {
             ScreenInteraction::None => {}
             ScreenInteraction::Redraw => self.dirty = true,
             ScreenInteraction::SubmitPrompt(prompt) => self.send_prompt(prompt),
+            ScreenInteraction::Settings(command) => self.handle_settings(command),
         }
+    }
+
+    fn handle_settings(&mut self, command: SettingsCommand) {
+        match command {
+            SettingsCommand::ScanWifi => {
+                self.settings.wifi.networks = vec![
+                    WifiNetworkProjection {
+                        ssid: "POCKET-PI-LAB".into(),
+                        rssi_dbm: -38,
+                        secured: true,
+                    },
+                    WifiNetworkProjection {
+                        ssid: "PHONE-HOTSPOT".into(),
+                        rssi_dbm: -56,
+                        secured: true,
+                    },
+                    WifiNetworkProjection {
+                        ssid: "GUEST".into(),
+                        rssi_dbm: -71,
+                        secured: false,
+                    },
+                ];
+                self.settings.wifi.status = "SCAN COMPLETE (SIMULATED)".into();
+            }
+            SettingsCommand::ConnectWifi { ssid, password } => {
+                if !password.is_empty() && !(8..=63).contains(&password.len()) {
+                    self.settings.wifi.status = "PASSWORD MUST BE 8-63 BYTES".into();
+                } else {
+                    self.settings.wifi.connected_ssid = Some(ssid);
+                    self.settings.wifi.ip_address = Some("192.0.2.2".into());
+                    self.settings.wifi.rssi_dbm = Some(-40);
+                    self.settings.wifi.status = "CONNECTED (SIMULATED)".into();
+                }
+            }
+            SettingsCommand::ForgetWifi => {
+                self.settings.wifi.connected_ssid = None;
+                self.settings.wifi.ip_address = None;
+                self.settings.wifi.rssi_dbm = None;
+                self.settings.wifi.status = "NETWORK FORGOTTEN (SIMULATED)".into();
+            }
+            SettingsCommand::Restart => {
+                self.settings.wifi.status = "RESTART REQUESTED (SIMULATED)".into();
+            }
+        }
+        self.screen.set_settings(self.settings.clone());
+        self.dirty = true;
     }
 
     fn release_touch(&mut self) {
@@ -301,9 +364,8 @@ impl Product {
 
 fn settings_for(backend: &BackendChoice) -> ModelSettings {
     let backend = match backend {
-        BackendChoice::OpenAi { .. } => ModelBackendSettings::Wireless {
-            provider: WirelessProvider::OpenAi,
-            api_key: String::new(),
+        BackendChoice::Wireless { provider, .. } => ModelBackendSettings::Wireless {
+            provider: *provider,
         },
         BackendChoice::Scripted | BackendChoice::Codex { .. } => ModelBackendSettings::Uart {
             provider: UartProvider::Codex,
@@ -577,12 +639,40 @@ mod tests {
         assert_eq!(product.screen.view, ScreenView::Files);
         product.screen.view = ScreenView::Chat;
         product.tap(650, 1220, &ui);
-        assert_eq!(product.screen.view, ScreenView::Files);
+        assert_eq!(product.screen.view, ScreenView::Settings);
 
-        product.screen.capabilities = pocket_pi_device_ui::UiCapabilities { portfolio: true };
+        product.screen.capabilities = pocket_pi_device_ui::UiCapabilities {
+            settings: true,
+            portfolio: true,
+        };
         product.screen.view = ScreenView::Chat;
         product.tap(650, 1220, &ui);
         assert_eq!(product.screen.view, ScreenView::Robinhood);
+    }
+
+    #[test]
+    fn settings_scan_and_wifi_password_use_the_shared_touch_keyboard() {
+        let temp = tempfile::tempdir().unwrap();
+        let ui = new_ui().unwrap();
+        let mut product = Product::new(
+            temp.path().to_owned(),
+            BackendChoice::Scripted,
+            ScreenView::Settings,
+        )
+        .unwrap();
+
+        product.tap(580, 180, &ui);
+        product.tap(120, 350, &ui);
+        for _ in 0..8 {
+            product.tap(54, 396, &ui);
+        }
+        product.tap(640, 820, &ui);
+
+        assert_eq!(
+            product.settings.wifi.connected_ssid.as_deref(),
+            Some("POCKET-PI-LAB")
+        );
+        assert!(!product.screen.handle_touch_release());
     }
 
     #[test]
@@ -603,6 +693,31 @@ mod tests {
         assert_eq!(
             screen.handle_tap(640, 820, &chat, &ui),
             ScreenInteraction::SubmitPrompt("q".into())
+        );
+    }
+
+    #[test]
+    fn touch_keyboard_can_type_uppercase_wifi_passwords() {
+        let temp = tempfile::tempdir().unwrap();
+        let ui = new_ui().unwrap();
+        let mut screen = ScreenState::new(temp.path().to_str().unwrap());
+        let chat = ChatProjection::new("YOU", "PI");
+
+        assert_eq!(
+            screen.handle_tap(360, 1100, &chat, &ui),
+            ScreenInteraction::Redraw
+        );
+        assert_eq!(
+            screen.handle_tap(450, 820, &chat, &ui),
+            ScreenInteraction::Redraw
+        );
+        assert_eq!(
+            screen.handle_tap(54, 396, &chat, &ui),
+            ScreenInteraction::Redraw
+        );
+        assert_eq!(
+            screen.handle_tap(640, 820, &chat, &ui),
+            ScreenInteraction::SubmitPrompt("Q".into())
         );
     }
 

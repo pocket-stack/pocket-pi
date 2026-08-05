@@ -12,11 +12,12 @@ The physical host and simulator use the exact same
 `pocket-pi-device-ui` crate: one 720x1280 draw list, one set of fonts, and one
 touch hit map. Simulator mouse clicks are converted to physical panel
 coordinates and dispatched through the same `ScreenState::handle_tap` method.
-Without a portfolio plugin the shared UI displays only Chat and Files.
+Without a portfolio plugin the shared embedded UI displays Chat, Files and
+Settings. Settings is not part of the normal macOS host.
 
-The physical host currently boots with a small offline model adapter so the
-firmware remains self-contained. OpenAI, OpenRouter, Anthropic and UART are host
-adapter choices; they do not belong in the UI or embedded Agent core.
+The physical host selects `UartBackend` for a Mac Codex/Claude Code bridge or
+`WirelessBackend` for direct OpenAI/OpenRouter/Anthropic HTTPS. These remain
+host adapters; they do not belong in the UI or embedded Agent core.
 
 ```sh
 cargo xtask build macos
@@ -42,6 +43,12 @@ OPENAI_API_KEY=... cargo xtask run esp32-p4-sim \
 # Local Codex using the Mac's existing Coding Plan login
 cargo xtask run esp32-p4-sim --backend codex
 
+# Other direct providers
+OPENROUTER_API_KEY=... cargo xtask run esp32-p4-sim \
+  --backend openrouter --model openai/gpt-5.6
+ANTHROPIC_API_KEY=... cargo xtask run esp32-p4-sim \
+  --backend anthropic --model claude-sonnet-4-6
+
 # Real Agent -> native write tool -> simulated LittleFS workspace
 cargo xtask run esp32-p4-sim --backend codex \
   --workspace target/esp32-workspace
@@ -56,6 +63,23 @@ registry, so advertised and executable tools cannot drift.
 The simulator is a product-level simulator, not a CPU emulator. ESP-IDF, PSRAM,
 PPA, MIPI-DSI, touch-controller and Wi-Fi driver behavior still require a
 physical-board test.
+
+## Physical UART bridge
+
+The bridge provisions the boot-time model choice and serves framed model
+decisions. Wi-Fi can be selected later from the on-device Settings page.
+
+```sh
+tools/uart-model-bridge.py /dev/cu.usbserial-... --backend uart --provider codex
+
+tools/uart-model-bridge.py /dev/cu.usbserial-... --backend wireless \
+  --provider openai --model gpt-5-mini --provision-wifi
+```
+
+The Settings page scans visible networks, opens the shared PocketJS keyboard
+for secured-network passwords, connects, forgets credentials, and requests a
+restart. The ESP host persists only Wi-Fi SSID/password in NVS. Model API keys
+arrive through provisioning and remain outside UI projections.
 
 ## Shared UI boundary
 

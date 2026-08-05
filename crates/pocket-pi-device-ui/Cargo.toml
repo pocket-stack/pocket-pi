@@ -7,4 +7,5 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+pocket-pi-protocols = { path = "../pocket-pi-protocols" }
 pocketjs-core = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "4c5dc9ef1dd26e6f49b036c210931d399f2b52b2" }

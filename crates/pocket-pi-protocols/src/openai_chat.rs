@@ -4,10 +4,21 @@ use alloc::vec::Vec;
 
 use serde_json::{json, Map, Value};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Dialect {
+    OpenAi,
+    OpenRouter,
+}
+
 /// Convert the provider-neutral request emitted by embedded Pi into OpenAI's
-/// streaming Chat Completions wire format. Both the ESP host and simulator use
-/// this code; only their HTTP clients differ.
+/// streaming Chat Completions wire format.
 pub fn build_request(request_json: &str) -> Result<String, String> {
+    build_request_for(request_json, Dialect::OpenAi)
+}
+
+/// OpenAI and OpenRouter share this wire format, but use different token field
+/// names. Provider selection remains outside the Pi runtime.
+pub fn build_request_for(request_json: &str, dialect: Dialect) -> Result<String, String> {
     let request: Value = serde_json::from_str(request_json)
         .map_err(|error| format!("parse Pi model request: {error}"))?;
     let model = request
@@ -65,7 +76,11 @@ pub fn build_request(request_json: &str) -> Result<String, String> {
     body.insert("model".into(), Value::String(model.into()));
     body.insert("messages".into(), Value::Array(messages));
     body.insert(
-        "max_completion_tokens".into(),
+        match dialect {
+            Dialect::OpenAi => "max_completion_tokens",
+            Dialect::OpenRouter => "max_tokens",
+        }
+        .into(),
         Value::from(
             request
                 .pointer("/model/maxTokens")
@@ -294,5 +309,19 @@ mod tests {
             .unwrap();
         let result: Value = serde_json::from_str(&stream.finish().unwrap()).unwrap();
         assert_eq!(result["text"], "hello");
+    }
+
+    #[test]
+    fn openrouter_uses_its_token_field() {
+        let request = json!({
+            "model":{"id":"vendor/model"},
+            "context":{"messages":[{"role":"user","content":"hi"}]}
+        });
+        let body: Value = serde_json::from_str(
+            &build_request_for(&request.to_string(), Dialect::OpenRouter).unwrap(),
+        )
+        .unwrap();
+        assert!(body.get("max_tokens").is_some());
+        assert!(body.get("max_completion_tokens").is_none());
     }
 }

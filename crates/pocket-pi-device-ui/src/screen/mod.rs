@@ -11,8 +11,9 @@ use std::collections::VecDeque;
 
 use crate::model::{
     AgentState, DeviceState, ModelBackendSettings, ModelSettings, OrderProjection,
-    PortfolioCollection, PortfolioProjection, ScheduleProjection, UartProvider,
-    ValueTrendProjection, WirelessProvider,
+    PortfolioCollection, PortfolioProjection, ScheduleProjection, SettingsCommand,
+    SettingsProjection, UartProvider, ValueTrendProjection, WifiNetworkProjection,
+    WirelessProvider,
 };
 use pocketjs_core::{spec, Ui};
 use workspace_browser::{format_size, format_timestamp, WorkspaceBrowser};
@@ -49,6 +50,7 @@ const UI_LOSS_RED: u32 = 0xff44_44ef; // RGB #EF4444
 pub enum ScreenView {
     Chat,
     Files,
+    Settings,
     Robinhood,
     Accounts,
     Activities,
@@ -62,17 +64,34 @@ pub enum ScreenInteraction {
     None,
     Redraw,
     SubmitPrompt(String),
+    Settings(SettingsCommand),
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UiCapabilities {
+    pub settings: bool,
     pub portfolio: bool,
+}
+
+impl Default for UiCapabilities {
+    fn default() -> Self {
+        Self {
+            settings: true,
+            portfolio: false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum KeyboardMode {
     Letters,
     Numbers,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum KeyboardPurpose {
+    Prompt,
+    WifiPassword { ssid: String },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -117,7 +136,7 @@ impl BackendProjection {
                     auth: "CLAUDE LOGIN".to_owned(),
                 },
             },
-            ModelBackendSettings::Wireless { provider, .. } => Self {
+            ModelBackendSettings::Wireless { provider } => Self {
                 model: match provider {
                     WirelessProvider::OpenAi => "OPENAI API",
                     WirelessProvider::OpenRouter => "OPENROUTER",
@@ -282,9 +301,12 @@ pub struct ScreenState {
     position_scroll: usize,
     keyboard_open: bool,
     keyboard_mode: KeyboardMode,
-    prompt_input: String,
+    keyboard_uppercase: bool,
+    keyboard_purpose: KeyboardPurpose,
+    keyboard_input: String,
     pressed_key: Option<String>,
     backend: BackendProjection,
+    settings: SettingsProjection,
     message_reader: Option<MessageReader>,
 }
 
@@ -309,9 +331,12 @@ impl ScreenState {
             position_scroll: 0,
             keyboard_open: false,
             keyboard_mode: KeyboardMode::Letters,
-            prompt_input: String::new(),
+            keyboard_uppercase: false,
+            keyboard_purpose: KeyboardPurpose::Prompt,
+            keyboard_input: String::new(),
             pressed_key: None,
             backend: BackendProjection::default(),
+            settings: SettingsProjection::default(),
             message_reader: None,
         }
     }
@@ -335,6 +360,10 @@ impl ScreenState {
         self.backend = BackendProjection::from_settings(settings);
     }
 
+    pub fn set_settings(&mut self, settings: SettingsProjection) {
+        self.settings = settings;
+    }
+
     pub fn handle_touch_release(&mut self) -> bool {
         self.pressed_key.take().is_some() && self.keyboard_open
     }
@@ -354,19 +383,26 @@ impl ScreenState {
         chat: &ChatProjection,
         ui: &Ui,
     ) -> ScreenInteraction {
-        if self.view == ScreenView::Chat && self.keyboard_open {
+        if self.keyboard_open {
             return self.handle_keyboard_tap(x, y);
         }
         if !matches!(self.view, ScreenView::Viewer | ScreenView::MessageReader)
             && y as i16 >= BOTTOM_BAR_Y
         {
-            let next = match (self.capabilities.portfolio, x) {
-                (true, 0..=239) | (false, 0..=359) => ScreenView::Chat,
-                (true, 240..=479) | (false, _) => {
+            let next = match (self.capabilities.settings, self.capabilities.portfolio, x) {
+                (true, true, 0..=179)
+                | (true, false, 0..=239)
+                | (false, true, 0..=239)
+                | (false, false, 0..=359) => ScreenView::Chat,
+                (true, true, 180..=359)
+                | (true, false, 240..=479)
+                | (false, true, 240..=479)
+                | (false, false, _) => {
                     self.browser.refresh();
                     ScreenView::Files
                 }
-                (true, _) => ScreenView::Robinhood,
+                (true, true, 360..=539) | (true, false, _) => ScreenView::Settings,
+                (_, true, _) => ScreenView::Robinhood,
             };
             let changed = self.view != next;
             self.view = next;
@@ -381,6 +417,7 @@ impl ScreenState {
         let changed = match self.view {
             ScreenView::Chat => self.handle_chat_tap(x, y, chat, ui),
             ScreenView::Files => self.handle_files_tap(x, y),
+            ScreenView::Settings => return self.handle_settings_tap(x, y),
             ScreenView::Robinhood => self.handle_robinhood_tap(x, y),
             ScreenView::Accounts => self.handle_accounts_tap(x, y),
             ScreenView::Activities => self.handle_activities_tap(x, y),
@@ -398,6 +435,9 @@ impl ScreenState {
     fn handle_chat_tap(&mut self, x: u16, y: u16, chat: &ChatProjection, ui: &Ui) -> bool {
         if (24..=696).contains(&x) && (COMPOSE_Y..=1150).contains(&y) {
             self.keyboard_open = true;
+            self.keyboard_purpose = KeyboardPurpose::Prompt;
+            self.keyboard_uppercase = false;
+            self.keyboard_input.clear();
             self.pressed_key = None;
             return true;
         }
@@ -464,14 +504,20 @@ impl ScreenState {
     }
 
     fn handle_keyboard_tap(&mut self, x: u16, y: u16) -> ScreenInteraction {
+        let max_input_bytes = match &self.keyboard_purpose {
+            KeyboardPurpose::Prompt => MAX_PROMPT_BYTES,
+            KeyboardPurpose::WifiPassword { .. } => 63,
+        };
         if (24..=696).contains(&x) && (1164..=1279).contains(&y) {
             self.keyboard_open = false;
+            self.keyboard_input.clear();
+            self.keyboard_uppercase = false;
             self.pressed_key = None;
             return ScreenInteraction::Redraw;
         }
         if (548..=680).contains(&x) && (228..=284).contains(&y) {
             self.pressed_key = Some("CLEAR".to_owned());
-            self.prompt_input.clear();
+            self.keyboard_input.clear();
             return ScreenInteraction::Redraw;
         }
 
@@ -490,14 +536,20 @@ impl ScreenState {
         };
         if let Some(character) = character {
             self.pressed_key = Some(character.to_ascii_uppercase().to_string());
-            if self.prompt_input.len() < MAX_PROMPT_BYTES {
-                self.prompt_input.push(character);
+            if self.keyboard_input.len() < max_input_bytes {
+                self.keyboard_input.push(
+                    if self.keyboard_mode == KeyboardMode::Letters && self.keyboard_uppercase {
+                        character.to_ascii_uppercase()
+                    } else {
+                        character
+                    },
+                );
             }
             return ScreenInteraction::Redraw;
         }
         if (592..=696).contains(&x) && (616..=736).contains(&y) {
             self.pressed_key = Some("DEL".to_owned());
-            self.prompt_input.pop();
+            self.keyboard_input.pop();
             return ScreenInteraction::Redraw;
         }
         if (756..=896).contains(&y) {
@@ -515,43 +567,98 @@ impl ScreenState {
                         KeyboardMode::Letters => KeyboardMode::Numbers,
                         KeyboardMode::Numbers => KeyboardMode::Letters,
                     };
+                    self.keyboard_uppercase = false;
                     return ScreenInteraction::Redraw;
                 }
                 124..=424 => {
                     self.pressed_key = Some("SPACE".to_owned());
-                    if !self.prompt_input.is_empty() && self.prompt_input.len() < MAX_PROMPT_BYTES {
-                        self.prompt_input.push(' ');
+                    if !self.keyboard_input.is_empty()
+                        && self.keyboard_input.len() < max_input_bytes
+                    {
+                        self.keyboard_input.push(' ');
                     }
                     return ScreenInteraction::Redraw;
                 }
                 432..=500 => {
+                    if self.keyboard_mode == KeyboardMode::Letters {
+                        self.keyboard_uppercase = !self.keyboard_uppercase;
+                        self.pressed_key = Some("SHIFT".to_owned());
+                        return ScreenInteraction::Redraw;
+                    }
                     self.pressed_key = Some(".".to_owned());
-                    if self.prompt_input.len() < MAX_PROMPT_BYTES {
-                        self.prompt_input.push('.');
+                    if self.keyboard_input.len() < max_input_bytes {
+                        self.keyboard_input.push('.');
                     }
                     return ScreenInteraction::Redraw;
                 }
                 508..=576 => {
+                    if self.keyboard_mode == KeyboardMode::Letters {
+                        self.keyboard_uppercase = !self.keyboard_uppercase;
+                        self.pressed_key = Some("SHIFT".to_owned());
+                        return ScreenInteraction::Redraw;
+                    }
                     self.pressed_key = Some("?".to_owned());
-                    if self.prompt_input.len() < MAX_PROMPT_BYTES {
-                        self.prompt_input.push('?');
+                    if self.keyboard_input.len() < max_input_bytes {
+                        self.keyboard_input.push('?');
                     }
                     return ScreenInteraction::Redraw;
                 }
                 584..=696 => {
-                    self.pressed_key = Some("SEND".to_owned());
-                    let prompt = self.prompt_input.trim().to_owned();
-                    if prompt.is_empty() {
+                    let value = self.keyboard_input.trim().to_owned();
+                    if value.is_empty() {
                         return ScreenInteraction::None;
                     }
-                    self.prompt_input.clear();
+                    let purpose = self.keyboard_purpose.clone();
+                    self.keyboard_input.clear();
                     self.keyboard_open = false;
                     self.pressed_key = None;
                     self.keyboard_mode = KeyboardMode::Letters;
-                    return ScreenInteraction::SubmitPrompt(prompt);
+                    self.keyboard_uppercase = false;
+                    return match purpose {
+                        KeyboardPurpose::Prompt => ScreenInteraction::SubmitPrompt(value),
+                        KeyboardPurpose::WifiPassword { ssid } => {
+                            ScreenInteraction::Settings(SettingsCommand::ConnectWifi {
+                                ssid,
+                                password: value,
+                            })
+                        }
+                    };
                 }
                 _ => {}
             }
+        }
+        ScreenInteraction::None
+    }
+
+    fn handle_settings_tap(&mut self, x: u16, y: u16) -> ScreenInteraction {
+        if (480..=696).contains(&x) && (142..=218).contains(&y) {
+            return ScreenInteraction::Settings(SettingsCommand::ScanWifi);
+        }
+        if x < 610 && (310..=790).contains(&y) {
+            let row = ((y - 310) / 96) as usize;
+            if let Some(network) = self.settings.wifi.networks.get(row) {
+                if !network.secured {
+                    return ScreenInteraction::Settings(SettingsCommand::ConnectWifi {
+                        ssid: network.ssid.clone(),
+                        password: String::new(),
+                    });
+                }
+                self.keyboard_open = true;
+                self.keyboard_mode = KeyboardMode::Letters;
+                self.keyboard_uppercase = false;
+                self.keyboard_purpose = KeyboardPurpose::WifiPassword {
+                    ssid: network.ssid.clone(),
+                };
+                self.keyboard_input.clear();
+                self.pressed_key = None;
+                return ScreenInteraction::Redraw;
+            }
+        }
+        if (24..=340).contains(&x) && (1010..=1090).contains(&y) {
+            return ScreenInteraction::Settings(SettingsCommand::ForgetWifi);
+        }
+        if (356..=696).contains(&x) && (1010..=1090).contains(&y) {
+            return ScreenInteraction::Settings(SettingsCommand::Restart);
         }
         ScreenInteraction::None
     }
@@ -720,12 +827,14 @@ impl ScreenState {
 
     pub fn draw_list(&self, ui: &Ui, state: &DeviceState, chat: &ChatProjection) -> Vec<u32> {
         match self.view {
-            ScreenView::Chat if self.keyboard_open => keyboard_draw_list(
+            _ if self.keyboard_open => keyboard_draw_list(
                 ui,
                 state,
-                &self.prompt_input,
+                &self.keyboard_input,
                 self.keyboard_mode,
+                self.keyboard_uppercase,
                 self.pressed_key.as_deref(),
+                &self.keyboard_purpose,
                 &self.backend,
                 self.telemetry,
             ),
@@ -735,14 +844,18 @@ impl ScreenState {
                 chat,
                 self.chat_scroll,
                 &self.schedule,
-                self.capabilities.portfolio,
+                self.capabilities,
                 self.telemetry,
             ),
-            ScreenView::Files => files_draw_list(
+            ScreenView::Files => {
+                files_draw_list(ui, state, &self.browser, self.capabilities, self.telemetry)
+            }
+            ScreenView::Settings => settings_draw_list(
                 ui,
                 state,
-                &self.browser,
-                self.capabilities.portfolio,
+                &self.settings,
+                &self.backend,
+                self.capabilities,
                 self.telemetry,
             ),
             ScreenView::Robinhood => robinhood_draw_list(
@@ -842,7 +955,7 @@ fn chat_draw_list(
     chat: &ChatProjection,
     scroll: usize,
     schedule: &ScheduleProjection,
-    portfolio_enabled: bool,
+    capabilities: UiCapabilities,
     telemetry: SystemTelemetry,
 ) -> Vec<u32> {
     let mut words = base_words(ui, state, "ESP32 PI AGENT", telemetry);
@@ -873,7 +986,7 @@ fn chat_draw_list(
     chat_scroll_buttons(ui, &mut words);
     schedule_panel(ui, &mut words, schedule);
     compose_button(ui, &mut words);
-    bottom_bar(ui, &mut words, ScreenView::Chat, portfolio_enabled);
+    bottom_bar(ui, &mut words, ScreenView::Chat, capabilities);
     words
 }
 
@@ -929,16 +1042,26 @@ fn keyboard_draw_list(
     state: &DeviceState,
     input: &str,
     mode: KeyboardMode,
+    uppercase: bool,
     pressed_key: Option<&str>,
+    purpose: &KeyboardPurpose,
     backend: &BackendProjection,
     telemetry: SystemTelemetry,
 ) -> Vec<u32> {
-    let mut words = base_words(ui, state, "NEW MESSAGE", telemetry);
+    let title = match purpose {
+        KeyboardPurpose::Prompt => "NEW MESSAGE",
+        KeyboardPurpose::WifiPassword { .. } => "WIFI PASSWORD",
+    };
+    let mut words = base_words(ui, state, title, telemetry);
+    let display = match purpose {
+        KeyboardPurpose::Prompt => prompt_tail(input, 116).to_owned(),
+        KeyboardPurpose::WifiPassword { .. } => "*".repeat(input.len()),
+    };
     rect(&mut words, 24, 132, 672, 168, 0xffff_ffff);
     push_text_limited(
         ui,
         &mut words,
-        prompt_tail(input, 116),
+        &display,
         42,
         154,
         29,
@@ -953,7 +1076,10 @@ fn keyboard_draw_list(
         push_text_limited(
             ui,
             &mut words,
-            "TYPE YOUR MESSAGE...",
+            match purpose {
+                KeyboardPurpose::Prompt => "TYPE YOUR MESSAGE...",
+                KeyboardPurpose::WifiPassword { .. } => "ENTER NETWORK PASSWORD...",
+            },
             42,
             154,
             29,
@@ -975,7 +1101,14 @@ fn keyboard_draw_list(
     push_text(
         ui,
         &mut words,
-        &format!("{} / {} ASCII BYTES", input.len(), MAX_PROMPT_BYTES),
+        &format!(
+            "{} / {} ASCII BYTES",
+            input.len(),
+            match purpose {
+                KeyboardPurpose::Prompt => MAX_PROMPT_BYTES,
+                KeyboardPurpose::WifiPassword { .. } => 63,
+            }
+        ),
         30,
         310,
         34,
@@ -1032,38 +1165,55 @@ fn keyboard_draw_list(
         0xffe2_e8f0,
         pressed_key == Some("SPACE"),
     );
+    if mode == KeyboardMode::Letters {
+        draw_key(
+            ui,
+            &mut words,
+            "SHIFT",
+            432,
+            756,
+            144,
+            140,
+            if uppercase { 0xffbf_dbfe } else { 0xffe2_e8f0 },
+            pressed_key == Some("SHIFT"),
+        );
+    } else {
+        draw_key(
+            ui,
+            &mut words,
+            ".",
+            432,
+            756,
+            68,
+            140,
+            0xffe2_e8f0,
+            pressed_key == Some("."),
+        );
+        draw_key(
+            ui,
+            &mut words,
+            "?",
+            508,
+            756,
+            68,
+            140,
+            0xffe2_e8f0,
+            pressed_key == Some("?"),
+        );
+    }
     draw_key(
         ui,
         &mut words,
-        ".",
-        432,
-        756,
-        68,
-        140,
-        0xffe2_e8f0,
-        pressed_key == Some("."),
-    );
-    draw_key(
-        ui,
-        &mut words,
-        "?",
-        508,
-        756,
-        68,
-        140,
-        0xffe2_e8f0,
-        pressed_key == Some("?"),
-    );
-    draw_key(
-        ui,
-        &mut words,
-        "SEND",
+        match purpose {
+            KeyboardPurpose::Prompt => "SEND",
+            KeyboardPurpose::WifiPassword { .. } => "JOIN",
+        },
         584,
         756,
         112,
         140,
         UI_GAIN_GREEN,
-        pressed_key == Some("SEND"),
+        matches!(pressed_key, Some("SEND" | "JOIN")),
     );
 
     rect(&mut words, 24, 928, 672, 220, 0xffff_ffff);
@@ -1308,7 +1458,15 @@ fn robinhood_draw_list(
     }
 
     realized_pnl_card(ui, &mut words, portfolio, span);
-    bottom_bar(ui, &mut words, ScreenView::Robinhood, true);
+    bottom_bar(
+        ui,
+        &mut words,
+        ScreenView::Robinhood,
+        UiCapabilities {
+            settings: true,
+            portfolio: true,
+        },
+    );
     words
 }
 
@@ -1712,7 +1870,15 @@ fn accounts_draw_list(
         }
     }
     account_scroll_buttons(ui, &mut words, portfolios.accounts.len());
-    bottom_bar(ui, &mut words, ScreenView::Robinhood, true);
+    bottom_bar(
+        ui,
+        &mut words,
+        ScreenView::Robinhood,
+        UiCapabilities {
+            settings: true,
+            portfolio: true,
+        },
+    );
     words
 }
 
@@ -1753,7 +1919,15 @@ fn activities_draw_list(
         }
     }
     activity_scroll_buttons(ui, &mut words);
-    bottom_bar(ui, &mut words, ScreenView::Robinhood, true);
+    bottom_bar(
+        ui,
+        &mut words,
+        ScreenView::Robinhood,
+        UiCapabilities {
+            settings: true,
+            portfolio: true,
+        },
+    );
     words
 }
 
@@ -1837,7 +2011,15 @@ fn positions_draw_list(
         }
     }
     position_scroll_buttons(ui, &mut words, portfolio.positions.len());
-    bottom_bar(ui, &mut words, ScreenView::Robinhood, true);
+    bottom_bar(
+        ui,
+        &mut words,
+        ScreenView::Robinhood,
+        UiCapabilities {
+            settings: true,
+            portfolio: true,
+        },
+    );
     words
 }
 
@@ -1853,11 +2035,130 @@ fn position_scroll_buttons(ui: &Ui, words: &mut Vec<u32>, position_count: usize)
     push_text_bold(ui, words, "DN", 646, 1026, 4, color);
 }
 
+fn settings_draw_list(
+    ui: &Ui,
+    state: &DeviceState,
+    settings: &SettingsProjection,
+    backend: &BackendProjection,
+    capabilities: UiCapabilities,
+    telemetry: SystemTelemetry,
+) -> Vec<u32> {
+    let mut words = base_words(ui, state, "SETTINGS", telemetry);
+    rect(&mut words, 24, 132, 672, 154, 0xffff_ffff);
+    push_text_bold(ui, &mut words, "WI-FI", 44, 154, 12, 0xff0f_172a);
+    let network = settings
+        .wifi
+        .connected_ssid
+        .as_deref()
+        .unwrap_or("NOT CONNECTED");
+    push_text_bold(ui, &mut words, network, 44, 198, 30, 0xff25_63eb);
+    let detail = match (&settings.wifi.ip_address, settings.wifi.rssi_dbm) {
+        (Some(ip), Some(rssi)) => format!("IP {ip}  RSSI {rssi} DBM"),
+        _ if !settings.wifi.status.is_empty() => settings.wifi.status.clone(),
+        _ => "SCAN AND SELECT A NETWORK".to_owned(),
+    };
+    push_text(ui, &mut words, &detail, 44, 244, 42, 0xff64_748b);
+    rect(&mut words, 480, 146, 196, 72, 0xff25_63eb);
+    push_text_bold(
+        ui,
+        &mut words,
+        if settings.wifi.scanning {
+            "SCANNING"
+        } else {
+            "SCAN"
+        },
+        532,
+        172,
+        10,
+        0xffff_ffff,
+    );
+
+    push_text(
+        ui,
+        &mut words,
+        "AVAILABLE NETWORKS",
+        28,
+        294,
+        28,
+        0xff64_748b,
+    );
+    if settings.wifi.networks.is_empty() {
+        rect(&mut words, 24, 326, 672, 112, 0xffe2_e8f0);
+        push_text_bold(
+            ui,
+            &mut words,
+            "TAP SCAN TO FIND WI-FI",
+            52,
+            368,
+            30,
+            0xff64_748b,
+        );
+    } else {
+        for (row, network) in settings.wifi.networks.iter().take(5).enumerate() {
+            wifi_network_row(ui, &mut words, network, 310 + row as i16 * 96);
+        }
+    }
+
+    rect(&mut words, 24, 806, 672, 176, 0xffff_ffff);
+    push_text(ui, &mut words, "MODEL BACKEND", 44, 832, 24, 0xff64_748b);
+    push_text_bold(
+        ui,
+        &mut words,
+        &format!("{}  /  {}", backend.model, backend.link),
+        44,
+        874,
+        40,
+        0xff0f_172a,
+    );
+    push_text(ui, &mut words, &backend.auth, 44, 920, 34, 0xff33_4155);
+    let storage = settings
+        .workspace_free_bytes
+        .map(format_size)
+        .unwrap_or_else(|| "--".into());
+    push_text(
+        ui,
+        &mut words,
+        &format!(
+            "FIRMWARE {}  WORKSPACE FREE {storage}",
+            settings.firmware_version
+        ),
+        44,
+        956,
+        44,
+        0xff64_748b,
+    );
+
+    rect(&mut words, 24, 1010, 316, 80, 0xffe2_e8f0);
+    push_text_bold(ui, &mut words, "FORGET WI-FI", 94, 1038, 18, 0xff0f_172a);
+    rect(&mut words, 356, 1010, 340, 80, 0xfffe_e2e2);
+    push_text_bold(ui, &mut words, "RESTART DEVICE", 424, 1038, 20, UI_LOSS_RED);
+    bottom_bar(ui, &mut words, ScreenView::Settings, capabilities);
+    words
+}
+
+fn wifi_network_row(ui: &Ui, words: &mut Vec<u32>, network: &WifiNetworkProjection, y: i16) {
+    rect(words, 24, y, 672, 84, 0xffff_ffff);
+    push_text_bold(ui, words, &network.ssid, 44, y + 24, 34, 0xff0f_172a);
+    push_text(
+        ui,
+        words,
+        &format!(
+            "{} DBM  {}",
+            network.rssi_dbm,
+            if network.secured { "LOCK" } else { "OPEN" }
+        ),
+        500,
+        y + 28,
+        18,
+        0xff64_748b,
+    );
+}
+
 fn files_draw_list(
     ui: &Ui,
     state: &DeviceState,
     browser: &WorkspaceBrowser,
-    portfolio_enabled: bool,
+    capabilities: UiCapabilities,
     telemetry: SystemTelemetry,
 ) -> Vec<u32> {
     let title = if browser.can_go_up() {
@@ -1944,7 +2245,7 @@ fn files_draw_list(
         push_text(ui, &mut words, status, 56, 1056, 32, 0xffb9_1c1c);
     }
     scroll_buttons(ui, &mut words);
-    bottom_bar(ui, &mut words, ScreenView::Files, portfolio_enabled);
+    bottom_bar(ui, &mut words, ScreenView::Files, capabilities);
     words
 }
 
@@ -2105,9 +2406,22 @@ fn message_reader_draw_list(
     words
 }
 
-fn bottom_bar(ui: &Ui, words: &mut Vec<u32>, active: ScreenView, portfolio_enabled: bool) {
+fn bottom_bar(ui: &Ui, words: &mut Vec<u32>, active: ScreenView, capabilities: UiCapabilities) {
     rect(words, 0, BOTTOM_BAR_Y, PANEL_WIDTH, 108, 0xff0f_172a);
-    let tabs = if portfolio_enabled {
+    let tabs = if capabilities.settings && capabilities.portfolio {
+        vec![
+            (8, 166, "CHAT", ScreenView::Chat),
+            (182, 166, "FILES", ScreenView::Files),
+            (356, 166, "SETTINGS", ScreenView::Settings),
+            (530, 182, "ROBIN", ScreenView::Robinhood),
+        ]
+    } else if capabilities.settings {
+        vec![
+            (10, 220, "CHAT", ScreenView::Chat),
+            (250, 220, "FILES", ScreenView::Files),
+            (490, 220, "SETTINGS", ScreenView::Settings),
+        ]
+    } else if capabilities.portfolio {
         vec![
             (10, 220, "CHAT", ScreenView::Chat),
             (250, 220, "FILES", ScreenView::Files),
@@ -2136,7 +2450,7 @@ fn bottom_bar(ui: &Ui, words: &mut Vec<u32>, active: ScreenView, portfolio_enabl
                 0xff1e_293b
             },
         );
-        let label_x = if portfolio_enabled { x + 68 } else { x + 128 };
+        let label_x = x + (width as i16 - label.len() as i16 * 12) / 2;
         push_text_bold(ui, words, label, label_x, BOTTOM_BAR_Y + 44, 8, 0xffff_ffff);
     }
 }

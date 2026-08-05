@@ -4,31 +4,51 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pocket_pi_embedded::ModelBackend;
-use pocket_pi_protocols::{codex_decision, openai_chat};
+use pocket_pi_protocols::model::WirelessProvider;
+use pocket_pi_protocols::{anthropic_messages, codex_decision, openai_chat};
 use serde_json::{json, Value};
 
 pub enum BackendChoice {
     Scripted,
-    OpenAi { api_key: String, model: String },
-    Codex { model: Option<String> },
+    Wireless {
+        provider: WirelessProvider,
+        api_key: String,
+        model: String,
+    },
+    Codex {
+        model: Option<String>,
+    },
 }
 
 impl BackendChoice {
     pub fn from_name(name: &str, model: Option<String>) -> Result<Self, String> {
         match name {
             "scripted" => Ok(Self::Scripted),
-            "openai" => Ok(Self::OpenAi {
-                api_key: std::env::var("OPENAI_API_KEY")
-                    .map_err(|_| "OPENAI_API_KEY is required for --backend openai".to_owned())?,
-                model: model
-                    .or_else(|| std::env::var("OPENAI_MODEL").ok())
-                    .unwrap_or_else(|| "gpt-5.6".to_owned()),
-            }),
+            "openai" | "openrouter" | "anthropic" => {
+                let provider = match name {
+                    "openai" => WirelessProvider::OpenAi,
+                    "openrouter" => WirelessProvider::OpenRouter,
+                    "anthropic" => WirelessProvider::Anthropic,
+                    _ => unreachable!(),
+                };
+                let prefix = name.to_ascii_uppercase();
+                let api_key = std::env::var(format!("{prefix}_API_KEY"))
+                    .map_err(|_| format!("{prefix}_API_KEY is required for --backend {name}"))?;
+                let model = model
+                    .or_else(|| std::env::var(format!("{prefix}_MODEL")).ok())
+                    .or_else(|| provider.default_model().map(str::to_owned))
+                    .ok_or_else(|| format!("--backend {name} requires --model"))?;
+                Ok(Self::Wireless {
+                    provider,
+                    api_key,
+                    model,
+                })
+            }
             "codex" => Ok(Self::Codex {
                 model: model.or_else(|| std::env::var("CODEX_MODEL").ok()),
             }),
             other => Err(format!(
-                "unknown backend {other:?}; expected scripted, openai or codex"
+                "unknown backend {other:?}; expected scripted, openai, openrouter, anthropic or codex"
             )),
         }
     }
@@ -36,7 +56,9 @@ impl BackendChoice {
     pub fn agent_config(&self) -> String {
         let (provider, model) = match self {
             Self::Scripted => ("openai", "simulated"),
-            Self::OpenAi { model, .. } => ("openai", model.as_str()),
+            Self::Wireless {
+                provider, model, ..
+            } => (provider.id(), model.as_str()),
             Self::Codex { model } => ("codex", model.as_deref().unwrap_or("coding-plan")),
         };
         json!({
@@ -50,7 +72,9 @@ impl BackendChoice {
     pub fn build(self) -> Arc<dyn ModelBackend> {
         match self {
             Self::Scripted => Arc::new(ScriptedBackend),
-            Self::OpenAi { api_key, .. } => Arc::new(OpenAiBackend { api_key }),
+            Self::Wireless {
+                provider, api_key, ..
+            } => Arc::new(WirelessBackend { provider, api_key }),
             Self::Codex { model } => Arc::new(CodexBackend { model }),
         }
     }
@@ -73,42 +97,72 @@ impl ModelBackend for ScriptedBackend {
     }
 }
 
-struct OpenAiBackend {
+struct WirelessBackend {
+    provider: WirelessProvider,
     api_key: String,
 }
 
-impl ModelBackend for OpenAiBackend {
+impl ModelBackend for WirelessBackend {
     fn complete(
         &self,
         request_json: &str,
         on_delta: &mut dyn FnMut(&str),
     ) -> Result<String, String> {
-        let body = openai_chat::build_request(request_json)?;
+        let (endpoint, body) = match self.provider {
+            WirelessProvider::OpenAi => (
+                "https://api.openai.com/v1/chat/completions",
+                openai_chat::build_request(request_json)?,
+            ),
+            WirelessProvider::OpenRouter => (
+                "https://openrouter.ai/api/v1/chat/completions",
+                openai_chat::build_request_for(request_json, openai_chat::Dialect::OpenRouter)?,
+            ),
+            WirelessProvider::Anthropic => (
+                "https://api.anthropic.com/v1/messages",
+                anthropic_messages::build_request(request_json)?,
+            ),
+        };
         let agent = ureq::AgentBuilder::new()
             .timeout_connect(Duration::from_secs(20))
             .timeout_read(Duration::from_secs(180))
             .build();
-        let response = agent
-            .post("https://api.openai.com/v1/chat/completions")
-            .set("authorization", &format!("Bearer {}", self.api_key))
+        let mut request = agent
+            .post(endpoint)
             .set("accept", "text/event-stream")
-            .set("content-type", "application/json")
-            .send_string(&body);
+            .set("content-type", "application/json");
+        request = match self.provider {
+            WirelessProvider::Anthropic => request
+                .set("x-api-key", &self.api_key)
+                .set("anthropic-version", "2023-06-01"),
+            WirelessProvider::OpenAi | WirelessProvider::OpenRouter => {
+                request.set("authorization", &format!("Bearer {}", self.api_key))
+            }
+        };
+        let response = request.send_string(&body);
         let response = match response {
             Ok(response) => response,
             Err(ureq::Error::Status(status, response)) => {
                 let body = read_body(response.into_reader());
-                return Err(format!("OpenAI returned HTTP {status}: {body}"));
+                return Err(format!(
+                    "{} returned HTTP {status}: {body}",
+                    self.provider.id()
+                ));
             }
-            Err(error) => return Err(format!("OpenAI request failed: {error}")),
+            Err(error) => return Err(format!("{} request failed: {error}", self.provider.id())),
         };
 
-        let mut stream = openai_chat::Stream::default();
+        let mut stream = match self.provider {
+            WirelessProvider::Anthropic => SimProviderStream::Anthropic(Default::default()),
+            WirelessProvider::OpenAi | WirelessProvider::OpenRouter => {
+                SimProviderStream::Chat(Default::default())
+            }
+        };
         for line in BufReader::new(response.into_reader()).lines() {
-            let line = line.map_err(|error| format!("OpenAI stream read failed: {error}"))?;
-            let Some(data) = line.strip_prefix("data: ") else {
+            let line = line.map_err(|error| format!("model stream read failed: {error}"))?;
+            let Some(data) = line.strip_prefix("data:") else {
                 continue;
             };
+            let data = data.trim_start();
             if data == "[DONE]" {
                 break;
             }
@@ -117,6 +171,27 @@ impl ModelBackend for OpenAiBackend {
             }
         }
         stream.finish()
+    }
+}
+
+enum SimProviderStream {
+    Chat(openai_chat::Stream),
+    Anthropic(anthropic_messages::Stream),
+}
+
+impl SimProviderStream {
+    fn push(&mut self, data: &str) -> Result<Option<String>, String> {
+        match self {
+            Self::Chat(stream) => stream.push(data),
+            Self::Anthropic(stream) => stream.push(data),
+        }
+    }
+
+    fn finish(self) -> Result<String, String> {
+        match self {
+            Self::Chat(stream) => stream.finish(),
+            Self::Anthropic(stream) => stream.finish(),
+        }
     }
 }
 
