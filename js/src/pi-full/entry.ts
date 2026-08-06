@@ -18,6 +18,10 @@ import {
   InMemoryAuthStorageBackend,
 } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/auth-storage.js";
 import { loadExtensionFromFactory } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js";
+import {
+  fauxAssistantMessage,
+  fauxProvider,
+} from "../../node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/providers/faux.js";
 
 const PiFull = {
   createAgentSession,
@@ -31,6 +35,8 @@ const PiFull = {
   createExtensionRuntime,
   createEventBus,
   loadExtensionFromFactory,
+  fauxAssistantMessage,
+  fauxProvider,
 };
 globalThis.PiFull = PiFull;
 globalThis.__piFullLoaded = typeof createAgentSession === "function";

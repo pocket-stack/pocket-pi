@@ -62,22 +62,22 @@ fn main() {
         })
     } else {
         match std::env::var("ANTHROPIC_API_KEY") {
-        Ok(key) => serde_json::json!({
-            "model": "claude-opus-4-8",
-            "apiKey": key,
-            "maxTokens": 256,
-            "systemPrompt": "You are Pocket Pi, a tiny agent living in a QuickJS runtime. Be brief.",
-            "tools": [tool]
-        }),
-        Err(_) => {
-            eprintln!("(no ANTHROPIC_API_KEY — running the offline scripted assistant)\n");
-            serde_json::json!({
-                "model": "offline",
-                "scripted": { "steps": [
-                    { "text": "I'm Pocket Pi — pi's agent core running inside QuickJS, no Node, no bun." }
-                ]}
-            })
-        }
+            Ok(key) => serde_json::json!({
+                "model": "claude-opus-4-8",
+                "apiKey": key,
+                "maxTokens": 256,
+                "systemPrompt": "You are Pocket Pi, a tiny agent living in a QuickJS runtime. Be brief.",
+                "tools": [tool]
+            }),
+            Err(_) => {
+                eprintln!("(no ANTHROPIC_API_KEY — running the offline scripted assistant)\n");
+                serde_json::json!({
+                    "model": "offline",
+                    "scripted": { "steps": [
+                        { "text": "I'm Pocket Pi — pi's agent core running inside QuickJS, no Node, no bun." }
+                    ]}
+                })
+            }
         }
     };
 

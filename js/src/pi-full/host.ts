@@ -69,9 +69,31 @@ async function boot(configJson: string): Promise<void> {
   globalThis.__ppBooted = false;
   try {
     const cfg = JSON.parse(configJson);
-    const provider = cfg.provider || (String(cfg.model || "").startsWith("gpt") ? "openai" : "anthropic");
+    let provider = cfg.provider || (String(cfg.model || "").startsWith("gpt") ? "openai" : "anthropic");
+    let model: any;
+    let nativeProvider: any;
+    if (cfg.scripted) {
+      const modelId = cfg.model || "offline";
+      const faux = P.fauxProvider({
+        api: "pocket-pi-offline",
+        provider: "offline",
+        models: [{ id: modelId, name: "Pocket Pi Offline" }],
+      });
+      faux.setResponses(
+        (cfg.scripted.steps || []).map((step: any) =>
+          P.fauxAssistantMessage(typeof step === "string" ? step : String(step.text || "")),
+        ),
+      );
+      nativeProvider = faux.provider;
+      provider = "offline";
+      model = faux.getModel(modelId);
+      if (!model) throw new Error(`offline model not found: ${modelId}`);
+    } else {
+      model = buildModel(cfg, provider);
+    }
 
     const modelRuntime = await P.ModelRuntime.create({ modelsPath: null } as any);
+    if (nativeProvider) modelRuntime.registerNativeProvider(nativeProvider);
     if (cfg.apiKey) await modelRuntime.setRuntimeApiKey(provider, cfg.apiKey);
 
     const settingsManager = P.SettingsManager.inMemory({});
@@ -90,7 +112,7 @@ async function boot(configJson: string): Promise<void> {
     if (resourceLoader.reload) await resourceLoader.reload();
 
     const { session } = await P.createAgentSession({
-      model: buildModel(cfg, provider),
+      model,
       modelRuntime,
       settingsManager,
       sessionManager,

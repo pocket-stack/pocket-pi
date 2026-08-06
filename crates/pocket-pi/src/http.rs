@@ -54,15 +54,27 @@ impl HttpHub {
     pub fn start(&self, request_json: &str) -> Result<u64, String> {
         let v: serde_json::Value =
             serde_json::from_str(request_json).map_err(|e| format!("bad request json: {e}"))?;
-        let url = v.get("url").and_then(|x| x.as_str()).ok_or("missing url")?.to_string();
+        let url = v
+            .get("url")
+            .and_then(|x| x.as_str())
+            .ok_or("missing url")?
+            .to_string();
         let raw = v.get("raw").and_then(|x| x.as_bool()).unwrap_or(false);
         let method = v
             .get("method")
             .and_then(|x| x.as_str())
             .map(|s| s.to_uppercase())
             .unwrap_or_else(|| "POST".into());
-        let api_key = v.get("apiKey").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let auth = v.get("auth").and_then(|x| x.as_str()).unwrap_or("x-api-key").to_string();
+        let api_key = v
+            .get("apiKey")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let auth = v
+            .get("auth")
+            .and_then(|x| x.as_str())
+            .unwrap_or("x-api-key")
+            .to_string();
         // Body: fetch passes a string; providers pass a JSON object to serialize.
         let body = match v.get("body") {
             Some(serde_json::Value::String(s)) => Some(s.clone()),
@@ -77,13 +89,27 @@ impl HttpHub {
                 }
             }
         }
-        let req = Req { url, method, headers, body, api_key, auth, raw };
+        let req = Req {
+            url,
+            method,
+            headers,
+            body,
+            api_key,
+            auth,
+            raw,
+        };
 
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let cancel = Arc::new(AtomicBool::new(false));
         {
             let mut inner = self.inner.lock().unwrap();
-            inner.turns.insert(id, Turn { cancel: cancel.clone(), ..Default::default() });
+            inner.turns.insert(
+                id,
+                Turn {
+                    cancel: cancel.clone(),
+                    ..Default::default()
+                },
+            );
         }
         let hub = self.inner.clone();
         std::thread::Builder::new()
@@ -159,8 +185,7 @@ struct Req {
 }
 
 fn run_request(hub: Arc<Mutex<Inner>>, id: u64, req: Req, cancel: Arc<AtomicBool>) {
-    let mut builder =
-        ureq::AgentBuilder::new().timeout_connect(std::time::Duration::from_secs(20));
+    let mut builder = ureq::AgentBuilder::new().timeout_connect(std::time::Duration::from_secs(20));
     // Respect a system proxy (Clash/mihomo, corporate egress, …) like curl does.
     if let Some(proxy_url) = std::env::var("HTTPS_PROXY")
         .or_else(|_| std::env::var("https_proxy"))
@@ -176,7 +201,10 @@ fn run_request(hub: Arc<Mutex<Inner>>, id: u64, req: Req, cancel: Arc<AtomicBool
     let agent = builder.build();
 
     let mut r = agent.request(&req.method, &req.url);
-    let has_ct = req.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
+    let has_ct = req
+        .headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
     if req.body.is_some() && !has_ct {
         r = r.set("content-type", "application/json");
     }
@@ -193,7 +221,9 @@ fn run_request(hub: Arc<Mutex<Inner>>, id: u64, req: Req, cancel: Arc<AtomicBool
                 .set("authorization", &format!("Bearer {}", req.api_key))
                 .set("anthropic-beta", "oauth-2025-04-20");
         } else {
-            r = r.set("anthropic-version", "2023-06-01").set("x-api-key", &req.api_key);
+            r = r
+                .set("anthropic-version", "2023-06-01")
+                .set("x-api-key", &req.api_key);
         }
     }
 
@@ -207,8 +237,14 @@ fn run_request(hub: Arc<Mutex<Inner>>, id: u64, req: Req, cancel: Arc<AtomicBool
         // throw on 4xx/5xx); for SSE providers, surface it as an error.
         Err(ureq::Error::Status(code, r)) if req.raw => r_or_status(r, code),
         Err(ureq::Error::Status(code, r)) => {
-            let msg = r.into_string().unwrap_or_else(|_| String::from("(no body)"));
-            finish(&hub, id, Some(format!("http {code}: {}", truncate(&msg, 400))));
+            let msg = r
+                .into_string()
+                .unwrap_or_else(|_| String::from("(no body)"));
+            finish(
+                &hub,
+                id,
+                Some(format!("http {code}: {}", truncate(&msg, 400))),
+            );
             return;
         }
         Err(e) => {
@@ -222,7 +258,10 @@ fn run_request(hub: Arc<Mutex<Inner>>, id: u64, req: Req, cancel: Arc<AtomicBool
         let mut headers = serde_json::Map::new();
         for name in resp.headers_names() {
             if let Some(val) = resp.header(&name) {
-                headers.insert(name.to_lowercase(), serde_json::Value::String(val.to_string()));
+                headers.insert(
+                    name.to_lowercase(),
+                    serde_json::Value::String(val.to_string()),
+                );
             }
         }
         let meta = serde_json::json!({ "__meta": {
@@ -303,8 +342,16 @@ fn base64_encode(bytes: &[u8]) -> String {
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         out.push(A[(n >> 18 & 63) as usize] as char);
         out.push(A[(n >> 12 & 63) as usize] as char);
-        out.push(if c.len() > 1 { A[(n >> 6 & 63) as usize] as char } else { '=' });
-        out.push(if c.len() > 2 { A[(n & 63) as usize] as char } else { '=' });
+        out.push(if c.len() > 1 {
+            A[(n >> 6 & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if c.len() > 2 {
+            A[(n & 63) as usize] as char
+        } else {
+            '='
+        });
     }
     out
 }

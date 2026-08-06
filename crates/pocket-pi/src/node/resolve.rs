@@ -128,7 +128,11 @@ fn resolve_export(json: &serde_json::Value, key: &str) -> Option<String> {
     let exports = json.get("exports")?;
     // `"exports": "./x.js"` — sugar for the root entry only.
     if let Some(s) = exports.as_str() {
-        return if key == "." { Some(s.to_string()) } else { None };
+        return if key == "." {
+            Some(s.to_string())
+        } else {
+            None
+        };
     }
     let obj = exports.as_object()?;
     // Exact subpath wins over any wildcard (Node's precedence).
@@ -182,9 +186,14 @@ fn wildcard_capture(pattern: &str, key: &str) -> Option<String> {
 
 /// Split a bare specifier into `(package, subpath)`, handling `@scope/pkg`.
 fn split_package(name: &str) -> (String, Option<String>) {
-    let parts: Vec<&str> = name.splitn(if name.starts_with('@') { 3 } else { 2 }, '/').collect();
+    let parts: Vec<&str> = name
+        .splitn(if name.starts_with('@') { 3 } else { 2 }, '/')
+        .collect();
     if name.starts_with('@') && parts.len() == 3 {
-        (format!("{}/{}", parts[0], parts[1]), Some(parts[2].to_string()))
+        (
+            format!("{}/{}", parts[0], parts[1]),
+            Some(parts[2].to_string()),
+        )
     } else if name.starts_with('@') {
         (name.to_string(), None)
     } else if parts.len() == 2 {
@@ -222,15 +231,24 @@ mod tests {
     #[test]
     fn splits_scoped_and_plain_packages() {
         assert_eq!(split_package("react"), ("react".into(), None));
-        assert_eq!(split_package("react/jsx-runtime"), ("react".into(), Some("jsx-runtime".into())));
+        assert_eq!(
+            split_package("react/jsx-runtime"),
+            ("react".into(), Some("jsx-runtime".into()))
+        );
         assert_eq!(split_package("@scope/pkg"), ("@scope/pkg".into(), None));
-        assert_eq!(split_package("@scope/pkg/sub"), ("@scope/pkg".into(), Some("sub".into())));
+        assert_eq!(
+            split_package("@scope/pkg/sub"),
+            ("@scope/pkg".into(), Some("sub".into()))
+        );
     }
 
     #[test]
     fn wildcard_matches_prefix_and_suffix() {
         assert_eq!(wildcard_capture("./*", "./foo"), Some("foo".into()));
-        assert_eq!(wildcard_capture("./features/*.js", "./features/x.js"), Some("x".into()));
+        assert_eq!(
+            wildcard_capture("./features/*.js", "./features/x.js"),
+            Some("x".into())
+        );
         assert_eq!(wildcard_capture("./features/*.js", "./other/x.js"), None);
         assert_eq!(wildcard_capture("./exact", "./exact"), Some(String::new()));
         assert_eq!(wildcard_capture("./exact", "./nope"), None);
@@ -238,10 +256,8 @@ mod tests {
 
     #[test]
     fn exports_exact_beats_wildcard() {
-        let json: serde_json::Value = serde_json::from_str(
-            r#"{"exports":{"./a":"./exact.js","./*":"./src/*.js"}}"#,
-        )
-        .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(r#"{"exports":{"./a":"./exact.js","./*":"./src/*.js"}}"#).unwrap();
         assert_eq!(resolve_export(&json, "./a").as_deref(), Some("./exact.js"));
         assert_eq!(resolve_export(&json, "./b").as_deref(), Some("./src/b.js"));
     }
@@ -261,6 +277,9 @@ mod tests {
     #[test]
     fn builtins_resolve_with_node_prefix() {
         assert_eq!(resolve_spec("/x.js", "fs").as_deref(), Some("node:fs"));
-        assert_eq!(resolve_spec("/x.js", "node:path").as_deref(), Some("node:path"));
+        assert_eq!(
+            resolve_spec("/x.js", "node:path").as_deref(),
+            Some("node:path")
+        );
     }
 }

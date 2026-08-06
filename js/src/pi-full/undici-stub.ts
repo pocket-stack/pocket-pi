@@ -5,9 +5,8 @@
 // native hub handles proxying). This stub exists only so `import * as undici`
 // loads without dragging in undici's entire web-fetch/websocket/cache stack.
 //
-// This substitutes a transitive transport dependency, not pi's logic — the same
-// "heavy Node transport dep → native" rule the trimmed bundle applies to pi-ai.
-// pi's own source is unmodified.
+// This substitutes a transitive transport dependency, not pi's logic. Pi's own
+// source remains unmodified.
 
 class NoopDispatcher {
   dispatch() { return false; }

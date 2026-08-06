@@ -30,7 +30,10 @@ pub fn transpile_ts(filename: &str, source: &str) -> Result<String, String> {
     }
 
     let mut program = parsed.program;
-    let scoping = SemanticBuilder::new().build(&program).semantic.into_scoping();
+    let scoping = SemanticBuilder::new()
+        .build(&program)
+        .semantic
+        .into_scoping();
     let result = Transformer::new(&allocator, path, &TransformOptions::default())
         .build_with_scoping(scoping, &mut program);
     if !result.diagnostics.is_empty() {

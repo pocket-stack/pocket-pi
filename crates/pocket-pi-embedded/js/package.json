@@ -1,0 +1,16 @@
+{
+  "name": "pocket-pi-embedded-guest",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.81.1",
+    "@earendil-works/pi-ai": "0.81.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.1",
+    "typescript": "5.7.2"
+  }
+}

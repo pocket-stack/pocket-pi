@@ -20,7 +20,10 @@ pub struct Builtin {
 /// Register a builtin by Node name and `js/node/<file>`.
 macro_rules! builtin {
     ($name:literal, $file:literal) => {
-        Builtin { name: $name, source: include_str!(concat!("../../js/node/", $file)) }
+        Builtin {
+            name: $name,
+            source: include_str!(concat!("../../js/node/", $file)),
+        }
     };
 }
 
@@ -121,7 +124,11 @@ mod tests {
         let src = cjs_bootstrap_source();
         for b in BUILTINS {
             let key = format!("{:?}: __pick(", b.name);
-            assert!(src.contains(&key), "builtin {:?} missing from __builtinExports", b.name);
+            assert!(
+                src.contains(&key),
+                "builtin {:?} missing from __builtinExports",
+                b.name
+            );
         }
         // One import per builtin.
         assert_eq!(src.matches("import * as __b").count(), BUILTINS.len());

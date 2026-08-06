@@ -1,0 +1,11 @@
+[package]
+name = "pocket-pi-embedded"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Small pi-agent-core runtime for embedded Pocket Pi hosts"
+
+[dependencies]
+rquickjs = { version = "=0.12.1", default-features = false, features = ["bindgen", "std"] }
+serde_json.workspace = true

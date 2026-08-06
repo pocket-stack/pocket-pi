@@ -6,12 +6,11 @@
 //   src/runtime/**       →  crates/pocket-pi/js/**            (per-file transpile; embedded via include_str!)
 //   src/pi-full/{driver,ext-probe,persist-probe}
 //                        →  crates/pocket-pi/js/pi-full/**    (test harness scripts)
-//   src/trimmed/entry    →  crates/pocket-pi/js/agent.bundle.js       (trimmed core, pi-ai stubbed)
 //   src/pi-full/entry    →  crates/pocket-pi/js/pi-full.bundle.js(.gz) (full unmodified pi)
 //
 // pi is a real, unmodified npm dependency (package.json) — sync with `npm update`
-// and rerun this. The emitted runtime .js and agent.bundle.js are committed so
-// `cargo` builds Rust-only; the full pi bundle is git-ignored (built on demand).
+// and rerun this. Runtime modules and the compressed full-pi bundle are committed
+// so `cargo` builds Rust-only; only the raw full-pi bundle is git-ignored.
 
 import * as esbuild from "esbuild";
 import { execFileSync } from "node:child_process";
