@@ -60,7 +60,8 @@ pub fn embedded_full_pi_bundle() -> String {
     use std::io::Read;
     let mut d = flate2::read::GzDecoder::new(FULL_PI_GZ);
     let mut s = String::new();
-    d.read_to_string(&mut s).expect("gunzip embedded full-pi bundle");
+    d.read_to_string(&mut s)
+        .expect("gunzip embedded full-pi bundle");
     s
 }
 
@@ -101,7 +102,11 @@ impl ToolResult {
             o.insert("image".into(), serde_json::Value::String(img.clone()));
             o.insert(
                 "mimeType".into(),
-                serde_json::Value::String(self.mime_type.clone().unwrap_or_else(|| "image/jpeg".into())),
+                serde_json::Value::String(
+                    self.mime_type
+                        .clone()
+                        .unwrap_or_else(|| "image/jpeg".into()),
+                ),
             );
         }
         o.insert("terminate".into(), serde_json::Value::Bool(self.terminate));
@@ -171,14 +176,24 @@ impl PiRuntime {
             // Declare + set import.meta.url before evaluating, since this in-memory
             // module bypasses the loader that normally sets it (pi derives __dirname
             // from import.meta.url).
-            let declared = rquickjs::module::Module::declare(ctx.clone(), "pocket-pi:pi-full", full_pi.as_bytes())
-                .catch(&ctx)
-                .map_err(|e| format!("pi-full declare: {e}"))?;
+            let declared = rquickjs::module::Module::declare(
+                ctx.clone(),
+                "pocket-pi:pi-full",
+                full_pi.as_bytes(),
+            )
+            .catch(&ctx)
+            .map_err(|e| format!("pi-full declare: {e}"))?;
             if let Ok(meta) = declared.meta() {
                 let _ = meta.set("url", "file:///pocket-pi/js/pi-full.bundle.js");
             }
-            let (_evaluated, promise) = declared.eval().catch(&ctx).map_err(|e| format!("pi-full eval start: {e}"))?;
-            promise.finish::<()>().catch(&ctx).map_err(|e| format!("pi-full eval: {e}"))?;
+            let (_evaluated, promise) = declared
+                .eval()
+                .catch(&ctx)
+                .map_err(|e| format!("pi-full eval start: {e}"))?;
+            promise
+                .finish::<()>()
+                .catch(&ctx)
+                .map_err(|e| format!("pi-full eval: {e}"))?;
             // Host harness: PocketPi.boot/prompt on top of pi (native tools + events).
             ctx.eval::<(), _>(HOST_HARNESS.as_bytes())
                 .catch(&ctx)
@@ -380,11 +395,7 @@ fn call_global_void(ctx: &Ctx, name: &str) -> Result<(), String> {
 
 /// Mount `globalThis.host` — the entire native capability surface the guest can
 /// reach. Deliberately small: HTTP streaming, tool dispatch, event emit, uuid.
-fn install_host(
-    ctx: &Ctx,
-    state: &Rc<RefCell<HostState>>,
-    hub: &HttpHub,
-) -> rquickjs::Result<()> {
+fn install_host(ctx: &Ctx, state: &Rc<RefCell<HostState>>, hub: &HttpHub) -> rquickjs::Result<()> {
     let host = Object::new(ctx.clone())?;
 
     // host.http.{start,drain,cancel}
@@ -392,12 +403,15 @@ fn install_host(
     let h = hub.clone();
     http.set(
         "start",
-        Function::new(ctx.clone(), move |ctx: Ctx, req: String| -> rquickjs::Result<f64> {
-            match h.start(&req) {
-                Ok(id) => Ok(id as f64),
-                Err(e) => Err(ctx.throw(rquickjs::String::from_str(ctx.clone(), &e)?.into())),
-            }
-        })?,
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx, req: String| -> rquickjs::Result<f64> {
+                match h.start(&req) {
+                    Ok(id) => Ok(id as f64),
+                    Err(e) => Err(ctx.throw(rquickjs::String::from_str(ctx.clone(), &e)?.into())),
+                }
+            },
+        )?,
     )?;
     let h = hub.clone();
     http.set(
@@ -415,16 +429,19 @@ fn install_host(
     let st = state.clone();
     host.set(
         "tool",
-        Function::new(ctx.clone(), move |name: String, args_json: String| -> String {
-            let args: serde_json::Value =
-                serde_json::from_str(&args_json).unwrap_or(serde_json::Value::Null);
-            let mut st = st.borrow_mut();
-            let result = match st.tools.get_mut(&name) {
-                Some(f) => f(args),
-                None => ToolResult::text(format!("(no such tool: {name})")),
-            };
-            result.to_json().to_string()
-        })?,
+        Function::new(
+            ctx.clone(),
+            move |name: String, args_json: String| -> String {
+                let args: serde_json::Value =
+                    serde_json::from_str(&args_json).unwrap_or(serde_json::Value::Null);
+                let mut st = st.borrow_mut();
+                let result = match st.tools.get_mut(&name) {
+                    Some(f) => f(args),
+                    None => ToolResult::text(format!("(no such tool: {name})")),
+                };
+                result.to_json().to_string()
+            },
+        )?,
     )?;
 
     // host.emit(jsonLine) -> buffers an agent event for the host to flush
@@ -448,8 +465,9 @@ fn install_host(
         Function::new(
             ctx.clone(),
             move |ctx: Ctx, name: String, source: String| -> rquickjs::Result<String> {
-                transpile::transpile_ts(&name, &source)
-                    .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))
+                transpile::transpile_ts(&name, &source).map_err(|e| {
+                    ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into())
+                })
             },
         )?,
     )?;
@@ -473,7 +491,9 @@ fn simple_uuid() -> String {
         if i == 8 || i == 12 || i == 16 || i == 20 {
             hex.push('-');
         }
-        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        x = x
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let nibble = ((x >> 64) & 0xF) as u8;
         hex.push(char::from_digit(nibble as u32, 16).unwrap());
     }
@@ -486,20 +506,26 @@ fn install_console(ctx: &Ctx) -> rquickjs::Result<()> {
     for level in ["log", "info", "debug", "warn", "error"] {
         console.set(
             level,
-            Function::new(ctx.clone(), move |args: rquickjs::function::Rest<rquickjs::Value>| {
-                let mut out = String::new();
-                for (i, v) in args.iter().enumerate() {
-                    if i > 0 {
-                        out.push(' ');
+            Function::new(
+                ctx.clone(),
+                move |args: rquickjs::function::Rest<rquickjs::Value>| {
+                    let mut out = String::new();
+                    for (i, v) in args.iter().enumerate() {
+                        if i > 0 {
+                            out.push(' ');
+                        }
+                        if let Some(s) = v.as_string() {
+                            out.push_str(&s.to_string().unwrap_or_default());
+                        } else if let Ok(s) = v.ctx().json_stringify(v.clone()) {
+                            out.push_str(
+                                &s.map(|s| s.to_string().unwrap_or_default())
+                                    .unwrap_or_default(),
+                            );
+                        }
                     }
-                    if let Some(s) = v.as_string() {
-                        out.push_str(&s.to_string().unwrap_or_default());
-                    } else if let Ok(s) = v.ctx().json_stringify(v.clone()) {
-                        out.push_str(&s.map(|s| s.to_string().unwrap_or_default()).unwrap_or_default());
-                    }
-                }
-                log::info!(target: "pocket-pi.guest", "{out}");
-            })?,
+                    log::info!(target: "pocket-pi.guest", "{out}");
+                },
+            )?,
         )?;
     }
     ctx.globals().set("console", console)?;

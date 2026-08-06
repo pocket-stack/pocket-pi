@@ -18,7 +18,10 @@ fn run(rt: &mut PiRuntime, sink: Rc<RefCell<Vec<HostEvent>>>, hz: f64, max_secs:
     let _ = &sink;
 }
 
-fn collector() -> (Rc<RefCell<Vec<HostEvent>>>, impl FnMut(&HostEvent) + 'static) {
+fn collector() -> (
+    Rc<RefCell<Vec<HostEvent>>>,
+    impl FnMut(&HostEvent) + 'static,
+) {
     let sink = Rc::new(RefCell::new(Vec::new()));
     let s = sink.clone();
     (sink, move |ev: &HostEvent| s.borrow_mut().push(ev.clone()))
@@ -45,11 +48,6 @@ fn reply_text(events: &[HostEvent]) -> String {
     }
     out
 }
-
-
-
-
-
 
 /// Milestone 1 of the Node-compat runtime: the module system resolves + loads
 /// real modules — a relative `.ts` file (transpiled), `node:` builtins, and a
@@ -105,7 +103,10 @@ const out: Result = {
     assert_eq!(out["path"], "a/c", "path.join wrong: {out}");
     assert_eq!(out["ee"], true, "EventEmitter didn't fire: {out}");
     assert_eq!(out["b64"], "aGk=", "Buffer base64 wrong: {out}");
-    assert_eq!(out["greet"], "hello cat", "bare package import wrong: {out}");
+    assert_eq!(
+        out["greet"], "hello cat",
+        "bare package import wrong: {out}"
+    );
     assert_eq!(out["hasHome"], true, "os.homedir wrong: {out}");
 
     let _ = fs::remove_dir_all(&dir);
@@ -118,9 +119,8 @@ const out: Result = {
 #[test]
 fn runs_real_unmodified_pi_ai_module() {
     let manifest = env!("CARGO_MANIFEST_DIR");
-    let real = format!(
-        "{manifest}/../../js/node_modules/@mariozechner/pi-ai/dist/utils/event-stream.js"
-    );
+    let real =
+        format!("{manifest}/../../js/node_modules/@mariozechner/pi-ai/dist/utils/event-stream.js");
     if !std::path::Path::new(&real).exists() {
         eprintln!("skipping runs_real_unmodified_pi_ai_module: run `npm install` in js/ first");
         return;
@@ -156,7 +156,10 @@ s.result().then((m: any) => {{
     }
 
     let out = rt.get_global_json("__piAi").expect("real pi-ai class ran");
-    assert_eq!(out["resolvedText"], "hi", "real pi-ai EventStream misbehaved: {out}");
+    assert_eq!(
+        out["resolvedText"], "hi",
+        "real pi-ai EventStream misbehaved: {out}"
+    );
     assert_eq!(out["isReal"], true);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -199,7 +202,10 @@ fn whatwg_fetch_returns_a_readable_response() {
             assert!(status > 0, "no status: {f}");
             assert!(f["len"].as_i64().unwrap_or(0) > 0, "empty body: {f}");
             assert_eq!(f["isObject"], true, "body wasn't JSON: {f}");
-            assert!(f["ct"].as_str().unwrap_or("").contains("json"), "content-type header missing: {f}");
+            assert!(
+                f["ct"].as_str().unwrap_or("").contains("json"),
+                "content-type header missing: {f}"
+            );
             return;
         }
         if start.elapsed().as_secs() > 30 {
@@ -288,7 +294,39 @@ fn new_embeds_and_loads_full_pi() {
     // The host harness is wired too.
     rt.eval_script("globalThis.__hasPocketPi = typeof globalThis.PocketPi?.boot === 'function';")
         .expect("probe");
-    assert_eq!(rt.get_global_json("__hasPocketPi"), Some(serde_json::Value::Bool(true)));
+    assert_eq!(
+        rt.get_global_json("__hasPocketPi"),
+        Some(serde_json::Value::Bool(true))
+    );
+}
+
+/// The deterministic Mac fallback still runs a complete, unmodified
+/// pi-coding-agent AgentSession; only its model provider is local and scripted.
+#[test]
+fn full_pi_runs_with_offline_provider() {
+    let (sink, cb) = collector();
+    let mut rt = PiRuntime::new().expect("runtime");
+    rt.on_event(cb);
+    let cfg = serde_json::json!({
+        "model": "offline",
+        "scripted": {"steps": [{"text": "OFFLINE-E2E-OK"}]}
+    });
+    rt.boot(&cfg.to_string()).expect("boot");
+    rt.prompt("reply with the scripted response")
+        .expect("prompt");
+    run(&mut rt, sink.clone(), 30.0, 5.0);
+
+    let events = sink.borrow();
+    let errors: Vec<&HostEvent> = events
+        .iter()
+        .filter(|event| event.kind == "error")
+        .collect();
+    assert!(errors.is_empty(), "offline turn failed: {errors:?}");
+    assert!(
+        events.iter().any(|event| event.kind == "end"),
+        "turn did not end"
+    );
+    assert_eq!(reply_text(&events), "OFFLINE-E2E-OK");
 }
 
 /// Path B end-to-end: stand up an AgentSession from the UNMODIFIED bundled
@@ -310,7 +348,8 @@ fn runs_bundled_pi_turn() {
 
     let mut rt = PiRuntime::new().expect("runtime");
     // Inject the key as a global (kept out of logs) then load the driver script.
-    rt.eval_script(&format!("globalThis.__OPENAI_KEY = {key:?};")).expect("inject key");
+    rt.eval_script(&format!("globalThis.__OPENAI_KEY = {key:?};"))
+        .expect("inject key");
     let driver_src = std::fs::read_to_string(&driver).expect("driver.js");
     rt.eval_script(&driver_src).expect("driver eval");
 
@@ -344,7 +383,9 @@ fn runs_bundled_pi_turn() {
     }
     assert!(done, "turn did not complete within budget");
     assert_eq!(err, Some(serde_json::Value::Null), "agent errored");
-    let text = result.and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+    let text = result
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_default();
     assert!(!text.trim().is_empty(), "no assistant text produced");
 }
 
@@ -381,8 +422,16 @@ fn loads_pi_extension_via_our_loader() {
     eprintln!("EXT result={result:?}");
     assert_eq!(err, Some(serde_json::Value::Null), "extension load errored");
     let result = result.expect("no extension result");
-    let tools = result.get("tools").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-    let handlers = result.get("handlers").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let tools = result
+        .get("tools")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let handlers = result
+        .get("handlers")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
     assert!(
         tools.iter().any(|t| t.as_str() == Some("echo")),
         "extension tool 'echo' not registered (got {tools:?})"
@@ -396,7 +445,8 @@ fn loads_pi_extension_via_our_loader() {
 /// Pump `__piRun(optsJson)` (see driver.js) until it finishes or the budget is
 /// hit. Returns nothing; results are read from globals by the caller.
 fn drive_session(rt: &mut PiRuntime, opts_json: &str, max_secs: f64) -> bool {
-    rt.eval_script(&format!("globalThis.__piRun({opts_json:?});")).expect("kick off");
+    rt.eval_script(&format!("globalThis.__piRun({opts_json:?});"))
+        .expect("kick off");
     let start = std::time::Instant::now();
     while start.elapsed().as_secs_f64() < max_secs {
         rt.pump().expect("pump");
@@ -418,7 +468,8 @@ fn binds_extension_into_session() {
     let driver = format!("{manifest}/js/pi-full/driver.js");
     let ext = format!("{manifest}/../../js/src/pi-full/example-extension.ts");
     let mut rt = PiRuntime::new().expect("runtime");
-    rt.eval_script(&std::fs::read_to_string(&driver).expect("driver.js")).expect("driver eval");
+    rt.eval_script(&std::fs::read_to_string(&driver).expect("driver.js"))
+        .expect("driver eval");
 
     let opts = serde_json::json!({ "extensionPath": ext }).to_string();
     let done = drive_session(&mut rt, &opts, 15.0);
@@ -429,9 +480,20 @@ fn binds_extension_into_session() {
     assert!(done, "session build did not finish");
     assert_eq!(err, Some(serde_json::Value::Null), "session build errored");
     let bind = bind.expect("no bind info");
-    assert_eq!(bind.get("hasAgentStart"), Some(&serde_json::Value::Bool(true)), "agent_start hook not bound into session");
-    let tools = bind.get("registeredTools").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-    assert!(tools.iter().any(|t| t.as_str() == Some("echo")), "echo tool not registered in session (got {tools:?})");
+    assert_eq!(
+        bind.get("hasAgentStart"),
+        Some(&serde_json::Value::Bool(true)),
+        "agent_start hook not bound into session"
+    );
+    let tools = bind
+        .get("registeredTools")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        tools.iter().any(|t| t.as_str() == Some("echo")),
+        "echo tool not registered in session (got {tools:?})"
+    );
 }
 
 /// M6b (online): run a real gpt-5.6 turn with the extension's `echo` tool active
@@ -451,8 +513,10 @@ fn runs_pi_turn_with_extension_tool() {
         return;
     }
     let mut rt = PiRuntime::new().expect("runtime");
-    rt.eval_script(&format!("globalThis.__OPENAI_KEY = {key:?};")).expect("inject key");
-    rt.eval_script(&std::fs::read_to_string(&driver).expect("driver.js")).expect("driver eval");
+    rt.eval_script(&format!("globalThis.__OPENAI_KEY = {key:?};"))
+        .expect("inject key");
+    rt.eval_script(&std::fs::read_to_string(&driver).expect("driver.js"))
+        .expect("driver eval");
 
     let opts = serde_json::json!({
         "extensionPath": ext,
@@ -468,8 +532,15 @@ fn runs_pi_turn_with_extension_tool() {
     eprintln!("EXT-TURN agent_start_fired={hook:?} echoCalled={echoed:?}");
     assert!(done, "turn did not complete within budget");
     assert_eq!(err, Some(serde_json::Value::Null), "agent errored");
-    assert_eq!(hook, Some(serde_json::Value::Bool(true)), "extension agent_start hook did not fire during the turn");
-    assert!(echoed.is_some() && echoed != Some(serde_json::Value::Null), "extension echo tool was not executed");
+    assert_eq!(
+        hook,
+        Some(serde_json::Value::Bool(true)),
+        "extension agent_start hook did not fire during the turn"
+    );
+    assert!(
+        echoed.is_some() && echoed != Some(serde_json::Value::Null),
+        "extension echo tool was not executed"
+    );
 }
 
 /// M7: persist a session to disk with pi's unmodified SessionManager (backed by
@@ -485,8 +556,13 @@ fn persists_and_resumes_session() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let mut rt = PiRuntime::new().expect("runtime");
-    rt.eval_script(&std::fs::read_to_string(&probe).expect("persist-probe.js")).expect("probe eval");
-    rt.eval_script(&format!("globalThis.__piPersist({:?});", dir.to_str().unwrap())).expect("run persist");
+    rt.eval_script(&std::fs::read_to_string(&probe).expect("persist-probe.js"))
+        .expect("probe eval");
+    rt.eval_script(&format!(
+        "globalThis.__piPersist({:?});",
+        dir.to_str().unwrap()
+    ))
+    .expect("run persist");
     rt.pump().expect("pump");
 
     let err = rt.get_global_json("__piPersistError");
@@ -494,22 +570,44 @@ fn persists_and_resumes_session() {
     eprintln!("PERSIST error={err:?}");
     eprintln!("PERSIST result={result:?}");
     // Confirm the session file actually hit disk.
-    let files: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name()).collect();
+    let files: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name())
+        .collect();
     eprintln!("PERSIST files={files:?}");
     let _ = std::fs::remove_dir_all(&dir);
 
     assert_eq!(err, Some(serde_json::Value::Null), "persistence errored");
     let result = result.expect("no persist result");
-    assert_eq!(result.get("wrote").and_then(|v| v.as_u64()), Some(2), "did not write 2 messages");
-    assert_eq!(result.get("resumedCount").and_then(|v| v.as_u64()), Some(2), "resumed session lost messages");
-    let texts = result.get("texts").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    assert_eq!(
+        result.get("wrote").and_then(|v| v.as_u64()),
+        Some(2),
+        "did not write 2 messages"
+    );
+    assert_eq!(
+        result.get("resumedCount").and_then(|v| v.as_u64()),
+        Some(2),
+        "resumed session lost messages"
+    );
+    let texts = result
+        .get("texts")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
     assert!(
-        texts.iter().any(|t| t.as_str().is_some_and(|s| s.contains("42"))),
+        texts
+            .iter()
+            .any(|t| t.as_str().is_some_and(|s| s.contains("42"))),
         "resumed history missing content (got {texts:?})"
     );
-    assert!(files.iter().any(|f| f.to_string_lossy().ends_with(".jsonl")), "no .jsonl session file on disk");
+    assert!(
+        files
+            .iter()
+            .any(|f| f.to_string_lossy().ends_with(".jsonl")),
+        "no .jsonl session file on disk"
+    );
 }
-
 
 /// WIP integration probe toward loading unmodified pi-coding-agent. Run with
 /// `cargo test -- --ignored probe_pi_coding_agent --nocapture`. Currently clears
@@ -519,8 +617,12 @@ fn persists_and_resumes_session() {
 #[test]
 fn probe_pi_coding_agent() {
     let manifest = env!("CARGO_MANIFEST_DIR");
-    let sdk = format!("{manifest}/../../js/node_modules/@mariozechner/pi-coding-agent/dist/core/sdk.js");
-    if !std::path::Path::new(&sdk).exists() { eprintln!("skip: not installed"); return; }
+    let sdk =
+        format!("{manifest}/../../js/node_modules/@mariozechner/pi-coding-agent/dist/core/sdk.js");
+    if !std::path::Path::new(&sdk).exists() {
+        eprintln!("skip: not installed");
+        return;
+    }
     let dir = std::env::temp_dir().join(format!("pca-probe-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -529,7 +631,10 @@ fn probe_pi_coding_agent() {
     )).unwrap();
     let mut rt = PiRuntime::new().expect("rt");
     match rt.run_module(dir.join("e.ts").to_str().unwrap()) {
-        Ok(()) => eprintln!("PROBE OK: createAgentSession = {:?}", rt.get_global_json("__pca")),
+        Ok(()) => eprintln!(
+            "PROBE OK: createAgentSession = {:?}",
+            rt.get_global_json("__pca")
+        ),
         Err(e) => eprintln!("PROBE ERR: {e}"),
     }
     let _ = std::fs::remove_dir_all(&dir);

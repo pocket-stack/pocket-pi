@@ -25,7 +25,10 @@ pub fn prepare_module_source(name: &str, source: &str) -> std::result::Result<St
 }
 
 fn is_typescript(name: &str) -> bool {
-    name.ends_with(".ts") || name.ends_with(".tsx") || name.ends_with(".mts") || name.ends_with(".cts")
+    name.ends_with(".ts")
+        || name.ends_with(".tsx")
+        || name.ends_with(".mts")
+        || name.ends_with(".cts")
 }
 
 /// Heuristic CJS classification for ambiguous `.js`/extensionless files: any
@@ -86,7 +89,9 @@ fn wrap_cjs(name: &str, src: &str) -> String {
 /// slice here once panicked in the non-unwinding native op → SIGABRT).
 fn cjs_named_exports(src: &str) -> Vec<String> {
     fn ident(s: &str) -> String {
-        s.chars().take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$').collect()
+        s.chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+            .collect()
     }
     let mut set: Vec<String> = Vec::new();
     let mut push = |n: String| {
@@ -148,7 +153,10 @@ fn rewrite_reexports(src: &str) -> String {
             // A unique local avoids clashing with an existing `import { orig }`.
             let n = counter.get();
             counter.set(n + 1);
-            let local = format!("__rx{n}_{}", exported.replace(|c: char| !c.is_alphanumeric(), "_"));
+            let local = format!(
+                "__rx{n}_{}",
+                exported.replace(|c: char| !c.is_alphanumeric(), "_")
+            );
             imports.push(format!("{orig} as {local}"));
             exports.push(format!("{local} as {exported}"));
         }
@@ -174,7 +182,8 @@ mod tests {
 
     #[test]
     fn detects_cjs_named_exports() {
-        let names = cjs_named_exports("exports.foo = 1;\nObject.defineProperty(exports, \"bar\", {});");
+        let names =
+            cjs_named_exports("exports.foo = 1;\nObject.defineProperty(exports, \"bar\", {});");
         assert!(names.contains(&"foo".to_string()));
         assert!(names.contains(&"bar".to_string()));
         assert!(!names.contains(&"default".to_string()));
@@ -185,12 +194,19 @@ mod tests {
         let out = rewrite_reexports("export { a, b as c } from \"./y\";");
         assert!(out.contains("import {"), "got: {out}");
         assert!(out.contains("as c"), "got: {out}");
-        assert!(!out.contains("export { a, b as c } from"), "still indirect: {out}");
+        assert!(
+            !out.contains("export { a, b as c } from"),
+            "still indirect: {out}"
+        );
     }
 
     #[test]
     fn prepare_dispatches_on_extension() {
-        assert!(prepare_module_source("/x.json", "{\"a\":1}").unwrap().starts_with("export default"));
-        assert!(prepare_module_source("/x.cjs", "module.exports = 1;").unwrap().contains("__cjsRequire"));
+        assert!(prepare_module_source("/x.json", "{\"a\":1}")
+            .unwrap()
+            .starts_with("export default"));
+        assert!(prepare_module_source("/x.cjs", "module.exports = 1;")
+            .unwrap()
+            .contains("__cjsRequire"));
     }
 }
