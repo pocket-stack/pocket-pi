@@ -7,15 +7,14 @@ import argparse
 import getpass
 import json
 import os
-import re
 import select
 import signal
 import subprocess
-import sys
-import tempfile
 import termios
 import time
 import tty
+
+from uart_bridge import create_backend
 
 CONFIG_REQUEST = "PPI-CONFIG-REQUEST"
 CONFIG_RESPONSE = "PPI-CONFIG:"
@@ -23,91 +22,6 @@ READY = "PPI-RPC-READY"
 WAITING = "PPI-RPC-WAITING"
 REQUEST = "PPI-RPC-REQUEST:"
 STREAM = "PPI-RPC-STREAM:"
-
-
-def decision_prompt(request: dict[str, object]) -> tuple[str, set[str]]:
-    context = request.get("context") if isinstance(request.get("context"), dict) else {}
-    messages = context.get("messages") if isinstance(context.get("messages"), list) else []
-    tools = context.get("tools") if isinstance(context.get("tools"), list) else []
-    names = {
-        str(tool["name"])
-        for tool in tools
-        if isinstance(tool, dict) and isinstance(tool.get("name"), str)
-    }
-    prompt = "\n\n".join(
-        (
-            "You are the model backend for a Pi Agent running on an ESP32-P4.",
-            "Do not use Mac tools. Return exactly one JSON object and no Markdown: "
-            '{"toolCall":{"name":"registered.name","arguments":{...}}} or '
-            '{"text":"final response"}.',
-            "Registered ESP32 tools: "
-            + json.dumps(tools, ensure_ascii=False, separators=(",", ":")),
-            "Conversation: "
-            + json.dumps(messages[-24:], ensure_ascii=False, separators=(",", ":")),
-        )
-    )
-    return prompt, names
-
-
-def parse_decision(raw: str, registered: set[str]) -> dict[str, object]:
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.IGNORECASE)
-    value = json.loads(raw)
-    if not isinstance(value, dict):
-        raise ValueError("model response must be a JSON object")
-    call = value.get("toolCall")
-    if isinstance(call, dict):
-        name = call.get("name")
-        arguments = call.get("arguments", {})
-        if name not in registered:
-            raise ValueError(f"model requested unregistered tool: {name}")
-        if not isinstance(arguments, dict):
-            raise ValueError("tool arguments must be an object")
-        return {
-            "toolCall": {
-                "id": f"esp_{int(time.time() * 1000)}",
-                "name": name,
-                "arguments": arguments,
-            }
-        }
-    if isinstance(value.get("text"), str):
-        return {"text": value["text"]}
-    raise ValueError("model response needs text or toolCall")
-
-
-def run_model(provider: str, request: dict[str, object]) -> dict[str, object]:
-    prompt, registered = decision_prompt(request)
-    with tempfile.TemporaryDirectory(prefix="pocket-pi-uart-") as workspace:
-        if provider == "codex":
-            command = [
-                "codex",
-                "exec",
-                "--ephemeral",
-                "--ignore-user-config",
-                "--ignore-rules",
-                "--sandbox",
-                "read-only",
-                "--skip-git-repo-check",
-                "--color",
-                "never",
-                "-C",
-                workspace,
-                "-",
-            ]
-        else:
-            command = ["claude", "-p", "--output-format", "text", prompt]
-        result = subprocess.run(
-            command,
-            input=prompt if provider == "codex" else None,
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=180,
-        )
-    if result.returncode != 0:
-        raise RuntimeError(f"{provider} exited {result.returncode}: {result.stderr[-800:]}")
-    return parse_decision(result.stdout, registered)
 
 
 def write_line(fd: int, line: str) -> None:
@@ -121,9 +35,13 @@ def write_line(fd: int, line: str) -> None:
         payload = payload[count:]
 
 
-def config(args: argparse.Namespace) -> dict[str, str]:
+def config(args: argparse.Namespace) -> dict[str, object]:
     provider = args.provider or ("codex" if args.backend == "uart" else "openai")
-    value = {"modelBackend": args.backend, "modelProvider": provider}
+    value: dict[str, object] = {
+        "modelBackend": args.backend,
+        "modelProvider": provider,
+        "unixTimeSeconds": int(time.time()),
+    }
     if args.model:
         value["model"] = args.model
     if args.provision_wifi:
@@ -131,6 +49,8 @@ def config(args: argparse.Namespace) -> dict[str, str]:
         value["wifiPassword"] = getpass.getpass("Wi-Fi password: ")
     if args.backend == "wireless":
         value["modelApiKey"] = getpass.getpass(f"{provider} API key: ")
+    if args.prompt:
+        value["initialPrompt"] = args.prompt
     return value
 
 
@@ -143,6 +63,7 @@ def main() -> int:
         choices=("codex", "claude-code", "openai", "openrouter", "anthropic"),
     )
     parser.add_argument("--model")
+    parser.add_argument("--prompt", help="submit one prompt after the board agent is ready")
     parser.add_argument("--provision-wifi", action="store_true")
     args = parser.parse_args()
     provider = args.provider or ("codex" if args.backend == "uart" else "openai")
@@ -151,6 +72,7 @@ def main() -> int:
     if args.backend == "wireless" and provider not in ("openai", "openrouter", "anthropic"):
         parser.error("wireless provider must be openai, openrouter or anthropic")
     runtime_config = config(args)
+    model_backend = create_backend(provider) if args.backend == "uart" else None
 
     try:
         subprocess.run(
@@ -185,20 +107,47 @@ def main() -> int:
                 raw, pending = pending.split(b"\n", 1)
                 line = raw.decode(errors="replace").strip()
                 if line.endswith(CONFIG_REQUEST):
-                    write_line(fd, CONFIG_RESPONSE + json.dumps(runtime_config, separators=(",", ":")))
+                    frame = CONFIG_RESPONSE + json.dumps(runtime_config, separators=(",", ":"))
+                    for _ in range(3):
+                        time.sleep(0.1)
+                        write_line(fd, frame)
+                    print("[bridge] boot configuration sent", flush=True)
                 elif line.endswith(WAITING):
                     write_line(fd, READY)
                 elif line.startswith(REQUEST):
                     try:
-                        result = run_model(provider, json.loads(line[len(REQUEST) :]))
-                        if isinstance(result.get("text"), str):
+                        if model_backend is None:
+                            raise RuntimeError("wireless mode does not provide a UART model backend")
+                        stream_stats = [0, 0]
+
+                        def emit_delta(delta: str) -> None:
+                            stream_stats[0] += 1
+                            stream_stats[1] += len(delta)
                             write_line(
                                 fd,
                                 STREAM
                                 + json.dumps(
-                                    {"type": "text_delta", "text": result["text"]},
+                                    {"type": "text_delta", "text": delta},
                                     separators=(",", ":"),
                                 ),
+                            )
+
+                        result = model_backend.complete(
+                            json.loads(line[len(REQUEST) :]),
+                            emit_delta,
+                        )
+                        call = result.get("toolCall")
+                        if isinstance(call, dict):
+                            print(
+                                f"[bridge] ESP tool {call.get('name')}: "
+                                + json.dumps(call.get("arguments", {}), ensure_ascii=False),
+                                flush=True,
+                            )
+                        elif isinstance(result.get("text"), str):
+                            print(f"[bridge] Pi reply: {result['text']}", flush=True)
+                            print(
+                                f"[bridge] streamed {stream_stats[0]} chunks / {stream_stats[1]} chars",
+                                flush=True,
                             )
                         write_line(
                             fd,
@@ -216,6 +165,8 @@ def main() -> int:
     except (KeyboardInterrupt, OSError):
         return 0
     finally:
+        if model_backend is not None:
+            model_backend.close()
         os.close(fd)
 
 
