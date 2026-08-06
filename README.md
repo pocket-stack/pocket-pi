@@ -2,7 +2,8 @@
 
 Pocket Pi runs the [Pi coding agent](https://github.com/badlogic/pi-mono) in
 QuickJS. It provides a full desktop runtime and an embedded profile whose
-touch UI is built with PocketJS for the ESP32-P4 product.
+touch UI is built with [PocketJS](https://github.com/pocket-stack/pocketjs) for
+the ESP32-P4 product.
 
 This repository contains one Pocket Pi runtime family with two profiles and
 exactly three supported run modes:
@@ -11,7 +12,7 @@ exactly three supported run modes:
 |---|---|---|
 | Native macOS | Full `pi-coding-agent` | Normal desktop Pocket Pi, including sessions and extensions |
 | ESP32 simulator on macOS | Embedded `pi-agent-core` | Fast development of the ESP32 product UI, tools and Agent flows |
-| Physical ESP32-P4 | Embedded `pi-agent-core` | The real standalone PocketJS/QuickJS device |
+| Physical ESP32-P4 | Embedded `pi-agent-core` | The real standalone [PocketJS](https://github.com/pocket-stack/pocketjs)/QuickJS device |
 
 They are not three forks. The simulator and firmware compile the same embedded
 Agent, device UI, tool contracts and interaction state. Only their platform
@@ -191,7 +192,8 @@ On physical hardware, workspace files and schedules persist in LittleFS. Wi-Fi
 configuration persists in NVS. The Agent can use its workspace to organize
 memory and can create or revise its own recurring schedules.
 
-The shared PocketJS device UI includes:
+The shared [PocketJS](https://github.com/pocket-stack/pocketjs) device UI
+includes:
 
 - Chat with streamed replies, recent-turn history and a full-message reader;
 - Files with workspace metadata, file viewing and scrolling;
