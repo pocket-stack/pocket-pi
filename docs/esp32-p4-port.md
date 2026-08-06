@@ -8,12 +8,12 @@ Pocket Pi has two agent profiles and three hosts:
 | `esp32-p4` | bounded `pi-agent-core` | ESP32-P4 |
 | `esp32-p4-sim` | bounded `pi-agent-core` | macOS |
 
-The physical host and simulator use the exact same
+The physical host and simulator use the same
 `pocket-pi-device-ui` crate: one 720x1280 draw list, one set of fonts, and one
 touch hit map. Simulator mouse clicks are converted to physical panel
 coordinates and dispatched through the same `ScreenState::handle_tap` method.
-Without a portfolio plugin the shared embedded UI displays Chat, Files and
-Settings. Settings is not part of the normal macOS host.
+The shared embedded UI displays Chat, Files and Settings. Settings is not part
+of the normal macOS host.
 
 The physical host selects `UartBackend` for a Mac Codex/Claude Code bridge or
 `WirelessBackend` for direct OpenAI/OpenRouter/Anthropic HTTPS. These remain
@@ -29,13 +29,11 @@ cargo xtask snapshot esp32-p4-sim
 
 ## Simulator model backends
 
-The simulator always runs the embedded `pi-agent-core` profile. `--backend`
-only chooses how its native host fulfills a model request.
+The simulator always runs the embedded `pi-agent-core` profile and defaults to
+the Mac's local Codex Coding Plan login. `--backend` only chooses how its native
+host fulfills a model request.
 
 ```sh
-# Deterministic and offline (default)
-cargo xtask run esp32-p4-sim --backend scripted
-
 # Direct OpenAI request
 OPENAI_API_KEY=... cargo xtask run esp32-p4-sim \
   --backend openai --model gpt-5.6
@@ -60,17 +58,26 @@ The Mac simulator and physical firmware register the same core tool contracts:
 The Pi runtime obtains these definitions directly from the executable tool
 registry, so advertised and executable tools cannot drift.
 
-The simulator is a product-level simulator, not a CPU emulator. ESP-IDF, PSRAM,
-PPA, MIPI-DSI, touch-controller and Wi-Fi driver behavior still require a
+The simulator is a contract-level product simulator, not a CPU or peripheral
+emulator. It must exercise the embedded Agent, tools, workspace, schedules and
+plugin contracts, but may use simpler macOS adapters. ESP-IDF, PSRAM, PPA,
+LittleFS capacity, MIPI-DSI, touch-controller and Wi-Fi/NVS behavior require a
 physical-board test.
 
 ## Physical UART bridge
 
-The bridge provisions the boot-time model choice and serves framed model
-decisions. Wi-Fi can be selected later from the on-device Settings page.
+The thin bridge CLI provisions the boot-time model choice and routes framed
+model decisions. Its `uart_bridge` adapters reuse a logged-in Codex Coding Plan
+through the persistent Codex app-server, or Claude Code through `stream-json`.
+Both paths forward real text deltas instead of waiting for the whole reply.
+Wi-Fi can be selected later from the on-device Settings page.
 
 ```sh
 tools/uart-model-bridge.py /dev/cu.usbserial-... --backend uart --provider codex
+
+# Submit one boot-time prompt for a repeatable physical E2E test
+tools/uart-model-bridge.py /dev/cu.usbserial-... --backend uart \
+  --provider codex --prompt 'Use write, read, schedule.set and schedule.list.'
 
 tools/uart-model-bridge.py /dev/cu.usbserial-... --backend wireless \
   --provider openai --model gpt-5-mini --provision-wifi
@@ -81,11 +88,13 @@ for secured-network passwords, connects, forgets credentials, and requests a
 restart. The ESP host persists only Wi-Fi SSID/password in NVS. Model API keys
 arrive through provisioning and remain outside UI projections.
 
+UART provisioning also seeds the board clock from the Mac for development.
+Standalone operation uses ESP-IDF SNTP after Wi-Fi connects. Both feed the same
+native time and persistent schedule implementation.
+
 ## Shared UI boundary
 
-`pocket-pi-device-ui` owns rendering, interaction state, the portable
-workspace browser and data projections. Each host supplies a mounted workspace
-root and its model adapter. External plugins own provider clients and
-credentials. The Robinhood-shaped screen is retained solely as an optional
-projection slot; it is hidden until the host enables that capability. This
-repository does not contain Robinhood networking or trading logic.
+`pocket-pi-device-ui` owns rendering, interaction state and the portable
+workspace browser. Each host supplies a mounted workspace root and its model
+adapter. External applications own their UI adapters, provider clients and
+credentials; Pocket Pi core contains no Robinhood or Exa domain code.

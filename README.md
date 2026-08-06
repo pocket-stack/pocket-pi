@@ -1,267 +1,294 @@
 # Pocket Pi
 
-Pocket Pi is one Pi runtime family with a full desktop profile, a bounded
-embedded profile, and a macOS simulator for the ESP32-P4 product.
+Pocket Pi runs the [Pi coding agent](https://github.com/badlogic/pi-mono) in
+QuickJS. It provides a full desktop runtime and an embedded profile whose
+touch UI is built with PocketJS for the ESP32-P4 product.
+
+This repository contains one Pocket Pi runtime family with two profiles and
+exactly three supported run modes:
+
+| Run mode | Agent profile | What it is for |
+|---|---|---|
+| Native macOS | Full `pi-coding-agent` | Normal desktop Pocket Pi, including sessions and extensions |
+| ESP32 simulator on macOS | Embedded `pi-agent-core` | Fast development of the ESP32 product UI, tools and Agent flows |
+| Physical ESP32-P4 | Embedded `pi-agent-core` | The real standalone PocketJS/QuickJS device |
+
+They are not three forks. The simulator and firmware compile the same embedded
+Agent, device UI, tool contracts and interaction state. Only their platform
+adapters differ.
+
+> **Project status:** the macOS host, ESP32 simulator and physical
+> Waveshare ESP32-P4 target all have working end-to-end paths. The embedded
+> port is still board-specific and under active development; see
+> [Current validation](#current-validation) for the exact evidence and limits.
+
+## Why two profiles?
+
+The desktop runtime can afford a broad Node/Web compatibility layer and embeds
+the full, unmodified `pi-coding-agent`. An ESP32 cannot carry that entire
+desktop platform unchanged, so the embedded profile runs upstream
+`pi-agent-core` in QuickJS and implements the Pi tools as small native Rust
+capabilities.
+
+The architecture keeps the Pi Harness design in both profiles:
+
+- the model decides when to call a tool;
+- tools have explicit schemas and return structured results;
+- the Agent loop is separate from model transports and platform APIs;
+- workspaces and schedules are capabilities, not UI or prompt special cases.
+
+The macOS simulator is a product-contract simulator, not an ESP32 CPU or
+peripheral emulator. It gives the embedded Agent the same UI, tool registry and
+workspace rules while replacing LCD, touch, storage and networking with macOS
+adapters. Physical hardware remains the final acceptance target.
+
+## Quick start
+
+### Prerequisites
+
+- Rust stable for the native macOS host and simulator;
+- Bun for rebuilding the embedded JavaScript guest;
+- a logged-in `codex` CLI for the simulator's local Codex backend;
+- the esp-rs/ESP-IDF toolchain, `nightly-2026-05-01`, and `espflash` for the
+  physical ESP32-P4 target.
+
+The current firmware target is the
+**Waveshare ESP32-P4-WIFI6-Touch-LCD-5**.
+
+### Build all three modes
 
 ```sh
 cargo xtask build macos
-cargo xtask build esp32-p4
 cargo xtask build esp32-p4-sim
-cargo xtask run esp32-p4-sim
+cargo xtask build esp32-p4
+```
+
+### 1. Native Pocket Pi on macOS
+
+```sh
+cargo xtask run macos 'Who are you?'
+```
+
+The host selects a model in this order:
+
+1. `OPENAI_API_KEY` with optional `OPENAI_MODEL`;
+2. `ANTHROPIC_API_KEY` with optional `ANTHROPIC_MODEL`;
+3. Pi's deterministic Faux Provider when neither key exists.
+
+The Faux Provider is an offline development fallback. It still runs through a
+real `createAgentSession`; it is not evidence of a live provider request.
+
+### 2. ESP32 Pocket Pi simulator on macOS
+
+The simulator defaults to the Mac's existing Codex Coding Plan login:
+
+```sh
+cargo xtask run esp32-p4-sim \
+  --backend codex \
+  --workspace target/esp32-workspace
+```
+
+Direct API-key backends are also available:
+
+```sh
+OPENAI_API_KEY=... \
+  cargo xtask run esp32-p4-sim --backend openai --model gpt-5.6
+
+OPENROUTER_API_KEY=... \
+  cargo xtask run esp32-p4-sim \
+  --backend openrouter --model openai/gpt-5.6
+
+ANTHROPIC_API_KEY=... \
+  cargo xtask run esp32-p4-sim \
+  --backend anthropic --model claude-sonnet-4-6
+```
+
+The window uses the ESP32's 720x1280 coordinate system. Mouse input is mapped
+through the same hit-testing code as physical touch input. Generate a
+deterministic UI snapshot with:
+
+```sh
 cargo xtask snapshot esp32-p4-sim
 ```
 
-The ESP simulator defaults to an offline model. Select `--backend codex` to
-reuse the Mac's Coding Plan login, or `openai`, `openrouter`, or `anthropic` for
-a direct API-key path. See [`docs/esp32-p4-port.md`](docs/esp32-p4-port.md).
+### 3. Physical Pocket Pi on ESP32-P4
 
-The ESP32 host and simulator run the same embedded `pi-agent-core` and the same
-PocketJS Chat + Workspace + Settings UI. Settings is an embedded-device feature
-and is not linked into the normal macOS Pocket Pi host. The simulator replaces only hardware adapters; it
-does not pretend to execute the ESP32 firmware ELF. See
-[`ARCHITECTURE.md`](ARCHITECTURE.md).
-
-They also register the same portable native tools. A model running through the
-simulator reads and mutates the Mac workspace through the ESP32
-`read/write/edit/find/grep/ls` contracts, rather than through unrestricted Mac
-filesystem or shell access.
-
-The physical firmware selects either `UartBackend` (Mac Codex or Claude Code)
-or `WirelessBackend` (OpenAI, OpenRouter, or Anthropic). Wi-Fi credentials are
-managed on-device from Settings and stored in ESP32 NVS; model API keys never
-enter PocketJS UI state.
-
-> ESP32-P4 port: active development lives in
-> [`docs/esp32-p4-port.md`](docs/esp32-p4-port.md). The embedded target is a
-> bounded appliance profile; it does not claim the desktop runtime already fits
-> unchanged on the microcontroller.
-
-**Run the unmodified [pi](https://github.com/badlogic/pi-mono) coding-agent — and its extensions — inside QuickJS. No Node, no bun.**
-
-Pocket Pi is a small Rust runtime that embeds QuickJS and gives JavaScript exactly
-enough of a Node/Web platform — a module system, the `node:` builtins, `fetch`,
-and a native TypeScript loader — that the **whole, unmodified `pi-coding-agent`
-runs on it**, drives real LLM turns with tools, loads real extensions, and
-persists sessions. It is the substrate the
-[`cat`](https://github.com/paperboytm/cat-poc) desktop-assistant harness runs on,
-and the sibling of [PocketJS](https://github.com/pocket-stack/pocketjs): where
-PocketJS proved a *UI* runtime can live outside the browser under a tiny budget,
-Pocket Pi does the same for an *agent* runtime.
-
-```
-┌────────────────────────── PiRuntime (one QuickJS realm, one thread) ──────────────────────────┐
-│  prelude.js        timers · AbortController · fetch/Response/ReadableStream · Blob/FormData     │
-│  node: builtins    fs · path · child_process · process · buffer · events · stream · … (JS)      │
-│  pi-full.bundle    the UNMODIFIED pi-coding-agent, esbuild-bundled to one ES module             │
-│  your extension    a .ts factory, transpiled by oxc at load — NOT jiti                          │
-│        │  __node (resolve/fs/spawn)   host.http   host.transpile   host.tool   host.emit        │
-│  ──────┼─────────────────────────────────────────────────────────────────────────────────────  │
-│ native │  NodeResolver/NodeLoader  ·  oxc TS→JS  ·  fs & subprocess ops  ·  HTTP hub (TLS+SSE)  │
-│ pump() │  timers → deliver fetch/LLM chunks → drain job queue → flush events → your callback    │
-└────────┴───────────────────────────────────────────────────────────────────────────────────────┘
-```
-
-## What works today
-
-- **Unmodified `pi-coding-agent` runs end-to-end** on QuickJS — a real gpt-5.6
-  turn streams tokens and completes, tools and all. No source edits to pi; it's a
-  real npm dependency synced with `npm update`.
-- **Extensions load through Pocket Pi's own loader** (oxc TypeScript transpile,
-  **no jiti**). A normal pi extension registers tools and lifecycle hooks, and the
-  agent can call those tools in a live turn.
-- **Sessions persist and resume** — pi's `SessionManager` reads/writes `.jsonl`
-  through the runtime's `fs` builtin.
-- **A near-complete Node/Web platform:** a Node resolver/loader (relative,
-  `node_modules`, `exports`/`imports`, `.ts` on the fly), CommonJS interop, ~30
-  `node:` builtins, and WHATWG `fetch`/`Response`/`ReadableStream`/`Headers`/`URL`
-  backed by a native, proxy-aware HTTP hub.
-- **A coalesced frame scheduler** — an agent spends almost all its time waiting on
-  the model, so the host drives work in `pump()` frames and can run as slow as
-  **2 Hz** while a turn streams, at near-zero idle CPU. See [ARCHITECTURE.md](ARCHITECTURE.md).
-- **CI**: clippy (`-D warnings`) + build + test on every push and PR.
-
----
-
-## Writing an extension
-
-An extension for Pocket Pi is **the same file an unmodified pi extension is**: a
-module whose default export is a factory `(pi) => void` (or async). Pocket Pi
-loads it through its own module system, so the file is written in TypeScript and
-may `import` `node:` builtins, relative modules, and npm packages.
-
-```ts
-// my-extension.ts
-export default (pi) => {
-  pi.registerTool({
-    name: "echo",
-    description: "Echo the given text back.",
-    parameters: {
-      type: "object",
-      properties: { text: { type: "string" } },
-      required: ["text"],
-    },
-    // pi calls execute(toolCallId, input, signal, onUpdate, ctx).
-    // Return a result whose `content` is an array of content blocks.
-    execute: async (_id, input) => ({
-      content: [{ type: "text", text: String(input.text) }],
-    }),
-  });
-
-  pi.on("agent_start", () => {
-    /* lifecycle hook — fires when a turn begins */
-  });
-
-  // also available: pi.registerCommand / registerFlag / registerShortcut /
-  // registerMessageRenderer / sendMessage / exec / getActiveTools / …
-};
-```
-
-Pocket Pi loads it through pi's own `extensionFactories` seam — no jiti, no Node.
-The host imports the file (which routes through the oxc loader) and hands the
-factory to `createAgentSession`; the session's extension runner then exposes the
-tool and hook. The runnable reference is [`js/src/pi-full/driver.ts`](js/src/pi-full/driver.ts):
-
-```js
-// the essence — see driver.js for the full session setup
-const factory = (await import("/abs/path/my-extension.ts")).default; // ← oxc transpiles the .ts
-const resourceLoader = new DefaultResourceLoader({
-  cwd, agentDir, settingsManager,
-  noExtensions: true,           // skip on-disk (jiti) discovery
-  extensionFactories: [factory] // inject ours — loaded via loadExtensionFromFactory, no jiti
-});
-await resourceLoader.reload();
-const { session } = await createAgentSession({ model, resourceLoader, tools: ["echo"], /* … */ });
-```
-
-### What an extension can call
-
-Everything **import-resolves** (a bundled extension never crashes at load), but
-the surface splits into real, partial, and stub:
-
-| Module | Status |
-|---|---|
-| `fs`, `fs/promises` | **Real** (native) — read/write/append/readdir/mkdir/stat/exists/realpath/unlink, sync + callback + promise, plus `openSync`/`readSync` |
-| `path`, `buffer`, `events`, `util`, `stream`, `string_decoder`, `os`, `url`, `querystring`, `assert`, `timers`, `readline`, `module`, `process` | **Real** JS implementations |
-| `child_process` | **Real** `spawnSync` / `execSync` / `execFileSync` (native subprocess) |
-| `crypto` | **Partial** — `randomUUID` (real host entropy), `randomBytes`/`getRandomValues` (Math.random), `createHash`/`createHmac` use **FNV** (fast, **non-cryptographic** — fine for cache keys/ids, not for security) |
-| `http`, `https`, `net`, `tls`, `dns`, `zlib`, `vm`, `v8`, `worker_threads`, `async_hooks`, `perf_hooks`, `tty` | **Stub** — imports resolve; classic socket/server/client calls throw or no-op |
-
-For **networking**, use the global `fetch()` — real, streaming, and proxy-aware
-(routes through the native HTTP hub); `http.request`/`net.Socket` are stubbed
-toward it. Also available as globals: `Response`, `Headers`, `URL`,
-`URLSearchParams`, `ReadableStream`, `TextEncoder`/`TextDecoder`, `Blob`/`File`/
-`FormData`, `AbortController`, `structuredClone`, `Buffer`, `setTimeout`/`setImmediate`.
-
-**Bottom line:** an extension that reads/writes files, shells out, or calls an
-HTTP API runs unmodified. Socket servers, native compression, and worker threads
-do not yet — those builtins exist only so imports resolve. Adding a real one is
-one row in `crates/pocket-pi/src/node/builtins.rs` (the single source of truth for
-builtins) plus its JS shim.
-
----
-
-## Embedding Pocket Pi (Rust API)
-
-If you're building a host on top of Pocket Pi — like `cat` — this is your surface.
-`PiRuntime` owns one QuickJS realm and is driven from a single thread; the host
-owns the `pump()` cadence.
-
-```rust
-use pocket_pi::{PiRuntime, ToolResult};
-
-let mut rt = PiRuntime::new()?;
-
-// Native tools are Rust closures the agent calls by name.
-rt.register_tool("current_time", |_args| ToolResult::text(now_unix().to_string()));
-rt.on_event(|ev| println!("{}: {}", ev.kind, ev.raw));   // start / text / tool_* / end
-
-rt.boot(r#"{"model":"gpt-5.6","apiKey":"…","systemPrompt":"Be terse."}"#)?;
-rt.prompt("What time is it?")?;
-
-// Pump at whatever cadence suits the host — 2 Hz is plenty while streaming.
-while !rt.is_idle() {
-    rt.pump()?;
-    std::thread::sleep(std::time::Duration::from_millis(500));
-}
-```
-
-`PiRuntime::new()` embeds and loads the **whole, unmodified `pi-coding-agent`** —
-sessions, extensions, pi's own tool suite — plus a host harness. `boot` stands up
-a pi session from a config (`provider`/`model`/`apiKey`/`systemPrompt`/`tools`);
-each config `tool` bridges to the native Rust closure you registered with
-`register_tool` (that's how cat's `look_at_screen` screenshot tool reaches the
-agent); `prompt` runs a turn and events stream to `on_event`. There is one path —
-no trimmed variant, no feature flag.
-
-Other `PiRuntime` methods: `run_module`, `eval_script`, `get_global_json`,`abort`,
-`is_idle`.
-
----
-
-## How pi runs unmodified
-
-QuickJS's module linker **null-derefs** (`js_inner_module_linking`,
-`quickjs.c:30806`) when you import `createAgentSession` and pull pi-coding-agent's
-~500-module circular graph — an engine-level bug on graphs that large. The fix is
-to hand QuickJS **one** module instead of five hundred: esbuild bundles the
-*unmodified* pi source into a single ES module (only `node:*` left external), and
-Pocket Pi's Node/Web layer satisfies it at runtime. Bundling isn't forking —
-every dependency is the real, unmodified upstream package. (The one substitution
-is `undici`, pi's HTTP-*proxy* transport, aliased to a stub — Pocket Pi proxies in
-the native hub, so undici is never used; this keeps its whole web-fetch stack out
-of the bundle.)
+Build and flash the release firmware:
 
 ```sh
-cd js && npm install
-node build.mjs   # → pi-full.bundle.js.gz (~1.8 MB, committed + embedded) + runtime glue
+cargo xtask build esp32-p4
+
+DEVICE_PORT=/dev/cu.usbmodem...
+espflash flash --baud 921600 --port "$DEVICE_PORT" \
+  firmware/esp32-p4/target/riscv32imafc-esp-espidf/release/pocket-pi-p4
 ```
 
-The `.gz` is **committed** and `include_bytes!`'d into the crate, so `PiRuntime`
-carries the whole pi with no external files — and `cargo build` (including from
-cat's vendored submodule) needs only Rust, no Node.
-
-**Staying in sync with upstream pi** (`@earendil-works/pi-coding-agent`) is
-`npm update` + `node js/build.mjs` + commit — no patches to carry.
-
----
-
-## Footprint
-
-Everything ships as **one self-contained binary** carrying the whole unmodified
-pi (the ~9 MB bundle, gzip-embedded to ~1.8 MB) — **nothing to `npm install` at
-the destination**:
-
-| Shipping pi as… | Size |
-|---|---|
-| **Pocket Pi** — one binary, full unmodified pi embedded | **~8.9 MB** |
-| `bun build --compile` (providers external; embeds JavaScriptCore) | ~61 MB |
-| node runtime + `node_modules` (pi-agent-core + pi-ai + deps) | ~114 MB + ~131 MB |
-
-The base is dominated by **oxc** (~1.6 MB — the TypeScript transpiler for
-extensions), TLS `rustls`+`ring` (~0.6 MB), `regex` (~0.5 MB), and QuickJS (~0.5 MB).
-
----
-
-## Build & test
+For development, the simplest model path is UART to a logged-in Mac Codex:
 
 ```sh
-# Acceptance: a self-contained ~8.9 MB binary carrying the whole pi says hello.
-OPENAI_API_KEY=…  cargo run --release --example hello    # → "Hello! Nice to meet you."
+python3 tools/uart-model-bridge.py "$DEVICE_PORT" \
+  --backend uart --provider codex
+```
 
-# The full pi bundle is committed + embedded, so the whole suite runs with only
-# Rust — no Node, no build step. This includes the offline pi tests: it loads,
-# an extension binds to a session, sessions persist to disk.
-cargo test
+Claude Code can be used instead:
+
+```sh
+python3 tools/uart-model-bridge.py "$DEVICE_PORT" \
+  --backend uart --provider claude-code
+```
+
+The bridge can also send a repeatable boot prompt:
+
+```sh
+python3 tools/uart-model-bridge.py "$DEVICE_PORT" \
+  --backend uart --provider codex \
+  --prompt 'Use write, read, schedule.set and schedule.list.'
+```
+
+For standalone use, provision Wi-Fi and a direct model provider over UART:
+
+```sh
+python3 tools/uart-model-bridge.py "$DEVICE_PORT" \
+  --backend wireless --provider openai --model gpt-5-mini --provision-wifi
+```
+
+The provisioning command asks for the Wi-Fi credentials and API key
+interactively. Wi-Fi can subsequently be changed from the device Settings UI
+without reflashing. Credentials are kept out of Agent workspace files and
+PocketJS UI state.
+
+## Model backends
+
+Backends belong to their host composition, not to the Agent core:
+
+| Host | Supported backends |
+|---|---|
+| Native macOS | OpenAI, Anthropic, offline Faux Provider |
+| ESP32 simulator | local Codex, OpenAI, OpenRouter, Anthropic |
+| Physical ESP32-P4 | UART to Mac Codex or Claude Code; wireless OpenAI, OpenRouter or Anthropic |
+
+`UartBackend` and `WirelessBackend` expose the same streaming model boundary to
+the embedded Agent. Provider request/streaming codecs live in
+`pocket-pi-protocols`; serial framing, desktop CLIs and ESP-IDF HTTPS stay in
+their platform layers.
+
+## Embedded Agent capabilities
+
+The simulator and physical firmware register the same portable core tools:
+
+- workspace files: `read`, `write`, `edit`, `find`, `grep`, `ls`;
+- bounded shell commands through `bash`;
+- `device.status` and `time.now`;
+- `workspace.context` for durable Agent-managed memory;
+- `schedule.set`, `schedule.list`, `schedule.cancel` and `schedule.clear` for
+  one-off or recurring wake prompts.
+
+The embedded `bash` tool is an allowlisted command dispatcher, not a POSIX
+shell. It provides useful device and workspace operations without pretending
+that an ESP32 has processes, pipes, package management or a Unix filesystem.
+
+On physical hardware, workspace files and schedules persist in LittleFS. Wi-Fi
+configuration persists in NVS. The Agent can use its workspace to organize
+memory and can create or revise its own recurring schedules.
+
+The shared PocketJS device UI includes:
+
+- Chat with streamed replies, recent-turn history and a full-message reader;
+- Files with workspace metadata, file viewing and scrolling;
+- Settings with Wi-Fi scanning, selection and password entry;
+- touch keyboard, system telemetry and next-schedule status.
+
+Settings is an embedded-device feature and is not linked into native macOS
+Pocket Pi. This repository does not include Robinhood or Exa UI, clients,
+credentials or tools. External products add their own plugin/tool and UI
+adapters without changing Agent core.
+
+## Desktop profile
+
+`crates/pocket-pi` embeds the full, unmodified `pi-coding-agent` bundle in one
+QuickJS realm. It provides enough Node/Web compatibility for Pi sessions,
+extensions, native tools and streaming model turns without requiring Node or
+Bun on the destination machine.
+
+Desktop extensions use Pi's normal `(pi) => void` factory and may register
+tools and lifecycle hooks. Pocket Pi transpiles TypeScript with oxc and injects
+the factory through Pi's `extensionFactories` seam; Pi itself is not patched.
+
+The desktop compatibility layer includes real filesystem, path, buffer,
+events, stream, process, synchronous subprocess and global streaming `fetch`
+support. Socket servers, worker threads and several lower-level Node builtins
+remain stubs. These desktop APIs are intentionally **not** part of the embedded
+ESP32 contract.
+
+The full Pi bundle is committed and embedded, so normal Rust builds do not need
+Node. Rebuild it only after changing the desktop JavaScript guest:
+
+```sh
+npm --prefix js ci
+npm --prefix js run build
+```
+
+## Repository map
+
+```text
+crates/pocket-pi/             full desktop pi-coding-agent runtime
+crates/pocket-pi-embedded/    embedded pi-agent-core guest and host traits
+crates/pocket-pi-tools/       portable workspace, shell, time and schedule tools
+crates/pocket-pi-protocols/   model request, response and streaming codecs
+crates/pocket-pi-device-ui/   shared PocketJS device UI and interaction state
+hosts/macos/                  native desktop composition root
+hosts/esp32-p4-sim/           macOS adapters for the embedded product
+firmware/esp32-p4/            ESP-IDF hardware composition root and adapters
+tools/uart_bridge/            Mac Codex and Claude Code streaming adapters
+tools/uart-model-bridge.py    UART framing and provisioning CLI
+```
+
+Dependencies point inward: hosts depend on shared runtimes, tools, UI and
+protocols; those shared crates do not depend on a host. Hardware APIs remain in
+the firmware, macOS APIs remain in hosts/tools, and optional external services
+remain plugins.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for ownership and lifecycle boundaries,
+and [docs/esp32-p4-port.md](docs/esp32-p4-port.md) for board-specific details.
+
+## Current validation
+
+The following three paths were exercised end-to-end on **2026-08-05**:
+
+| Mode | Exercised path | Result |
+|---|---|---|
+| Native macOS | Full `PiRuntime` and `createAgentSession` with Pi's offline Faux Provider | Passed |
+| ESP32 simulator | Embedded Agent + local Codex; `write -> read -> recurring schedule.set -> schedule.list`; shared UI rendering | Passed |
+| Physical ESP32-P4 | Release firmware + UART Mac Codex; streamed reply; real LittleFS `write/read`; recurring schedule creation/listing | Passed |
+
+The workspace suite also completed with 46 passing tests and 3 ignored tests,
+and workspace clippy passed with warnings denied. These results validate the
+recorded revision; they are not a substitute for CI on later changes.
+
+The physical `WirelessBackend` and provider codecs are implemented and compile,
+but a live ESP32 Wi-Fi -> OpenAI request was **not** exercised in that session
+because the available AP did not provide the required network route. Do not
+interpret the UART E2E as evidence for that separate network path.
+
+## Development checks
+
+```sh
+cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
-
-# Rebuild the guest layer only after editing js/src/**:
-cd js && npm install && node js/build.mjs
-
-# Real-turn tests need an API key + (here) a proxy; they skip without one:
-OPENAI_API_KEY=… OPENAI_MODEL=gpt-5.6 https_proxy=http://127.0.0.1:7897 \
-  cargo test -p pocket-pi live_openai_turn -- --nocapture         # boot/prompt → real turn
-OPENAI_API_KEY=… https_proxy=http://127.0.0.1:7897 \
-  cargo test -p pocket-pi runs_pi_turn_with_extension_tool -- --ignored --nocapture
 ```
+
+CI runs the workspace build, tests and clippy checks. LCD scanout, touch,
+LittleFS, Wi-Fi/NVS, memory pressure and real UART/wireless behavior still
+require physical-board acceptance.
+
+## Non-goals
+
+- Emulating the ESP32 CPU or peripherals on macOS;
+- exposing arbitrary desktop shell or Node APIs on the microcontroller;
+- coupling model providers, UI, trading services or research services into Pi
+  Harness core;
+- claiming that an API codec compile proves a live provider connection.
+
+## License
 
 MIT.
