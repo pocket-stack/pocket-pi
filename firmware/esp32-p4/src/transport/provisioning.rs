@@ -15,6 +15,8 @@ pub struct RuntimeConfig {
     pub wifi_password: Option<String>,
     pub model: ModelSettings,
     pub model_api_key: Option<String>,
+    pub initial_prompt: Option<String>,
+    pub unix_time_seconds: Option<u64>,
 }
 
 pub fn request_runtime_config(
@@ -68,6 +70,10 @@ pub fn request_runtime_config(
         wifi_password: secret(&value, "wifiPassword", 63)?,
         model,
         model_api_key,
+        initial_prompt: text(&value, "initialPrompt", 4_000)?,
+        unix_time_seconds: value
+            .get("unixTimeSeconds")
+            .and_then(serde_json::Value::as_u64),
     })
 }
 

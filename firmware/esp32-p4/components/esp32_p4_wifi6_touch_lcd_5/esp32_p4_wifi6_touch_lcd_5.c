@@ -453,6 +453,10 @@ esp_err_t bsp_display_new_with_handles(const bsp_display_config_t *config, bsp_l
 
     ESP_LOGI(TAG, "Install Waveshare ESP32-P4-WIFI6-Touch-LCD-5 LCD control panel");
     esp_lcd_dpi_panel_config_t dpi_config = HX8394_720_1280_PANEL_30HZ_DPI_CONFIG(LCD_COLOR_PIXEL_FORMAT_RGB565);
+    // The vendor macro selects 58 MHz, which can starve DSI DMA while Wi-Fi
+    // and the renderer access PSRAM. 34 MHz is about 32 Hz for this panel and
+    // removes the intermittent blue/black scanout frames.
+    dpi_config.dpi_clock_freq_mhz = 34;
     dpi_config.num_fbs = CONFIG_BSP_LCD_DPI_BUFFER_NUMS;
 
     hx8394_vendor_config_t vendor_config = {

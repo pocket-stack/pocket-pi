@@ -18,6 +18,7 @@ fn main() -> Result<()> {
                         "nightly-2026-05-01",
                         "./tools/cargo-esp32p4",
                         "build",
+                        "--release",
                     ]),
                 "building ESP32-P4 firmware",
             )

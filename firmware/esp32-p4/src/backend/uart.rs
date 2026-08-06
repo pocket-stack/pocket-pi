@@ -26,7 +26,9 @@ impl ModelBackend for UartBackend {
         on_delta: &mut dyn FnMut(&str),
     ) -> Result<String, String> {
         self.transport.write_line("PPI-RPC-WAITING");
-        self.transport.read_frame(READY, Duration::from_secs(45))?;
+        self.transport
+            .read_frame(READY, Duration::from_secs(10))
+            .map_err(|_| "MAC UART BRIDGE OFFLINE".to_owned())?;
         self.transport
             .write_line(&format!("{REQUEST}{request_json}"));
         loop {

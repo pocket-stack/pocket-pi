@@ -21,6 +21,18 @@ pub fn mount_workspace() -> anyhow::Result<WorkspaceMount> {
     }
 }
 
+pub fn workspace_free_bytes() -> anyhow::Result<u64> {
+    let mut total = 0usize;
+    let mut used = 0usize;
+    let status = unsafe {
+        esp_idf_svc::sys::esp_littlefs_info(c"workspace".as_ptr(), &mut total, &mut used)
+    };
+    if status != esp_idf_svc::sys::ESP_OK {
+        anyhow::bail!("read LittleFS workspace capacity: ESP error {status}")
+    }
+    Ok(total.saturating_sub(used) as u64)
+}
+
 fn partition_is_blank() -> anyhow::Result<bool> {
     let partition = unsafe {
         esp_idf_svc::sys::esp_partition_find_first(

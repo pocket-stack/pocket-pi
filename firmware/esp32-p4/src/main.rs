@@ -1,5 +1,5 @@
 use core::time::Duration;
-use std::sync::{mpsc, Arc};
+use std::sync::Arc;
 use std::time::Instant;
 
 use embedded_svc::http::{client::Client as HttpClient, Method};
@@ -14,8 +14,8 @@ use pocket_pi_device_ui::{
     load_fonts, AgentState, ChatProjection, DeviceState, ScreenInteraction, ScreenState,
     SettingsCommand, SettingsProjection, SystemTelemetry,
 };
-use pocket_pi_embedded::{ModelBackend, PiEmbedded};
-use pocket_pi_protocols::model::{ModelBackendSettings, ModelSettings};
+use pocket_pi_embedded::{spawn_agent_worker, AgentEvent, ModelBackend};
+use pocket_pi_protocols::model::ModelBackendSettings;
 use pocket_pi_tools::{CoreToolHost, PlatformTools};
 use pocketjs_core::Ui;
 use pocketjs_esp32p4_ppa::{PpaOps, Rect, Renderer, RendererConfig, SrmTransform};
@@ -27,6 +27,7 @@ mod transport;
 const BOARD_NAME: &str = "Waveshare ESP32-P4-WIFI6-Touch-LCD-5";
 const PANEL_WIDTH: u32 = 720;
 const PANEL_HEIGHT: u32 = 1280;
+const LCD_REFRESH_HZ: u16 = 32;
 const WIFI_NVS_NAMESPACE: &str = "pocket_pi";
 const WIFI_NVS_SSID_KEY: &str = "wifi_ssid";
 const WIFI_NVS_PASSWORD_KEY: &str = "wifi_pass";
@@ -82,6 +83,21 @@ fn main() -> anyhow::Result<()> {
                 transport::RuntimeConfig::default()
             }
         };
+    let clock_seeded_by_uart = if let Some(seconds) = runtime_config.unix_time_seconds {
+        let time = esp_idf_svc::sys::timeval {
+            tv_sec: seconds as i64,
+            tv_usec: 0,
+        };
+        if unsafe { esp_idf_svc::sys::settimeofday(&time, core::ptr::null()) } == 0 {
+            log::info!("clock seeded by UART bridge");
+            true
+        } else {
+            log::warn!("UART bridge clock seed failed");
+            false
+        }
+    } else {
+        false
+    };
     screen.set_model_backend(&runtime_config.model);
 
     let mut wifi = match init_wifi(
@@ -102,6 +118,7 @@ fn main() -> anyhow::Result<()> {
         .map(|wifi| wifi.projection("READY"))
         .unwrap_or_else(|| SettingsProjection {
             firmware_version: env!("CARGO_PKG_VERSION").into(),
+            workspace_free_bytes: storage::workspace_free_bytes().ok(),
             wifi: pocket_pi_device_ui::WifiSettingsProjection {
                 status: "WI-FI DRIVER UNAVAILABLE".into(),
                 ..Default::default()
@@ -109,18 +126,55 @@ fn main() -> anyhow::Result<()> {
             ..Default::default()
         });
     screen.set_settings(settings.clone());
-    log::info!(
-        "network targets staged: openai={} codex_plan={}",
-        pocket_pi_protocols::model::OPENAI_API_BASE_URL,
-        pocket_pi_protocols::model::CODEX_BACKEND_BASE_URL,
+    let _sntp = if wifi.is_some() {
+        match esp_idf_svc::sntp::EspSntp::new_default() {
+            Ok(sntp) => {
+                if !clock_seeded_by_uart && wifi.as_ref().is_some_and(WifiConnection::is_connected)
+                {
+                    let started = Instant::now();
+                    while started.elapsed() < Duration::from_secs(15)
+                        && sntp.get_sync_status() != esp_idf_svc::sntp::SyncStatus::Completed
+                    {
+                        std::thread::sleep(Duration::from_millis(200));
+                    }
+                    if sntp.get_sync_status() == esp_idf_svc::sntp::SyncStatus::Completed {
+                        log::info!("SNTP clock synchronized");
+                    } else {
+                        log::warn!("SNTP synchronization is still pending");
+                    }
+                }
+                Some(sntp)
+            }
+            Err(error) => {
+                log::error!("SNTP initialization failed: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let direct_wireless = matches!(
+        &runtime_config.model.backend,
+        ModelBackendSettings::Wireless { .. }
     );
-    if wifi.as_ref().is_some_and(WifiConnection::is_connected) {
+    if direct_wireless && wifi.as_ref().is_some_and(WifiConnection::is_connected) {
+        log::info!(
+            "network targets staged: openai={} codex_plan={}",
+            pocket_pi_protocols::model::OPENAI_API_BASE_URL,
+            pocket_pi_protocols::model::CODEX_BACKEND_BASE_URL,
+        );
         match probe_https_origins() {
             Ok(reachability) => log::info!("HTTPS connectivity probe completed: {reachability:?}"),
             Err(error) => log::error!("HTTPS connectivity probe failed: {error:#}"),
         }
+    } else if !direct_wireless {
+        log::info!("direct model HTTPS probes skipped for UART backend");
     }
 
+    let uart_poc = matches!(
+        runtime_config.model.backend,
+        ModelBackendSettings::Uart { .. }
+    );
     let backend: Arc<dyn ModelBackend> = match runtime_config.model.backend {
         ModelBackendSettings::Uart { .. } => {
             let transport: Arc<dyn transport::LineTransport> = uart;
@@ -140,10 +194,19 @@ fn main() -> anyhow::Result<()> {
         storage::WORKSPACE_ROOT,
         Arc::new(EspPlatform),
     ));
+    let provider = match runtime_config.model.backend {
+        ModelBackendSettings::Uart { .. } => "uart",
+        ModelBackendSettings::Wireless { provider } => provider.id(),
+    };
+    let config = serde_json::json!({
+        "provider":provider,
+        "model":runtime_config.model.resolved_model().unwrap_or_else(|_| "unknown".into()),
+        "systemPrompt":"You are Pocket Pi on an ESP32-P4. Be concise."
+    });
     let (prompt_tx, agent_rx) =
-        spawn_agent(Arc::clone(&tools), backend, runtime_config.model.clone());
-    device.agent = AgentState::Idle;
-    chat.set_latest_assistant("ESP32-P4 PI AGENT READY.");
+        spawn_agent_worker(config.to_string(), backend, tools.clone(), Some(64 * 1024))
+            .map_err(anyhow::Error::msg)?;
+    let mut initial_prompt = runtime_config.initial_prompt;
 
     let mut touch_was_down = false;
     let mut redraw = true;
@@ -153,6 +216,29 @@ fn main() -> anyhow::Result<()> {
     loop {
         while let Ok(event) = agent_rx.try_recv() {
             match event {
+                AgentEvent::Ready => {
+                    log::info!("PocketJS Pi Harness ready");
+                    if uart_poc {
+                        unsafe {
+                            esp_idf_svc::sys::esp_log_level_set(
+                                c"*".as_ptr(),
+                                esp_idf_svc::sys::esp_log_level_t_ESP_LOG_NONE,
+                            );
+                        }
+                    }
+                    chat.set_latest_assistant("ESP32-P4 PI AGENT READY.");
+                    if let Some(prompt) = initial_prompt.take() {
+                        chat.push_pending(prompt.clone());
+                        screen.show_latest_chat();
+                        device.agent = AgentState::Thinking;
+                        if prompt_tx.send(prompt).is_err() {
+                            chat.fail_pending("AGENT WORKER IS NOT AVAILABLE");
+                            device.agent = AgentState::Faulted;
+                        }
+                    } else {
+                        device.agent = AgentState::Idle;
+                    }
+                }
                 AgentEvent::Delta(delta) => {
                     if chat.append_model_delta(&delta) {
                         screen.show_latest_chat();
@@ -164,6 +250,7 @@ fn main() -> anyhow::Result<()> {
                     device.agent = AgentState::Idle;
                 }
                 AgentEvent::Failed(error) => {
+                    log::error!("PocketJS Pi Harness failed: {error}");
                     chat.fail_pending(format!("AGENT FAILED: {error}"));
                     device.agent = AgentState::Faulted;
                 }
@@ -208,7 +295,13 @@ fn main() -> anyhow::Result<()> {
         }
 
         if last_telemetry.elapsed() >= Duration::from_secs(2) {
-            screen.set_telemetry(system_telemetry(0));
+            let ui_fps_tenths = display
+                .as_mut()
+                .map(DisplayProbe::sample_ui_fps_tenths)
+                .unwrap_or(0);
+            screen.set_telemetry(system_telemetry(ui_fps_tenths));
+            settings.workspace_free_bytes = storage::workspace_free_bytes().ok();
+            screen.set_settings(settings.clone());
             let schedule = tools.schedule_projection();
             screen.set_schedule(pocket_pi_device_ui::ScheduleProjection {
                 name: schedule.name,
@@ -241,7 +334,7 @@ fn main() -> anyhow::Result<()> {
                 SettingsCommand::ScanWifi => match wifi.as_mut() {
                     Some(wifi) => match wifi.scan() {
                         Ok(networks) => {
-                            settings = wifi.projection("SCAN COMPLETE");
+                            settings = wifi.projection("");
                             settings.wifi.networks = networks;
                         }
                         Err(error) => {
@@ -286,56 +379,6 @@ fn main() -> anyhow::Result<()> {
         }
         std::thread::sleep(Duration::from_millis(16));
     }
-}
-
-enum AgentEvent {
-    Delta(String),
-    Done,
-    Failed(String),
-}
-
-fn spawn_agent(
-    tools: Arc<CoreToolHost>,
-    backend: Arc<dyn ModelBackend>,
-    model: ModelSettings,
-) -> (mpsc::Sender<String>, mpsc::Receiver<AgentEvent>) {
-    let (prompt_tx, prompt_rx) = mpsc::channel::<String>();
-    let (event_tx, event_rx) = mpsc::channel::<AgentEvent>();
-    std::thread::spawn(move || {
-        let delta_tx = event_tx.clone();
-        let provider = match model.backend {
-            ModelBackendSettings::Uart { .. } => "uart",
-            ModelBackendSettings::Wireless { provider } => provider.id(),
-        };
-        let config = serde_json::json!({
-            "provider":provider,
-            "model":model.resolved_model().unwrap_or_else(|_| "unknown".into()),
-            "systemPrompt":"You are Pocket Pi on an ESP32-P4. Be concise."
-        });
-        let runtime = PiEmbedded::new(
-            &config.to_string(),
-            backend,
-            tools,
-            Arc::new(move |delta| {
-                delta_tx.send(AgentEvent::Delta(delta)).ok();
-            }),
-        );
-        let runtime = match runtime {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                event_tx.send(AgentEvent::Failed(error)).ok();
-                return;
-            }
-        };
-        for prompt in prompt_rx {
-            let result = runtime.prompt(&prompt).and_then(|()| runtime.pump());
-            match result {
-                Ok(_) => event_tx.send(AgentEvent::Done).ok(),
-                Err(error) => event_tx.send(AgentEvent::Failed(error)).ok(),
-            };
-        }
-    });
-    (prompt_tx, event_rx)
 }
 
 struct EspPlatform;
@@ -585,7 +628,7 @@ impl WifiConnection {
     fn projection(&self, status: impl Into<String>) -> pocket_pi_device_ui::SettingsProjection {
         let mut projection = pocket_pi_device_ui::SettingsProjection {
             firmware_version: env!("CARGO_PKG_VERSION").into(),
-            workspace_free_bytes: None,
+            workspace_free_bytes: storage::workspace_free_bytes().ok(),
             ..Default::default()
         };
         projection.wifi.status = status.into();
@@ -666,6 +709,8 @@ struct DisplayProbe {
     touch: esp_idf_svc::sys::esp_lcd_touch_handle_t,
     framebuffers: [*mut u16; 3],
     next_framebuffer: usize,
+    presented_frames: u32,
+    fps_window_started: Instant,
 }
 
 fn init_display_probe(
@@ -755,6 +800,8 @@ fn init_display_probe(
             touch,
             framebuffers: framebuffers.map(|framebuffer| framebuffer.cast()),
             next_framebuffer: 1,
+            presented_frames: 1,
+            fps_window_started: Instant::now(),
         })
     }
 }
@@ -792,6 +839,7 @@ impl DisplayProbe {
             )
         })?;
         self.next_framebuffer = (self.next_framebuffer + 1) % self.framebuffers.len();
+        self.presented_frames = self.presented_frames.saturating_add(1);
         Ok(())
     }
 
@@ -799,6 +847,18 @@ impl DisplayProbe {
         let mut x = 0u16;
         let mut y = 0u16;
         unsafe { esp_idf_svc::sys::pi_p4_touch_read(self.touch, &mut x, &mut y).then_some((x, y)) }
+    }
+
+    fn sample_ui_fps_tenths(&mut self) -> u16 {
+        let elapsed = self.fps_window_started.elapsed().as_secs_f32();
+        let fps_tenths = if elapsed > 0.0 {
+            ((self.presented_frames as f32 / elapsed) * 10.0).round() as u16
+        } else {
+            0
+        };
+        self.presented_frames = 0;
+        self.fps_window_started = Instant::now();
+        fps_tenths
     }
 }
 
@@ -867,7 +927,7 @@ fn memory_snapshot() -> MemorySnapshot {
     }
 }
 
-fn system_telemetry(ui_fps: u16) -> SystemTelemetry {
+fn system_telemetry(ui_fps_tenths: u16) -> SystemTelemetry {
     let memory = memory_snapshot();
     let used = memory.psram_total.saturating_sub(memory.psram_free);
     let used_percent = if memory.psram_total == 0 {
@@ -875,10 +935,14 @@ fn system_telemetry(ui_fps: u16) -> SystemTelemetry {
     } else {
         ((used.saturating_mul(100)) / memory.psram_total).min(100) as u8
     };
+    let mut cpu = 0u8;
+    let cpu_percent =
+        unsafe { esp_idf_svc::sys::pi_p4_cpu_load_percent(&mut cpu).then_some(cpu.min(100)) };
     SystemTelemetry {
-        ram_used_percent: used_percent,
-        ram_free_bytes: memory.free_heap as usize,
-        cpu_percent: None,
-        ui_fps,
+        psram_used_percent: used_percent,
+        psram_free_bytes: memory.psram_free,
+        cpu_percent,
+        ui_fps_tenths,
+        lcd_refresh_hz: LCD_REFRESH_HZ,
     }
 }

@@ -46,29 +46,32 @@ impl LineTransport for UartLineTransport {
             .pending
             .lock()
             .map_err(|_| "UART receive buffer lock was poisoned".to_owned())?;
-        let mut byte = [0u8; 1];
+        let mut bytes = [0u8; 512];
         while Instant::now() < deadline {
+            while let Some(end) = frame.iter().position(|byte| *byte == b'\n') {
+                let line = frame.drain(..=end).collect::<Vec<_>>();
+                let line = String::from_utf8_lossy(&line).trim().to_owned();
+                if line.starts_with(prefix) {
+                    return Ok(line);
+                }
+            }
             let count = unsafe {
                 esp_idf_svc::sys::uart_read_bytes(
                     esp_idf_svc::sys::uart_port_t_UART_NUM_0,
-                    byte.as_mut_ptr().cast(),
-                    1,
+                    bytes.as_mut_ptr().cast(),
+                    bytes.len() as u32,
                     1,
                 )
             };
-            match count {
-                0 => std::thread::sleep(Duration::from_millis(10)),
-                1 if byte[0] == b'\n' => {
-                    let line = String::from_utf8_lossy(&frame).trim().to_owned();
+            if count > 0 {
+                let count = count as usize;
+                if frame.len() + count <= 32 * 1024 {
+                    frame.extend_from_slice(&bytes[..count]);
+                } else {
                     frame.clear();
-                    if line.starts_with(prefix) {
-                        return Ok(line);
-                    }
                 }
-                1 if byte[0] == b'\r' => {}
-                1 if frame.len() < 32 * 1024 => frame.push(byte[0]),
-                1 => frame.clear(),
-                _ => std::thread::sleep(Duration::from_millis(10)),
+            } else {
+                std::thread::sleep(Duration::from_millis(1));
             }
         }
         Err(format!("timed out waiting for {prefix}"))
