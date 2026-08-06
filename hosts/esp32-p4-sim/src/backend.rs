@@ -9,7 +9,6 @@ use pocket_pi_protocols::{anthropic_messages, codex_decision, openai_chat};
 use serde_json::{json, Value};
 
 pub enum BackendChoice {
-    Scripted,
     Wireless {
         provider: WirelessProvider,
         api_key: String,
@@ -23,7 +22,6 @@ pub enum BackendChoice {
 impl BackendChoice {
     pub fn from_name(name: &str, model: Option<String>) -> Result<Self, String> {
         match name {
-            "scripted" => Ok(Self::Scripted),
             "openai" | "openrouter" | "anthropic" => {
                 let provider = match name {
                     "openai" => WirelessProvider::OpenAi,
@@ -48,14 +46,13 @@ impl BackendChoice {
                 model: model.or_else(|| std::env::var("CODEX_MODEL").ok()),
             }),
             other => Err(format!(
-                "unknown backend {other:?}; expected scripted, openai, openrouter, anthropic or codex"
+                "unknown backend {other:?}; expected openai, openrouter, anthropic or codex"
             )),
         }
     }
 
     pub fn agent_config(&self) -> String {
         let (provider, model) = match self {
-            Self::Scripted => ("openai", "simulated"),
             Self::Wireless {
                 provider, model, ..
             } => (provider.id(), model.as_str()),
@@ -71,29 +68,11 @@ impl BackendChoice {
 
     pub fn build(self) -> Arc<dyn ModelBackend> {
         match self {
-            Self::Scripted => Arc::new(ScriptedBackend),
             Self::Wireless {
                 provider, api_key, ..
             } => Arc::new(WirelessBackend { provider, api_key }),
             Self::Codex { model } => Arc::new(CodexBackend { model }),
         }
-    }
-}
-
-struct ScriptedBackend;
-
-impl ModelBackend for ScriptedBackend {
-    fn complete(
-        &self,
-        _request_json: &str,
-        on_delta: &mut dyn FnMut(&str),
-    ) -> Result<String, String> {
-        let text = "Embedded Pi is running the real pi-agent-core profile. Chat and workspace are rendered by the shared PocketJS UI.";
-        for word in text.split_inclusive(' ') {
-            on_delta(word);
-            std::thread::sleep(Duration::from_millis(35));
-        }
-        Ok(json!({ "text": text }).to_string())
     }
 }
 

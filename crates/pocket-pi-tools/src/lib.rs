@@ -4,7 +4,7 @@ mod schedule;
 mod shell;
 mod workspace;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use pocket_pi_embedded::{ToolHost, ToolResult};
@@ -37,10 +37,6 @@ impl CoreToolHost {
             root,
             platform,
         }
-    }
-
-    pub fn workspace_root(&self) -> &Path {
-        &self.root
     }
 
     pub fn schedule_projection(&self) -> ScheduleProjection {
@@ -173,7 +169,7 @@ mod tests {
         }
     }
 
-    fn host(root: &Path) -> CoreToolHost {
+    fn host(root: &std::path::Path) -> CoreToolHost {
         CoreToolHost::new(root, Arc::new(TestPlatform))
     }
 

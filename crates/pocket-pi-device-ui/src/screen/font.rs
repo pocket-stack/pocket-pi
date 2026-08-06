@@ -1,13 +1,11 @@
 use pocketjs_core::{spec, Ui};
 
 const BODY_SLOT: u8 = 3;
-const DISPLAY_SLOT: u8 = 6;
 const BODY_BOLD_SLOT: u8 = 10;
 const TITLE_SLOT: u8 = 12;
 const COLUMN_WIDTH: usize = 16;
 
 const BODY_ATLAS: &[u8] = include_bytes!("../../assets/fonts/inter-18-regular.pfa");
-const DISPLAY_ATLAS: &[u8] = include_bytes!("../../assets/fonts/inter-36-regular.pfa");
 const BODY_BOLD_ATLAS: &[u8] = include_bytes!("../../assets/fonts/inter-18-bold.pfa");
 const TITLE_ATLAS: &[u8] = include_bytes!("../../assets/fonts/inter-24-bold.pfa");
 
@@ -16,14 +14,12 @@ pub enum TextStyle {
     Body,
     Bold,
     Title,
-    Display,
 }
 
 impl TextStyle {
     const fn slot(self) -> u8 {
         match self {
             Self::Body => BODY_SLOT,
-            Self::Display => DISPLAY_SLOT,
             Self::Bold => BODY_BOLD_SLOT,
             Self::Title => TITLE_SLOT,
         }
@@ -31,7 +27,7 @@ impl TextStyle {
 }
 
 pub fn load(ui: &mut Ui) -> bool {
-    [BODY_ATLAS, DISPLAY_ATLAS, BODY_BOLD_ATLAS, TITLE_ATLAS]
+    [BODY_ATLAS, BODY_BOLD_ATLAS, TITLE_ATLAS]
         .into_iter()
         .all(|atlas| ui.load_font_atlas(atlas))
 }
@@ -145,4 +141,25 @@ pub fn wrap_text(ui: &Ui, text: &str, max_columns: usize, style: TextStyle) -> V
 
 const fn xy(x: i16, y: i16) -> u32 {
     x as u16 as u32 | ((y as u16 as u32) << 16)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn atlases_cover_common_model_punctuation() {
+        let mut ui = Ui::new();
+        assert!(load(&mut ui));
+        for style in [TextStyle::Body, TextStyle::Bold, TextStyle::Title] {
+            let atlas = ui.font_atlas(style.slot()).expect("font atlas");
+            for character in "‘’“”–—…".chars() {
+                assert!(
+                    atlas.lookup_entry(character as u32).is_some(),
+                    "missing {character:?} in font slot {}",
+                    style.slot()
+                );
+            }
+        }
+    }
 }

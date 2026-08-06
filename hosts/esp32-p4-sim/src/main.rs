@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -10,7 +10,7 @@ use pocket_pi_device_ui::{
     ScreenInteraction, ScreenState, ScreenView, SettingsCommand, SettingsProjection,
     SystemTelemetry, UartProvider, WifiNetworkProjection,
 };
-use pocket_pi_embedded::PiEmbedded;
+use pocket_pi_embedded::{spawn_agent_worker, AgentEvent};
 use pocket_pi_tools::{CoreToolHost, PlatformTools};
 use pocket_ui_wgpu::UiRenderer;
 use pocketjs_core::Ui;
@@ -54,7 +54,7 @@ fn parse_args() -> Result<Args> {
     let mut workspace =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/esp32-p4-sim/workspace");
     let mut view = ScreenView::Chat;
-    let mut backend = std::env::var("POCKET_PI_BACKEND").unwrap_or_else(|_| "scripted".into());
+    let mut backend = std::env::var("POCKET_PI_BACKEND").unwrap_or_else(|_| "codex".into());
     let mut model = None;
     let mut args = std::env::args().skip(1);
     while let Some(argument) = args.next() {
@@ -67,7 +67,6 @@ fn parse_args() -> Result<Args> {
                     "chat" => ScreenView::Chat,
                     "workspace" | "files" => ScreenView::Files,
                     "settings" => ScreenView::Settings,
-                    "robinhood" => ScreenView::Robinhood,
                     value => return Err(anyhow!("unknown view: {value}")),
                 }
             }
@@ -114,12 +113,6 @@ fn new_ui() -> Result<Ui> {
     Ok(ui)
 }
 
-enum AgentEvent {
-    Delta(String),
-    Done,
-    Failed(String),
-}
-
 struct SimPlatform;
 
 impl PlatformTools for SimPlatform {
@@ -146,42 +139,6 @@ impl PlatformTools for SimPlatform {
     }
 }
 
-fn spawn_agent(
-    backend: BackendChoice,
-    tools: Arc<CoreToolHost>,
-) -> (Sender<String>, Receiver<AgentEvent>) {
-    let (prompt_tx, prompt_rx) = mpsc::channel::<String>();
-    let (event_tx, event_rx) = mpsc::channel::<AgentEvent>();
-    let config = backend.agent_config();
-    let backend = backend.build();
-    std::thread::spawn(move || {
-        let delta_tx = event_tx.clone();
-        let runtime = PiEmbedded::new(
-            &config,
-            backend,
-            tools,
-            Arc::new(move |delta| {
-                delta_tx.send(AgentEvent::Delta(delta)).ok();
-            }),
-        );
-        let runtime = match runtime {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                event_tx.send(AgentEvent::Failed(error)).ok();
-                return;
-            }
-        };
-        for prompt in prompt_rx {
-            let result = runtime.prompt(&prompt).and_then(|()| runtime.pump());
-            match result {
-                Ok(_) => event_tx.send(AgentEvent::Done).ok(),
-                Err(error) => event_tx.send(AgentEvent::Failed(error)).ok(),
-            };
-        }
-    });
-    (prompt_tx, event_rx)
-}
-
 struct Product {
     chat: ChatProjection,
     screen: ScreenState,
@@ -197,9 +154,13 @@ struct Product {
 
 impl Product {
     fn new(workspace: PathBuf, backend: BackendChoice, view: ScreenView) -> Result<Self> {
+        let local_codex = matches!(backend, BackendChoice::Codex { .. });
         let model_settings = settings_for(&backend);
         let tools = Arc::new(CoreToolHost::new(workspace.clone(), Arc::new(SimPlatform)));
-        let (prompt_tx, agent_rx) = spawn_agent(backend, Arc::clone(&tools));
+        let config = backend.agent_config();
+        let backend = backend.build();
+        let (prompt_tx, agent_rx) =
+            spawn_agent_worker(config, backend, tools.clone(), None).map_err(anyhow::Error::msg)?;
         let workspace = workspace
             .to_str()
             .ok_or_else(|| anyhow!("workspace path is not valid UTF-8"))?;
@@ -217,11 +178,15 @@ impl Product {
         };
         screen.view = view;
         screen.set_model_backend(&model_settings);
+        if local_codex {
+            screen.set_backend_status("CODEX", "LOCAL / MAC", "CODING PLAN");
+        }
         screen.set_telemetry(SystemTelemetry {
-            ram_used_percent: 25,
-            ram_free_bytes: 24 * 1024 * 1024,
+            psram_used_percent: 25,
+            psram_free_bytes: 24 * 1024 * 1024,
             cpu_percent: None,
-            ui_fps: 0,
+            ui_fps_tenths: 0,
+            lcd_refresh_hz: 32,
         });
         screen.refresh_workspace();
         screen.set_settings(settings.clone());
@@ -285,8 +250,23 @@ impl Product {
                         rssi_dbm: -71,
                         secured: false,
                     },
+                    WifiNetworkProjection {
+                        ssid: "OFFICE".into(),
+                        rssi_dbm: -74,
+                        secured: true,
+                    },
+                    WifiNetworkProjection {
+                        ssid: "CAFE".into(),
+                        rssi_dbm: -78,
+                        secured: false,
+                    },
+                    WifiNetworkProjection {
+                        ssid: "PHONE-2".into(),
+                        rssi_dbm: -82,
+                        secured: true,
+                    },
                 ];
-                self.settings.wifi.status = "SCAN COMPLETE (SIMULATED)".into();
+                self.settings.wifi.status.clear();
             }
             SettingsCommand::ConnectWifi { ssid, password } => {
                 if !password.is_empty() && !(8..=63).contains(&password.len()) {
@@ -319,6 +299,9 @@ impl Product {
     fn poll_agent(&mut self) {
         while let Ok(event) = self.agent_rx.try_recv() {
             match event {
+                AgentEvent::Ready => {
+                    self.device.agent = AgentState::Idle;
+                }
                 AgentEvent::Delta(delta) => {
                     if self.chat.append_model_delta(&delta) {
                         self.screen.show_latest_chat();
@@ -367,7 +350,7 @@ fn settings_for(backend: &BackendChoice) -> ModelSettings {
         BackendChoice::Wireless { provider, .. } => ModelBackendSettings::Wireless {
             provider: *provider,
         },
-        BackendChoice::Scripted | BackendChoice::Codex { .. } => ModelBackendSettings::Uart {
+        BackendChoice::Codex { .. } => ModelBackendSettings::Uart {
             provider: UartProvider::Codex,
         },
     };
@@ -512,8 +495,8 @@ impl WindowApp {
         state.frames += 1;
         let elapsed = state.fps_started.elapsed();
         if elapsed >= Duration::from_secs(1) {
-            state.product.screen.telemetry.ui_fps =
-                (state.frames as f32 / elapsed.as_secs_f32()).round() as u16;
+            state.product.screen.telemetry.ui_fps_tenths =
+                ((state.frames as f32 / elapsed.as_secs_f32()) * 10.0).round() as u16;
             state.frames = 0;
             state.fps_started = Instant::now();
             state.product.dirty = true;
@@ -629,7 +612,7 @@ mod tests {
         let ui = new_ui().unwrap();
         let mut product = Product::new(
             temp.path().to_owned(),
-            BackendChoice::Scripted,
+            BackendChoice::Codex { model: None },
             ScreenView::Chat,
         )
         .unwrap();
@@ -640,14 +623,6 @@ mod tests {
         product.screen.view = ScreenView::Chat;
         product.tap(650, 1220, &ui);
         assert_eq!(product.screen.view, ScreenView::Settings);
-
-        product.screen.capabilities = pocket_pi_device_ui::UiCapabilities {
-            settings: true,
-            portfolio: true,
-        };
-        product.screen.view = ScreenView::Chat;
-        product.tap(650, 1220, &ui);
-        assert_eq!(product.screen.view, ScreenView::Robinhood);
     }
 
     #[test]
@@ -656,7 +631,7 @@ mod tests {
         let ui = new_ui().unwrap();
         let mut product = Product::new(
             temp.path().to_owned(),
-            BackendChoice::Scripted,
+            BackendChoice::Codex { model: None },
             ScreenView::Settings,
         )
         .unwrap();
@@ -664,15 +639,37 @@ mod tests {
         product.tap(580, 180, &ui);
         product.tap(120, 350, &ui);
         for _ in 0..8 {
-            product.tap(54, 396, &ui);
+            product.tap(54, 548, &ui);
         }
-        product.tap(640, 820, &ui);
+        product.tap(640, 986, &ui);
 
         assert_eq!(
             product.settings.wifi.connected_ssid.as_deref(),
             Some("POCKET-PI-LAB")
         );
         assert!(!product.screen.handle_touch_release());
+    }
+
+    #[test]
+    fn settings_wifi_list_scrolls_to_later_networks() {
+        let temp = tempfile::tempdir().unwrap();
+        let ui = new_ui().unwrap();
+        let mut product = Product::new(
+            temp.path().to_owned(),
+            BackendChoice::Codex { model: None },
+            ScreenView::Settings,
+        )
+        .unwrap();
+
+        product.tap(580, 180, &ui);
+        assert!(product.settings.wifi.status.is_empty());
+        product.tap(660, 710, &ui);
+        product.tap(120, 626, &ui);
+
+        assert_eq!(
+            product.settings.wifi.connected_ssid.as_deref(),
+            Some("CAFE")
+        );
     }
 
     #[test]
@@ -687,11 +684,11 @@ mod tests {
             ScreenInteraction::Redraw
         );
         assert_eq!(
-            screen.handle_tap(54, 396, &chat, &ui),
+            screen.handle_tap(54, 548, &chat, &ui),
             ScreenInteraction::Redraw
         );
         assert_eq!(
-            screen.handle_tap(640, 820, &chat, &ui),
+            screen.handle_tap(640, 986, &chat, &ui),
             ScreenInteraction::SubmitPrompt("q".into())
         );
     }
@@ -708,15 +705,15 @@ mod tests {
             ScreenInteraction::Redraw
         );
         assert_eq!(
-            screen.handle_tap(450, 820, &chat, &ui),
+            screen.handle_tap(450, 986, &chat, &ui),
             ScreenInteraction::Redraw
         );
         assert_eq!(
-            screen.handle_tap(54, 396, &chat, &ui),
+            screen.handle_tap(54, 548, &chat, &ui),
             ScreenInteraction::Redraw
         );
         assert_eq!(
-            screen.handle_tap(640, 820, &chat, &ui),
+            screen.handle_tap(640, 986, &chat, &ui),
             ScreenInteraction::SubmitPrompt("Q".into())
         );
     }
@@ -728,7 +725,7 @@ mod tests {
         let ui = new_ui().unwrap();
         let mut product = Product::new(
             temp.path().to_owned(),
-            BackendChoice::Scripted,
+            BackendChoice::Codex { model: None },
             ScreenView::Chat,
         )
         .unwrap();

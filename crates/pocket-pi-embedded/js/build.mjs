@@ -16,6 +16,7 @@ await esbuild.build({
   format: "iife",
   platform: "neutral",
   target: "es2020",
-  legalComments: "none",
-  minify: true,
+  legalComments: "eof",
+  minifyWhitespace: true,
+  lineLimit: 500,
 });

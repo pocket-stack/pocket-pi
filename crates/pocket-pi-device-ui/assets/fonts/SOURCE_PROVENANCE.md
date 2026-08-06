@@ -2,8 +2,10 @@
 
 These `.pfa` files were generated with PocketJS's official
 `framework/compiler/bake-font.ts` at the same pinned revision used by the
-firmware (`4c5dc9ef1dd26e6f49b036c210931d399f2b52b2`). They contain the ASCII
-glyph set baked from PocketJS's bundled Inter Regular and Inter Bold fonts:
+firmware (`4c5dc9ef1dd26e6f49b036c210931d399f2b52b2`). They contain the ASCII glyph
+set plus the common smart punctuation `‘’“”–—…`, baked from PocketJS's bundled
+Inter Regular and Inter Bold fonts. Model replies commonly use these
+typographic characters even when the prompt contains plain ASCII.
 
 - slot 3: Inter Regular, 18 px;
 - slot 6: Inter Regular, 36 px;

@@ -1,9 +1,13 @@
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 
 use rquickjs::{CatchResultExt, Context, Function, Object, Runtime};
 
 const AGENT_BUNDLE: &str = include_str!("../js/pi-agent.bundle.js");
 const PRELUDE: &str = include_str!("../js/prelude.js");
+#[cfg(target_os = "espidf")]
+const QUICKJS_STACK_LIMIT: usize = 96 * 1024;
+#[cfg(not(target_os = "espidf"))]
+const QUICKJS_STACK_LIMIT: usize = 512 * 1024;
 
 pub trait ModelBackend: Send + Sync {
     fn complete(
@@ -24,6 +28,58 @@ pub struct ToolResult {
     pub details: serde_json::Value,
     pub is_error: bool,
     pub terminate: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AgentEvent {
+    Ready,
+    Delta(String),
+    Done,
+    Failed(String),
+}
+
+pub fn spawn_agent_worker(
+    config_json: String,
+    backend: Arc<dyn ModelBackend>,
+    tools: Arc<dyn ToolHost>,
+    stack_size: Option<usize>,
+) -> Result<(mpsc::Sender<String>, mpsc::Receiver<AgentEvent>), String> {
+    let (prompt_tx, prompt_rx) = mpsc::channel::<String>();
+    let (event_tx, event_rx) = mpsc::channel::<AgentEvent>();
+    let mut builder = std::thread::Builder::new().name("pi-agent".to_owned());
+    if let Some(stack_size) = stack_size {
+        builder = builder.stack_size(stack_size);
+    }
+    builder
+        .spawn(move || {
+            let delta_tx = event_tx.clone();
+            let runtime = PiEmbedded::new(
+                &config_json,
+                backend,
+                tools,
+                Arc::new(move |delta| {
+                    delta_tx.send(AgentEvent::Delta(delta)).ok();
+                }),
+            );
+            let runtime = match runtime {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    event_tx.send(AgentEvent::Failed(error)).ok();
+                    return;
+                }
+            };
+            event_tx.send(AgentEvent::Ready).ok();
+            for prompt in prompt_rx {
+                let result = runtime.prompt(&prompt).and_then(|()| runtime.pump());
+                let event = match result {
+                    Ok(_) => AgentEvent::Done,
+                    Err(error) => AgentEvent::Failed(error),
+                };
+                event_tx.send(event).ok();
+            }
+        })
+        .map_err(|error| format!("spawn Pi Agent worker: {error}"))?;
+    Ok((prompt_tx, event_rx))
 }
 
 impl ToolResult {
@@ -60,9 +116,7 @@ impl PiEmbedded {
     ) -> Result<Self, String> {
         let config_json = config_with_tools(config_json, tools.definitions())?;
         let runtime = Runtime::new().map_err(|error| error.to_string())?;
-        // The limit bounds QuickJS recursion; it does not pre-allocate this
-        // memory. ESP hosts may lower it after measuring their native task.
-        runtime.set_max_stack_size(512 * 1024);
+        runtime.set_max_stack_size(QUICKJS_STACK_LIMIT);
         let context = Context::full(&runtime).map_err(|error| error.to_string())?;
 
         context.with(|ctx| -> Result<(), String> {
@@ -146,10 +200,6 @@ impl PiEmbedded {
                 drain.call::<_, String>(())
             })
             .map_err(|error| error.to_string())
-    }
-
-    pub fn memory_used_bytes(&self) -> i64 {
-        self.runtime.memory_usage().memory_used_size
     }
 }
 

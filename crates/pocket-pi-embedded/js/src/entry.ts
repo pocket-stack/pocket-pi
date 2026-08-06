@@ -1,4 +1,4 @@
-import { Agent } from "@earendil-works/pi-agent-core";
+import { Agent } from "../node_modules/@earendil-works/pi-agent-core/dist/agent.js";
 import { AssistantMessageEventStream } from "../node_modules/@earendil-works/pi-ai/dist/utils/event-stream.js";
 
 type Config = {

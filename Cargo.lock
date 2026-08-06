@@ -2541,7 +2541,6 @@ dependencies = [
  "pocket-ui-wgpu",
  "pocket3d",
  "pocketjs-core",
- "pollster",
  "serde_json",
  "tempfile",
  "ureq",

@@ -17,7 +17,6 @@ pocket-pi-tools = { path = "../../crates/pocket-pi-tools" }
 pocketjs-core = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "4c5dc9ef1dd26e6f49b036c210931d399f2b52b2" }
 pocket-ui-wgpu = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "4c5dc9ef1dd26e6f49b036c210931d399f2b52b2" }
 pocket3d = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "4c5dc9ef1dd26e6f49b036c210931d399f2b52b2", default-features = false }
-pollster = "0.4"
 serde_json.workspace = true
 tempfile = "3"
 ureq = { version = "2.12", features = ["json"] }

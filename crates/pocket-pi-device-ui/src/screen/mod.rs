@@ -10,10 +10,8 @@ mod workspace_browser;
 use std::collections::VecDeque;
 
 use crate::model::{
-    AgentState, DeviceState, ModelBackendSettings, ModelSettings, OrderProjection,
-    PortfolioCollection, PortfolioProjection, ScheduleProjection, SettingsCommand,
-    SettingsProjection, UartProvider, ValueTrendProjection, WifiNetworkProjection,
-    WirelessProvider,
+    AgentState, DeviceState, ModelBackendSettings, ModelSettings, ScheduleProjection,
+    SettingsCommand, SettingsProjection, UartProvider, WifiNetworkProjection, WirelessProvider,
 };
 use pocketjs_core::{spec, Ui};
 use workspace_browser::{format_size, format_timestamp, WorkspaceBrowser};
@@ -33,17 +31,15 @@ const VIEWER_VISIBLE_LINES: usize = 39;
 const MESSAGE_VISIBLE_LINES: usize = 39;
 const MAX_CHAT_TURNS: usize = 10;
 const CHAT_VISIBLE_TURNS: usize = 2;
-const ACTIVITY_VISIBLE_ROWS: usize = 8;
-const POSITION_VISIBLE_ROWS: usize = 9;
-const ACCOUNT_VISIBLE_ROWS: usize = 8;
-const ACCOUNT_ROW_START_Y: i16 = 140;
-const ACCOUNT_ROW_HEIGHT: i16 = 112;
+const WIFI_ROW_START_Y: u16 = 330;
+const WIFI_ROW_HEIGHT: u16 = 92;
+const WIFI_VISIBLE_ROWS: usize = 5;
 const COMPOSE_Y: u16 = 1070;
 const MAX_PROMPT_BYTES: usize = 256;
 const PENDING_ASSISTANT: &str = "THINKING...";
 
 // PocketJS draw-list colors are packed ABGR, not ARGB.
-const UI_GAIN_GREEN: u32 = 0xff3b_d158; // RGB #58D13B
+const UI_ACCENT_GREEN: u32 = 0xff3b_d158; // RGB #58D13B
 const UI_LOSS_RED: u32 = 0xff44_44ef; // RGB #EF4444
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -51,10 +47,6 @@ pub enum ScreenView {
     Chat,
     Files,
     Settings,
-    Robinhood,
-    Accounts,
-    Activities,
-    Positions,
     Viewer,
     MessageReader,
 }
@@ -65,21 +57,6 @@ pub enum ScreenInteraction {
     Redraw,
     SubmitPrompt(String),
     Settings(SettingsCommand),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UiCapabilities {
-    pub settings: bool,
-    pub portfolio: bool,
-}
-
-impl Default for UiCapabilities {
-    fn default() -> Self {
-        Self {
-            settings: true,
-            portfolio: false,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -94,18 +71,13 @@ enum KeyboardPurpose {
     WifiPassword { ssid: String },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PnlSpan {
-    Day,
-    Week,
-}
-
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemTelemetry {
-    pub ram_used_percent: u8,
-    pub ram_free_bytes: usize,
+    pub psram_used_percent: u8,
+    pub psram_free_bytes: usize,
     pub cpu_percent: Option<u8>,
-    pub ui_fps: u16,
+    pub ui_fps_tenths: u16,
+    pub lcd_refresh_hz: u16,
 }
 
 #[derive(Clone, Debug)]
@@ -191,28 +163,6 @@ impl ChatProjection {
         }
     }
 
-    pub fn restore<I>(&mut self, turns: I) -> usize
-    where
-        I: IntoIterator<Item = (String, String)>,
-    {
-        let mut restored = turns
-            .into_iter()
-            .map(|(user, assistant)| ChatTurn {
-                user,
-                assistant,
-                pending: false,
-            })
-            .collect::<VecDeque<_>>();
-        while restored.len() > MAX_CHAT_TURNS {
-            restored.pop_front();
-        }
-        let count = restored.len();
-        if count > 0 {
-            self.turns = restored;
-        }
-        count
-    }
-
     pub fn set_latest_assistant(&mut self, assistant: impl Into<String>) {
         if let Some(turn) = self.turns.back_mut() {
             turn.assistant = assistant.into();
@@ -259,19 +209,6 @@ impl ChatProjection {
         }
     }
 
-    pub fn complete_turn(&mut self, user: impl Into<String>, assistant: impl Into<String>) {
-        let user = user.into();
-        let assistant = assistant.into();
-        if let Some(turn) = self.turns.back_mut() {
-            if turn.user == user && turn.pending {
-                turn.assistant = assistant;
-                turn.pending = false;
-                return;
-            }
-        }
-        self.push_turn(user, assistant);
-    }
-
     pub fn fail_pending(&mut self, error: impl Into<String>) {
         let error = error.into();
         if let Some(turn) = self.turns.back_mut() {
@@ -290,15 +227,9 @@ pub struct ScreenState {
     pub view: ScreenView,
     pub browser: WorkspaceBrowser,
     pub telemetry: SystemTelemetry,
-    pub capabilities: UiCapabilities,
     schedule: ScheduleProjection,
-    portfolios: PortfolioCollection,
-    account_index: usize,
-    account_scroll: usize,
     chat_scroll: usize,
-    pnl_span: PnlSpan,
-    activity_scroll: usize,
-    position_scroll: usize,
+    wifi_scroll: usize,
     keyboard_open: bool,
     keyboard_mode: KeyboardMode,
     keyboard_uppercase: bool,
@@ -312,23 +243,13 @@ pub struct ScreenState {
 
 impl ScreenState {
     pub fn new(workspace_root: &str) -> Self {
-        Self::with_capabilities(workspace_root, UiCapabilities::default())
-    }
-
-    pub fn with_capabilities(workspace_root: &str, capabilities: UiCapabilities) -> Self {
         Self {
             view: ScreenView::Chat,
             browser: WorkspaceBrowser::new(workspace_root),
             telemetry: SystemTelemetry::default(),
-            capabilities,
             schedule: ScheduleProjection::default(),
-            portfolios: PortfolioCollection::default(),
-            account_index: 0,
-            account_scroll: 0,
             chat_scroll: 0,
-            pnl_span: PnlSpan::Week,
-            activity_scroll: 0,
-            position_scroll: 0,
+            wifi_scroll: 0,
             keyboard_open: false,
             keyboard_mode: KeyboardMode::Letters,
             keyboard_uppercase: false,
@@ -349,18 +270,26 @@ impl ScreenState {
         self.schedule = schedule;
     }
 
-    pub fn set_portfolio(&mut self, portfolios: PortfolioCollection) {
-        self.portfolios = portfolios;
-        self.account_index = self
-            .account_index
-            .min(self.portfolios.accounts.len().saturating_sub(1));
-    }
-
     pub fn set_model_backend(&mut self, settings: &ModelSettings) {
         self.backend = BackendProjection::from_settings(settings);
     }
 
+    pub fn set_backend_status(&mut self, model: &str, link: &str, auth: &str) {
+        self.backend = BackendProjection {
+            model: model.to_owned(),
+            link: link.to_owned(),
+            auth: auth.to_owned(),
+        };
+    }
+
     pub fn set_settings(&mut self, settings: SettingsProjection) {
+        self.wifi_scroll = self.wifi_scroll.min(
+            settings
+                .wifi
+                .networks
+                .len()
+                .saturating_sub(WIFI_VISIBLE_ROWS),
+        );
         self.settings = settings;
     }
 
@@ -389,20 +318,13 @@ impl ScreenState {
         if !matches!(self.view, ScreenView::Viewer | ScreenView::MessageReader)
             && y as i16 >= BOTTOM_BAR_Y
         {
-            let next = match (self.capabilities.settings, self.capabilities.portfolio, x) {
-                (true, true, 0..=179)
-                | (true, false, 0..=239)
-                | (false, true, 0..=239)
-                | (false, false, 0..=359) => ScreenView::Chat,
-                (true, true, 180..=359)
-                | (true, false, 240..=479)
-                | (false, true, 240..=479)
-                | (false, false, _) => {
+            let next = match x {
+                0..=239 => ScreenView::Chat,
+                240..=479 => {
                     self.browser.refresh();
                     ScreenView::Files
                 }
-                (true, true, 360..=539) | (true, false, _) => ScreenView::Settings,
-                (_, true, _) => ScreenView::Robinhood,
+                _ => ScreenView::Settings,
             };
             let changed = self.view != next;
             self.view = next;
@@ -418,10 +340,6 @@ impl ScreenState {
             ScreenView::Chat => self.handle_chat_tap(x, y, chat, ui),
             ScreenView::Files => self.handle_files_tap(x, y),
             ScreenView::Settings => return self.handle_settings_tap(x, y),
-            ScreenView::Robinhood => self.handle_robinhood_tap(x, y),
-            ScreenView::Accounts => self.handle_accounts_tap(x, y),
-            ScreenView::Activities => self.handle_activities_tap(x, y),
-            ScreenView::Positions => self.handle_positions_tap(x, y),
             ScreenView::Viewer => self.handle_viewer_tap(x, y),
             ScreenView::MessageReader => self.handle_message_reader_tap(x, y),
         };
@@ -515,7 +433,7 @@ impl ScreenState {
             self.pressed_key = None;
             return ScreenInteraction::Redraw;
         }
-        if (548..=680).contains(&x) && (228..=284).contains(&y) {
+        if (548..=680).contains(&x) && (360..=416).contains(&y) {
             self.pressed_key = Some("CLEAR".to_owned());
             self.keyboard_input.clear();
             return ScreenInteraction::Redraw;
@@ -525,11 +443,11 @@ impl ScreenState {
             KeyboardMode::Letters => ["qwertyuiop", "asdfghjkl", "zxcvbnm"],
             KeyboardMode::Numbers => ["1234567890", "-/:;()$&@", ".,?!'\"+"],
         };
-        let character = if (336..=456).contains(&y) {
+        let character = if (488..=608).contains(&y) {
             row_character(x, 24, 60, 8, rows[0])
-        } else if (476..=596).contains(&y) {
+        } else if (628..=748).contains(&y) {
             row_character(x, 31, 66, 8, rows[1])
-        } else if (616..=736).contains(&y) {
+        } else if (768..=888).contains(&y) {
             row_character(x, 24, 72, 8, rows[2])
         } else {
             None
@@ -547,12 +465,12 @@ impl ScreenState {
             }
             return ScreenInteraction::Redraw;
         }
-        if (592..=696).contains(&x) && (616..=736).contains(&y) {
+        if (592..=696).contains(&x) && (768..=888).contains(&y) {
             self.pressed_key = Some("DEL".to_owned());
             self.keyboard_input.pop();
             return ScreenInteraction::Redraw;
         }
-        if (756..=896).contains(&y) {
+        if (908..=1064).contains(&y) {
             match x {
                 24..=116 => {
                     self.pressed_key = Some(
@@ -634,9 +552,37 @@ impl ScreenState {
         if (480..=696).contains(&x) && (142..=218).contains(&y) {
             return ScreenInteraction::Settings(SettingsCommand::ScanWifi);
         }
-        if x < 610 && (310..=790).contains(&y) {
-            let row = ((y - 310) / 96) as usize;
-            if let Some(network) = self.settings.wifi.networks.get(row) {
+        if x >= 620 && (330..=462).contains(&y) {
+            let before = self.wifi_scroll;
+            self.wifi_scroll = self.wifi_scroll.saturating_sub(WIFI_VISIBLE_ROWS - 1);
+            return if before == self.wifi_scroll {
+                ScreenInteraction::None
+            } else {
+                ScreenInteraction::Redraw
+            };
+        }
+        if x >= 620 && (650..=782).contains(&y) {
+            let max_scroll = self
+                .settings
+                .wifi
+                .networks
+                .len()
+                .saturating_sub(WIFI_VISIBLE_ROWS);
+            let before = self.wifi_scroll;
+            self.wifi_scroll = (self.wifi_scroll + WIFI_VISIBLE_ROWS - 1).min(max_scroll);
+            return if before == self.wifi_scroll {
+                ScreenInteraction::None
+            } else {
+                ScreenInteraction::Redraw
+            };
+        }
+        if x < 610 && (WIFI_ROW_START_Y..790).contains(&y) {
+            let row = ((y - WIFI_ROW_START_Y) / WIFI_ROW_HEIGHT) as usize;
+            let row_top = WIFI_ROW_START_Y + row as u16 * WIFI_ROW_HEIGHT;
+            if y >= row_top + 84 {
+                return ScreenInteraction::None;
+            }
+            if let Some(network) = self.settings.wifi.networks.get(self.wifi_scroll + row) {
                 if !network.secured {
                     return ScreenInteraction::Settings(SettingsCommand::ConnectWifi {
                         ssid: network.ssid.clone(),
@@ -661,126 +607,6 @@ impl ScreenState {
             return ScreenInteraction::Settings(SettingsCommand::Restart);
         }
         ScreenInteraction::None
-    }
-
-    fn handle_robinhood_tap(&mut self, x: u16, y: u16) -> bool {
-        if (112..=166).contains(&y) {
-            self.account_scroll = self.account_index.min(
-                self.portfolios
-                    .accounts
-                    .len()
-                    .saturating_sub(ACCOUNT_VISIBLE_ROWS),
-            );
-            self.view = ScreenView::Accounts;
-            return true;
-        }
-        if (448..=508).contains(&y) {
-            let next = if x < 136 {
-                Some(PnlSpan::Day)
-            } else if x < 252 {
-                Some(PnlSpan::Week)
-            } else {
-                None
-            };
-            if let Some(next) = next {
-                let changed = self.pnl_span != next;
-                self.pnl_span = next;
-                return changed;
-            }
-        }
-        if (624..=828).contains(&y) {
-            self.activity_scroll = 0;
-            self.view = ScreenView::Activities;
-            return true;
-        }
-        if (832..=1014).contains(&y) {
-            self.position_scroll = 0;
-            self.view = ScreenView::Positions;
-            return true;
-        }
-        false
-    }
-
-    fn handle_accounts_tap(&mut self, x: u16, y: u16) -> bool {
-        if x < 104 && y < HEADER_HEIGHT as u16 {
-            self.view = ScreenView::Robinhood;
-            return true;
-        }
-        if x >= 620 && (130..=320).contains(&y) {
-            let before = self.account_scroll;
-            self.account_scroll = self.account_scroll.saturating_sub(4);
-            return before != self.account_scroll;
-        }
-        if x >= 620 && (930..=1148).contains(&y) {
-            let max_scroll = self
-                .portfolios
-                .accounts
-                .len()
-                .saturating_sub(ACCOUNT_VISIBLE_ROWS);
-            let before = self.account_scroll;
-            self.account_scroll = (self.account_scroll + 4).min(max_scroll);
-            return before != self.account_scroll;
-        }
-        if x < 610 && y as i16 >= ACCOUNT_ROW_START_Y {
-            let row = ((y as i16 - ACCOUNT_ROW_START_Y) / ACCOUNT_ROW_HEIGHT) as usize;
-            let index = self.account_scroll + row;
-            if row < ACCOUNT_VISIBLE_ROWS && index < self.portfolios.accounts.len() {
-                self.account_index = index;
-                self.activity_scroll = 0;
-                self.position_scroll = 0;
-                self.view = ScreenView::Robinhood;
-                return true;
-            }
-        }
-        false
-    }
-
-    fn handle_activities_tap(&mut self, x: u16, y: u16) -> bool {
-        if x < 104 && y < HEADER_HEIGHT as u16 {
-            self.view = ScreenView::Robinhood;
-            return true;
-        }
-        if x >= 620 && (130..=320).contains(&y) {
-            let before = self.activity_scroll;
-            self.activity_scroll = self.activity_scroll.saturating_sub(4);
-            return before != self.activity_scroll;
-        }
-        if x >= 620 && (930..=1148).contains(&y) {
-            let max_scroll = self
-                .portfolios
-                .account(self.account_index)
-                .orders
-                .len()
-                .saturating_sub(ACTIVITY_VISIBLE_ROWS);
-            let before = self.activity_scroll;
-            self.activity_scroll = (self.activity_scroll + 4).min(max_scroll);
-            return before != self.activity_scroll;
-        }
-        false
-    }
-
-    fn handle_positions_tap(&mut self, x: u16, y: u16) -> bool {
-        if x < 104 && y < HEADER_HEIGHT as u16 {
-            self.view = ScreenView::Robinhood;
-            return true;
-        }
-        if x >= 620 && (130..=320).contains(&y) {
-            let before = self.position_scroll;
-            self.position_scroll = self.position_scroll.saturating_sub(4);
-            return before != self.position_scroll;
-        }
-        if x >= 620 && (930..=1148).contains(&y) {
-            let max_scroll = self
-                .portfolios
-                .account(self.account_index)
-                .positions
-                .len()
-                .saturating_sub(POSITION_VISIBLE_ROWS);
-            let before = self.position_scroll;
-            self.position_scroll = (self.position_scroll + 4).min(max_scroll);
-            return before != self.position_scroll;
-        }
-        false
     }
 
     fn handle_files_tap(&mut self, x: u16, y: u16) -> bool {
@@ -835,7 +661,6 @@ impl ScreenState {
                 self.keyboard_uppercase,
                 self.pressed_key.as_deref(),
                 &self.keyboard_purpose,
-                &self.backend,
                 self.telemetry,
             ),
             ScreenView::Chat => chat_draw_list(
@@ -844,49 +669,15 @@ impl ScreenState {
                 chat,
                 self.chat_scroll,
                 &self.schedule,
-                self.capabilities,
                 self.telemetry,
             ),
-            ScreenView::Files => {
-                files_draw_list(ui, state, &self.browser, self.capabilities, self.telemetry)
-            }
+            ScreenView::Files => files_draw_list(ui, state, &self.browser, self.telemetry),
             ScreenView::Settings => settings_draw_list(
                 ui,
                 state,
                 &self.settings,
+                self.wifi_scroll,
                 &self.backend,
-                self.capabilities,
-                self.telemetry,
-            ),
-            ScreenView::Robinhood => robinhood_draw_list(
-                ui,
-                state,
-                self.portfolios.account(self.account_index),
-                self.account_index,
-                self.portfolios.accounts.len(),
-                self.pnl_span,
-                self.telemetry,
-            ),
-            ScreenView::Accounts => accounts_draw_list(
-                ui,
-                state,
-                &self.portfolios,
-                self.account_index,
-                self.account_scroll,
-                self.telemetry,
-            ),
-            ScreenView::Activities => activities_draw_list(
-                ui,
-                state,
-                self.portfolios.account(self.account_index),
-                self.activity_scroll,
-                self.telemetry,
-            ),
-            ScreenView::Positions => positions_draw_list(
-                ui,
-                state,
-                self.portfolios.account(self.account_index),
-                self.position_scroll,
                 self.telemetry,
             ),
             ScreenView::Viewer => viewer_draw_list(ui, state, &self.browser, self.telemetry),
@@ -939,12 +730,17 @@ fn status_header(
         .cpu_percent
         .map(|value| format!("{value:02}%"))
         .unwrap_or_else(|| "--".to_owned());
-    let free_megabytes = telemetry.ram_free_bytes as f32 / (1024.0 * 1024.0);
+    let free_megabytes = telemetry.psram_free_bytes as f32 / (1024.0 * 1024.0);
     let memory = format!(
-        "RAM {:02}%  FREE {free_megabytes:.1}M",
-        telemetry.ram_used_percent
+        "PSRAM {:02}%  FREE {free_megabytes:.1}M",
+        telemetry.psram_used_percent
     );
-    let runtime = format!("CPU {cpu}  UI {}FPS  LCD32", telemetry.ui_fps);
+    let runtime = format!(
+        "CPU {cpu}  UI {}.{}FPS  LCD {}HZ",
+        telemetry.ui_fps_tenths / 10,
+        telemetry.ui_fps_tenths % 10,
+        telemetry.lcd_refresh_hz,
+    );
     push_text_right(ui, words, &memory, RIGHT_EDGE, 25, primary_status_color);
     push_text_right(ui, words, &runtime, RIGHT_EDGE, 61, secondary_status_color);
 }
@@ -955,7 +751,6 @@ fn chat_draw_list(
     chat: &ChatProjection,
     scroll: usize,
     schedule: &ScheduleProjection,
-    capabilities: UiCapabilities,
     telemetry: SystemTelemetry,
 ) -> Vec<u32> {
     let mut words = base_words(ui, state, "ESP32 PI AGENT", telemetry);
@@ -986,7 +781,7 @@ fn chat_draw_list(
     chat_scroll_buttons(ui, &mut words);
     schedule_panel(ui, &mut words, schedule);
     compose_button(ui, &mut words);
-    bottom_bar(ui, &mut words, ScreenView::Chat, capabilities);
+    bottom_bar(ui, &mut words, ScreenView::Chat);
     words
 }
 
@@ -1045,7 +840,6 @@ fn keyboard_draw_list(
     uppercase: bool,
     pressed_key: Option<&str>,
     purpose: &KeyboardPurpose,
-    backend: &BackendProjection,
     telemetry: SystemTelemetry,
 ) -> Vec<u32> {
     let title = match purpose {
@@ -1054,10 +848,10 @@ fn keyboard_draw_list(
     };
     let mut words = base_words(ui, state, title, telemetry);
     let display = match purpose {
-        KeyboardPurpose::Prompt => prompt_tail(input, 116).to_owned(),
+        KeyboardPurpose::Prompt => prompt_tail(input, MAX_PROMPT_BYTES).to_owned(),
         KeyboardPurpose::WifiPassword { .. } => "*".repeat(input.len()),
     };
-    rect(&mut words, 24, 132, 672, 168, 0xffff_ffff);
+    rect(&mut words, 24, 132, 672, 300, 0xffff_ffff);
     push_text_limited(
         ui,
         &mut words,
@@ -1065,7 +859,7 @@ fn keyboard_draw_list(
         42,
         154,
         29,
-        4,
+        9,
         if input.is_empty() {
             0xff94_a3b8
         } else {
@@ -1092,7 +886,7 @@ fn keyboard_draw_list(
         &mut words,
         "CLEAR",
         548,
-        228,
+        360,
         132,
         56,
         0xffe2_e8f0,
@@ -1110,7 +904,7 @@ fn keyboard_draw_list(
             }
         ),
         30,
-        310,
+        442,
         34,
         0xff64_748b,
     );
@@ -1119,15 +913,15 @@ fn keyboard_draw_list(
         KeyboardMode::Letters => ["qwertyuiop", "asdfghjkl", "zxcvbnm"],
         KeyboardMode::Numbers => ["1234567890", "-/:;()$&@", ".,?!'\"+"],
     };
-    draw_character_row(ui, &mut words, rows[0], 24, 336, 60, 8, pressed_key);
-    draw_character_row(ui, &mut words, rows[1], 31, 476, 66, 8, pressed_key);
-    draw_character_row(ui, &mut words, rows[2], 24, 616, 72, 8, pressed_key);
+    draw_character_row(ui, &mut words, rows[0], 24, 488, 60, 8, pressed_key);
+    draw_character_row(ui, &mut words, rows[1], 31, 628, 66, 8, pressed_key);
+    draw_character_row(ui, &mut words, rows[2], 24, 768, 72, 8, pressed_key);
     draw_key(
         ui,
         &mut words,
         "DEL",
         592,
-        616,
+        768,
         104,
         120,
         0xffe2_e8f0,
@@ -1143,9 +937,9 @@ fn keyboard_draw_list(
             "ABC"
         },
         24,
-        756,
+        908,
         92,
-        140,
+        156,
         0xffe2_e8f0,
         pressed_key
             == Some(if mode == KeyboardMode::Letters {
@@ -1159,9 +953,9 @@ fn keyboard_draw_list(
         &mut words,
         "SPACE",
         124,
-        756,
+        908,
         300,
-        140,
+        156,
         0xffe2_e8f0,
         pressed_key == Some("SPACE"),
     );
@@ -1171,9 +965,9 @@ fn keyboard_draw_list(
             &mut words,
             "SHIFT",
             432,
-            756,
+            908,
             144,
-            140,
+            156,
             if uppercase { 0xffbf_dbfe } else { 0xffe2_e8f0 },
             pressed_key == Some("SHIFT"),
         );
@@ -1183,9 +977,9 @@ fn keyboard_draw_list(
             &mut words,
             ".",
             432,
-            756,
+            908,
             68,
-            140,
+            156,
             0xffe2_e8f0,
             pressed_key == Some("."),
         );
@@ -1194,9 +988,9 @@ fn keyboard_draw_list(
             &mut words,
             "?",
             508,
-            756,
+            908,
             68,
-            140,
+            156,
             0xffe2_e8f0,
             pressed_key == Some("?"),
         );
@@ -1209,50 +1003,13 @@ fn keyboard_draw_list(
             KeyboardPurpose::WifiPassword { .. } => "JOIN",
         },
         584,
-        756,
+        908,
         112,
-        140,
-        UI_GAIN_GREEN,
+        156,
+        UI_ACCENT_GREEN,
         matches!(pressed_key, Some("SEND" | "JOIN")),
     );
 
-    rect(&mut words, 24, 928, 672, 220, 0xffff_ffff);
-    push_text(
-        ui,
-        &mut words,
-        "CURRENT MODEL BACKEND",
-        44,
-        950,
-        34,
-        0xff64_748b,
-    );
-    push_text_bold(
-        ui,
-        &mut words,
-        &format!("MODEL   {}", backend.model),
-        44,
-        990,
-        34,
-        0xff0f_172a,
-    );
-    push_text_bold(
-        ui,
-        &mut words,
-        &format!("LINK    {}", backend.link),
-        44,
-        1032,
-        34,
-        0xff0f_172a,
-    );
-    push_text_bold(
-        ui,
-        &mut words,
-        &format!("AUTH    {}", backend.auth),
-        44,
-        1074,
-        34,
-        0xff33_4155,
-    );
     draw_key(
         ui,
         &mut words,
@@ -1318,7 +1075,7 @@ fn draw_key(
         label.len() + 1,
         if pressed {
             0xffff_ffff
-        } else if color == UI_GAIN_GREEN {
+        } else if color == UI_ACCENT_GREEN {
             0xff00_0000
         } else {
             0xff0f_172a
@@ -1347,700 +1104,12 @@ fn prompt_tail(input: &str, max_bytes: usize) -> &str {
     &input[start..]
 }
 
-fn robinhood_draw_list(
-    ui: &Ui,
-    state: &DeviceState,
-    portfolio: &PortfolioProjection,
-    account_index: usize,
-    account_count: usize,
-    span: PnlSpan,
-    telemetry: SystemTelemetry,
-) -> Vec<u32> {
-    let mut words = robinhood_base_words(ui, state, "ROBINHOOD", telemetry, false);
-    let trend = if span == PnlSpan::Day {
-        &portfolio.value_day
-    } else {
-        &portfolio.value_week
-    };
-    let accent = if trend.positive {
-        UI_GAIN_GREEN
-    } else {
-        UI_LOSS_RED
-    };
-    account_switcher(ui, &mut words, portfolio, account_index, account_count);
-    push_display(
-        ui,
-        &mut words,
-        &portfolio.total_value,
-        28,
-        166,
-        18,
-        0xffff_ffff,
-    );
-    push_text_bold(
-        ui,
-        &mut words,
-        &format!(
-            "{}  ({})  {}",
-            trend.change,
-            trend.percent,
-            span_label(span)
-        ),
-        30,
-        216,
-        38,
-        accent,
-    );
-    value_chart(ui, &mut words, trend, 28, 252, 664, 160, accent);
-    span_button(ui, &mut words, 28, "1D", span == PnlSpan::Day);
-    span_button(ui, &mut words, 144, "1W", span == PnlSpan::Week);
-
-    metric_card(
-        ui,
-        &mut words,
-        24,
-        508,
-        210,
-        "VALUE",
-        &portfolio.total_value,
-    );
-    metric_card(ui, &mut words, 255, 508, 210, "CASH", &portfolio.cash);
-    metric_card(
-        ui,
-        &mut words,
-        486,
-        508,
-        210,
-        "BUY POWER",
-        &portfolio.buying_power,
-    );
-
-    section_title(ui, &mut words, "ACTIVITY", 28, 640, true);
-    if !portfolio.orders_available {
-        empty_dark_row(ui, &mut words, "ACTIVITY UNAVAILABLE", 680, 144);
-    } else if portfolio.orders.is_empty() {
-        empty_dark_row(ui, &mut words, "NO RECENT ACTIVITY", 680, 144);
-    } else {
-        for (index, order) in portfolio.orders.iter().take(2).enumerate() {
-            compact_activity_row(ui, &mut words, order, 680 + index as i16 * 72);
-        }
-    }
-
-    section_title(ui, &mut words, "POSITIONS", 28, 836, true);
-    if !portfolio.positions_available {
-        empty_dark_row(ui, &mut words, "POSITIONS UNAVAILABLE", 876, 128);
-    } else if portfolio.positions.is_empty() {
-        empty_dark_row(ui, &mut words, "NO OPEN POSITIONS", 876, 128);
-    } else {
-        for (index, position) in portfolio.positions.iter().take(2).enumerate() {
-            let y = 876 + index as i16 * 64;
-            push_text_bold(ui, &mut words, &position.symbol, 40, y + 8, 10, 0xffff_ffff);
-            push_text(
-                ui,
-                &mut words,
-                &format!("{} SH", position.quantity),
-                172,
-                y + 8,
-                14,
-                0xff9c_a3af,
-            );
-            push_text(
-                ui,
-                &mut words,
-                &format!("AVG {}", position.average_price),
-                440,
-                y + 8,
-                16,
-                0xff9c_a3af,
-            );
-            rect(&mut words, 40, y + 52, 640, 1, 0xff27_2d35);
-        }
-    }
-
-    realized_pnl_card(ui, &mut words, portfolio, span);
-    bottom_bar(
-        ui,
-        &mut words,
-        ScreenView::Robinhood,
-        UiCapabilities {
-            settings: true,
-            portfolio: true,
-        },
-    );
-    words
-}
-
-fn account_switcher(
-    ui: &Ui,
-    words: &mut Vec<u32>,
-    portfolio: &PortfolioProjection,
-    account_index: usize,
-    account_count: usize,
-) {
-    rect(words, 24, 116, 672, 46, 0xff12_1519);
-    if account_count == 0 {
-        push_text_bold(ui, words, "ACCOUNT", 40, 129, 8, 0xff7d_8590);
-        push_text_bold(ui, words, &portfolio.status, 156, 129, 34, UI_LOSS_RED);
-        push_text_bold(ui, words, "v", 670, 129, 2, UI_GAIN_GREEN);
-        return;
-    }
-    let label = if portfolio.account_suffix.is_empty() {
-        portfolio.account_label.clone()
-    } else {
-        format!(
-            "{}  ****{}  {}/{}",
-            portfolio.account_label,
-            portfolio.account_suffix,
-            account_index + 1,
-            account_count
-        )
-    };
-    push_text_bold(ui, words, "ACCOUNT", 40, 129, 8, 0xff7d_8590);
-    push_text_bold(
-        ui,
-        words,
-        &label,
-        156,
-        129,
-        30,
-        if portfolio.status == "LIVE / READ ONLY" {
-            0xffff_ffff
-        } else {
-            UI_LOSS_RED
-        },
-    );
-    push_text_bold(ui, words, "v", 670, 129, 2, UI_GAIN_GREEN);
-}
-
-fn span_button(ui: &Ui, words: &mut Vec<u32>, x: i16, label: &str, active: bool) {
-    rect(
-        words,
-        x,
-        456,
-        100,
-        44,
-        if active { UI_GAIN_GREEN } else { 0xff18_1c20 },
-    );
-    push_text_bold(
-        ui,
-        words,
-        label,
-        x + 34,
-        467,
-        8,
-        if active { 0xff00_0000 } else { 0xff9c_a3af },
-    );
-}
-
-fn robinhood_base_words(
-    ui: &Ui,
-    state: &DeviceState,
-    title: &str,
-    telemetry: SystemTelemetry,
-    back: bool,
-) -> Vec<u32> {
-    let mut words = Vec::new();
-    rect(&mut words, 0, 0, PANEL_WIDTH, PANEL_HEIGHT, 0xff00_0000);
-    let header_title = if back {
-        format!("< {title}")
-    } else {
-        title.to_owned()
-    };
-    status_header(
-        ui,
-        &mut words,
-        state,
-        &header_title,
-        telemetry,
-        0xffff_ffff,
-        0xff9c_a3af,
-        0xff6b_7280,
-    );
-    rect(&mut words, 24, 110, 672, 1, 0xff27_2d35);
-    words
-}
-
-fn metric_card(
-    ui: &Ui,
-    words: &mut Vec<u32>,
-    x: i16,
-    y: i16,
-    width: u16,
-    label: &str,
-    value: &str,
-) {
-    rect(words, x, y, width, 104, 0xff12_1519);
-    push_text_bold(ui, words, label, x + 16, y + 16, 13, 0xff7d_8590);
-    push_text_bold(ui, words, value, x + 16, y + 56, 13, 0xffff_ffff);
-}
-
-fn section_title(ui: &Ui, words: &mut Vec<u32>, label: &str, x: i16, y: i16, arrow: bool) {
-    push_title(ui, words, label, x, y, 24, 0xffff_ffff);
-    if arrow {
-        push_text_bold(ui, words, ">", 654, y + 4, 3, UI_GAIN_GREEN);
-    }
-}
-
-fn compact_activity_row(ui: &Ui, words: &mut Vec<u32>, order: &OrderProjection, y: i16) {
-    push_text_bold(ui, words, &order.title, 40, y + 8, 28, 0xffff_ffff);
-    push_text_bold(
-        ui,
-        words,
-        &order.amount,
-        520,
-        y + 26,
-        9,
-        activity_color(order),
-    );
-    push_text(ui, words, &order.timestamp, 40, y + 38, 18, 0xff7d_8590);
-    push_text(ui, words, &order.detail, 284, y + 38, 20, 0xff9c_a3af);
-    rect(words, 40, y + 68, 640, 1, 0xff27_2d35);
-}
-
-fn activity_color(order: &OrderProjection) -> u32 {
-    if order.side == "SELL" {
-        UI_GAIN_GREEN
-    } else {
-        0xffff_ffff
-    }
-}
-
-fn empty_dark_row(ui: &Ui, words: &mut Vec<u32>, label: &str, y: i16, height: u16) {
-    rect(words, 24, y, 672, height, 0xff0d_1013);
-    push_text(ui, words, label, 44, y + 34, 34, 0xff7d_8590);
-}
-
-fn realized_pnl_card(
-    ui: &Ui,
-    words: &mut Vec<u32>,
-    portfolio: &PortfolioProjection,
-    span: PnlSpan,
-) {
-    let pnl = if span == PnlSpan::Day {
-        &portfolio.pnl_day
-    } else {
-        &portfolio.pnl_week
-    };
-    let available = if span == PnlSpan::Day {
-        portfolio.pnl_day_available
-    } else {
-        portfolio.pnl_week_available
-    };
-    rect(words, 24, 1018, 672, 126, 0xff12_1519);
-    push_title(ui, words, "REALIZED P&L", 42, 1036, 24, 0xffff_ffff);
-    push_text(
-        ui,
-        words,
-        &format!("EQUITIES / {}", span_label(span)),
-        44,
-        1080,
-        22,
-        0xff7d_8590,
-    );
-    let color = if !available {
-        UI_LOSS_RED
-    } else if pnl.total.starts_with("-$") {
-        UI_LOSS_RED
-    } else {
-        UI_GAIN_GREEN
-    };
-    push_title(ui, words, &pnl.total, 522, 1056, 11, color);
-}
-
-fn span_label(span: PnlSpan) -> &'static str {
-    match span {
-        PnlSpan::Day => "TODAY",
-        PnlSpan::Week => "WEEK",
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn value_chart(
-    ui: &Ui,
-    words: &mut Vec<u32>,
-    trend: &ValueTrendProjection,
-    x: i16,
-    y: i16,
-    width: u16,
-    height: u16,
-    color: u32,
-) {
-    for dot in 0..42 {
-        rect(
-            words,
-            x + dot * 16,
-            y + height as i16 - 2,
-            4,
-            2,
-            0xff4b_5563,
-        );
-    }
-    chart_axis_labels(ui, words, &trend.x_labels, x, y + height as i16 + 8, width);
-    if trend.points.len() < 2 {
-        push_text(
-            ui,
-            words,
-            "COLLECTING 5M VALUE HISTORY",
-            x + 150,
-            y + 78,
-            30,
-            0xff7d_8590,
-        );
-        rect(
-            words,
-            x + width as i16 - 7,
-            y + height as i16 / 2 - 3,
-            7,
-            7,
-            color,
-        );
-        return;
-    }
-    let min = trend.points.iter().copied().fold(f32::INFINITY, f32::min);
-    let max = trend
-        .points
-        .iter()
-        .copied()
-        .fold(f32::NEG_INFINITY, f32::max);
-    let range = (max - min).max(0.01);
-    let usable_height = height as f32 - 20.0;
-    let mut previous = None;
-    for (index, value) in trend.points.iter().enumerate() {
-        let px = x as f32 + index as f32 * width as f32 / (trend.points.len() - 1) as f32;
-        let py = y as f32 + 10.0 + (max - value) / range * usable_height;
-        if let Some((last_x, last_y)) = previous {
-            line_segment(words, last_x, last_y, px, py, 4.0, color);
-            if index % 7 == 0 {
-                line_segment(words, last_x, last_y, px, py, 1.25, 0xffff_ffff);
-            }
-        }
-        previous = Some((px, py));
-    }
-    if let Some((last_x, last_y)) = previous {
-        rect(words, last_x as i16 - 5, last_y as i16 - 5, 11, 11, color);
-        rect(
-            words,
-            last_x as i16 - 1,
-            last_y as i16 - 1,
-            3,
-            3,
-            0xffff_ffff,
-        );
-    }
-}
-
-fn chart_axis_labels(ui: &Ui, words: &mut Vec<u32>, labels: &[String], x: i16, y: i16, width: u16) {
-    for (index, label) in labels.iter().enumerate() {
-        let label_width = font::text_width(ui, label, font::TextStyle::Body);
-        let label_x = match labels.len() {
-            1 => x + width as i16 - label_width,
-            2 if index == 0 => x,
-            2 => x + width as i16 - label_width,
-            _ if index == 0 => x,
-            _ if index + 1 == labels.len() => x + width as i16 - label_width,
-            _ => x + width as i16 / 2 - label_width / 2,
-        };
-        push_text(ui, words, label, label_x, y, 8, 0xff7d_8590);
-    }
-}
-
-fn line_segment(
-    words: &mut Vec<u32>,
-    x0: f32,
-    y0: f32,
-    x1: f32,
-    y1: f32,
-    thickness: f32,
-    color: u32,
-) {
-    let dx = x1 - x0;
-    let dy = y1 - y0;
-    let length = (dx * dx + dy * dy).sqrt().max(0.001);
-    let nx = -dy / length * thickness * 0.5;
-    let ny = dx / length * thickness * 0.5;
-    let a = (x0 + nx, y0 + ny);
-    let b = (x0 - nx, y0 - ny);
-    let c = (x1 + nx, y1 + ny);
-    let d = (x1 - nx, y1 - ny);
-    tri(words, a, b, c, color);
-    tri(words, b, d, c, color);
-}
-
-fn tri(words: &mut Vec<u32>, a: (f32, f32), b: (f32, f32), c: (f32, f32), color: u32) {
-    words.extend_from_slice(&[
-        spec::draw_op::TRI,
-        xy(a.0.round() as i16, a.1.round() as i16),
-        xy(b.0.round() as i16, b.1.round() as i16),
-        xy(c.0.round() as i16, c.1.round() as i16),
-        color,
-        color,
-        color,
-    ]);
-}
-
-fn accounts_draw_list(
-    ui: &Ui,
-    state: &DeviceState,
-    portfolios: &PortfolioCollection,
-    selected: usize,
-    scroll: usize,
-    telemetry: SystemTelemetry,
-) -> Vec<u32> {
-    let mut words = robinhood_base_words(ui, state, "ACCOUNTS", telemetry, true);
-    if portfolios.accounts.is_empty() {
-        empty_dark_row(
-            ui,
-            &mut words,
-            &portfolios.account(0).status,
-            ACCOUNT_ROW_START_Y,
-            150,
-        );
-    } else {
-        let max_scroll = portfolios
-            .accounts
-            .len()
-            .saturating_sub(ACCOUNT_VISIBLE_ROWS);
-        for (row, account) in portfolios
-            .accounts
-            .iter()
-            .skip(scroll.min(max_scroll))
-            .take(ACCOUNT_VISIBLE_ROWS)
-            .enumerate()
-        {
-            let index = scroll.min(max_scroll) + row;
-            let y = ACCOUNT_ROW_START_Y + row as i16 * ACCOUNT_ROW_HEIGHT;
-            let is_selected = index == selected;
-            rect(
-                &mut words,
-                24,
-                y,
-                584,
-                100,
-                if is_selected {
-                    0xff18_2018
-                } else {
-                    0xff0d_1013
-                },
-            );
-            if is_selected {
-                rect(&mut words, 24, y, 8, 100, UI_GAIN_GREEN);
-            }
-            push_title(
-                ui,
-                &mut words,
-                &account.account_label,
-                44,
-                y + 14,
-                18,
-                0xffff_ffff,
-            );
-            let suffix = if account.account_suffix.is_empty() {
-                "****----".to_owned()
-            } else {
-                format!("****{}", account.account_suffix)
-            };
-            push_text_bold(ui, &mut words, &suffix, 306, y + 20, 12, 0xff9c_a3af);
-            push_text(
-                ui,
-                &mut words,
-                &account.status,
-                44,
-                y + 62,
-                30,
-                if account.status == "LIVE / READ ONLY" {
-                    UI_GAIN_GREEN
-                } else {
-                    UI_LOSS_RED
-                },
-            );
-            if is_selected {
-                push_text_bold(ui, &mut words, "SELECTED", 476, y + 62, 8, UI_GAIN_GREEN);
-            }
-        }
-        if portfolios.accounts.len() == 1 {
-            push_text(
-                ui,
-                &mut words,
-                "ONLY ONE ACCOUNT RETURNED BY CURRENT AUTHORIZATION",
-                36,
-                1088,
-                52,
-                0xff7d_8590,
-            );
-        }
-    }
-    account_scroll_buttons(ui, &mut words, portfolios.accounts.len());
-    bottom_bar(
-        ui,
-        &mut words,
-        ScreenView::Robinhood,
-        UiCapabilities {
-            settings: true,
-            portfolio: true,
-        },
-    );
-    words
-}
-
-fn account_scroll_buttons(ui: &Ui, words: &mut Vec<u32>, account_count: usize) {
-    let color = if account_count > ACCOUNT_VISIBLE_ROWS {
-        UI_GAIN_GREEN
-    } else {
-        0xff4b_5563
-    };
-    rect(words, 628, 156, 68, 132, 0xff18_1c20);
-    push_text_bold(ui, words, "UP", 646, 210, 4, color);
-    rect(words, 628, 972, 68, 132, 0xff18_1c20);
-    push_text_bold(ui, words, "DN", 646, 1026, 4, color);
-}
-
-fn activities_draw_list(
-    ui: &Ui,
-    state: &DeviceState,
-    portfolio: &PortfolioProjection,
-    scroll: usize,
-    telemetry: SystemTelemetry,
-) -> Vec<u32> {
-    let mut words = robinhood_base_words(ui, state, "ACTIVITY", telemetry, true);
-    if !portfolio.orders_available {
-        empty_dark_row(ui, &mut words, "ACTIVITY UNAVAILABLE", 160, 150);
-    } else if portfolio.orders.is_empty() {
-        empty_dark_row(ui, &mut words, "NO ACTIVITY YET", 160, 150);
-    } else {
-        let max_scroll = portfolio.orders.len().saturating_sub(ACTIVITY_VISIBLE_ROWS);
-        for (index, order) in portfolio
-            .orders
-            .iter()
-            .skip(scroll.min(max_scroll))
-            .take(ACTIVITY_VISIBLE_ROWS)
-            .enumerate()
-        {
-            activity_history_row(ui, &mut words, order, 126 + index as i16 * 126);
-        }
-    }
-    activity_scroll_buttons(ui, &mut words);
-    bottom_bar(
-        ui,
-        &mut words,
-        ScreenView::Robinhood,
-        UiCapabilities {
-            settings: true,
-            portfolio: true,
-        },
-    );
-    words
-}
-
-fn activity_history_row(ui: &Ui, words: &mut Vec<u32>, order: &OrderProjection, y: i16) {
-    rect(words, 24, y, 584, 112, 0xff0d_1013);
-    push_text_bold(ui, words, &order.title, 40, y + 14, 27, 0xffff_ffff);
-    push_text_bold(
-        ui,
-        words,
-        &order.amount,
-        472,
-        y + 46,
-        10,
-        activity_color(order),
-    );
-    push_text(ui, words, &order.timestamp, 40, y + 48, 18, 0xff7d_8590);
-    push_text(ui, words, &order.detail, 250, y + 48, 20, 0xff9c_a3af);
-    push_text_bold(ui, words, &order.state, 40, y + 78, 18, UI_GAIN_GREEN);
-}
-
-fn activity_scroll_buttons(ui: &Ui, words: &mut Vec<u32>) {
-    rect(words, 628, 156, 68, 132, 0xff18_1c20);
-    push_text_bold(ui, words, "UP", 646, 210, 4, UI_GAIN_GREEN);
-    rect(words, 628, 972, 68, 132, 0xff18_1c20);
-    push_text_bold(ui, words, "DN", 646, 1026, 4, UI_GAIN_GREEN);
-}
-
-fn positions_draw_list(
-    ui: &Ui,
-    state: &DeviceState,
-    portfolio: &PortfolioProjection,
-    scroll: usize,
-    telemetry: SystemTelemetry,
-) -> Vec<u32> {
-    let mut words = robinhood_base_words(ui, state, "POSITIONS", telemetry, true);
-    if !portfolio.positions_available {
-        empty_dark_row(ui, &mut words, "POSITIONS UNAVAILABLE", 160, 150);
-    } else if portfolio.positions.is_empty() {
-        empty_dark_row(ui, &mut words, "NO OPEN POSITIONS", 160, 150);
-    } else {
-        let max_scroll = portfolio
-            .positions
-            .len()
-            .saturating_sub(POSITION_VISIBLE_ROWS);
-        for (index, position) in portfolio
-            .positions
-            .iter()
-            .skip(scroll.min(max_scroll))
-            .take(POSITION_VISIBLE_ROWS)
-            .enumerate()
-        {
-            let y = 126 + index as i16 * 110;
-            rect(&mut words, 24, y, 584, 98, 0xff0d_1013);
-            push_title(
-                ui,
-                &mut words,
-                &position.symbol,
-                42,
-                y + 14,
-                12,
-                0xffff_ffff,
-            );
-            push_text_bold(
-                ui,
-                &mut words,
-                &format!("{} SH", position.quantity),
-                210,
-                y + 20,
-                18,
-                0xffff_ffff,
-            );
-            push_text(
-                ui,
-                &mut words,
-                &format!("AVERAGE COST  {}", position.average_price),
-                42,
-                y + 62,
-                26,
-                0xff9c_a3af,
-            );
-        }
-    }
-    position_scroll_buttons(ui, &mut words, portfolio.positions.len());
-    bottom_bar(
-        ui,
-        &mut words,
-        ScreenView::Robinhood,
-        UiCapabilities {
-            settings: true,
-            portfolio: true,
-        },
-    );
-    words
-}
-
-fn position_scroll_buttons(ui: &Ui, words: &mut Vec<u32>, position_count: usize) {
-    let color = if position_count > POSITION_VISIBLE_ROWS {
-        UI_GAIN_GREEN
-    } else {
-        0xff4b_5563
-    };
-    rect(words, 628, 156, 68, 132, 0xff18_1c20);
-    push_text_bold(ui, words, "UP", 646, 210, 4, color);
-    rect(words, 628, 972, 68, 132, 0xff18_1c20);
-    push_text_bold(ui, words, "DN", 646, 1026, 4, color);
-}
-
 fn settings_draw_list(
     ui: &Ui,
     state: &DeviceState,
     settings: &SettingsProjection,
+    wifi_scroll: usize,
     backend: &BackendProjection,
-    capabilities: UiCapabilities,
     telemetry: SystemTelemetry,
 ) -> Vec<u32> {
     let mut words = base_words(ui, state, "SETTINGS", telemetry);
@@ -2083,20 +1152,38 @@ fn settings_draw_list(
         0xff64_748b,
     );
     if settings.wifi.networks.is_empty() {
-        rect(&mut words, 24, 326, 672, 112, 0xffe2_e8f0);
+        rect(&mut words, 24, 330, 672, 112, 0xffe2_e8f0);
         push_text_bold(
             ui,
             &mut words,
             "TAP SCAN TO FIND WI-FI",
             52,
-            368,
+            372,
             30,
             0xff64_748b,
         );
     } else {
-        for (row, network) in settings.wifi.networks.iter().take(5).enumerate() {
-            wifi_network_row(ui, &mut words, network, 310 + row as i16 * 96);
+        let max_scroll = settings
+            .wifi
+            .networks
+            .len()
+            .saturating_sub(WIFI_VISIBLE_ROWS);
+        for (row, network) in settings
+            .wifi
+            .networks
+            .iter()
+            .skip(wifi_scroll.min(max_scroll))
+            .take(WIFI_VISIBLE_ROWS)
+            .enumerate()
+        {
+            wifi_network_row(
+                ui,
+                &mut words,
+                network,
+                WIFI_ROW_START_Y as i16 + row as i16 * WIFI_ROW_HEIGHT as i16,
+            );
         }
+        wifi_scroll_buttons(ui, &mut words, settings.wifi.networks.len());
     }
 
     rect(&mut words, 24, 806, 672, 176, 0xffff_ffff);
@@ -2132,12 +1219,12 @@ fn settings_draw_list(
     push_text_bold(ui, &mut words, "FORGET WI-FI", 94, 1038, 18, 0xff0f_172a);
     rect(&mut words, 356, 1010, 340, 80, 0xfffe_e2e2);
     push_text_bold(ui, &mut words, "RESTART DEVICE", 424, 1038, 20, UI_LOSS_RED);
-    bottom_bar(ui, &mut words, ScreenView::Settings, capabilities);
+    bottom_bar(ui, &mut words, ScreenView::Settings);
     words
 }
 
 fn wifi_network_row(ui: &Ui, words: &mut Vec<u32>, network: &WifiNetworkProjection, y: i16) {
-    rect(words, 24, y, 672, 84, 0xffff_ffff);
+    rect(words, 24, y, 584, 84, 0xffff_ffff);
     push_text_bold(ui, words, &network.ssid, 44, y + 24, 34, 0xff0f_172a);
     push_text(
         ui,
@@ -2147,18 +1234,29 @@ fn wifi_network_row(ui: &Ui, words: &mut Vec<u32>, network: &WifiNetworkProjecti
             network.rssi_dbm,
             if network.secured { "LOCK" } else { "OPEN" }
         ),
-        500,
+        444,
         y + 28,
         18,
         0xff64_748b,
     );
 }
 
+fn wifi_scroll_buttons(ui: &Ui, words: &mut Vec<u32>, network_count: usize) {
+    let color = if network_count > WIFI_VISIBLE_ROWS {
+        0xff1d_4ed8
+    } else {
+        0xff94_a3b8
+    };
+    rect(words, 628, 330, 68, 132, 0xffdb_eafe);
+    push_text_bold(ui, words, "UP", 646, 384, 4, color);
+    rect(words, 628, 650, 68, 132, 0xffdb_eafe);
+    push_text_bold(ui, words, "DN", 646, 704, 4, color);
+}
+
 fn files_draw_list(
     ui: &Ui,
     state: &DeviceState,
     browser: &WorkspaceBrowser,
-    capabilities: UiCapabilities,
     telemetry: SystemTelemetry,
 ) -> Vec<u32> {
     let title = if browser.can_go_up() {
@@ -2245,7 +1343,7 @@ fn files_draw_list(
         push_text(ui, &mut words, status, 56, 1056, 32, 0xffb9_1c1c);
     }
     scroll_buttons(ui, &mut words);
-    bottom_bar(ui, &mut words, ScreenView::Files, capabilities);
+    bottom_bar(ui, &mut words, ScreenView::Files);
     words
 }
 
@@ -2406,51 +1504,26 @@ fn message_reader_draw_list(
     words
 }
 
-fn bottom_bar(ui: &Ui, words: &mut Vec<u32>, active: ScreenView, capabilities: UiCapabilities) {
+fn bottom_bar(ui: &Ui, words: &mut Vec<u32>, active: ScreenView) {
     rect(words, 0, BOTTOM_BAR_Y, PANEL_WIDTH, 108, 0xff0f_172a);
-    let tabs = if capabilities.settings && capabilities.portfolio {
-        vec![
-            (8, 166, "CHAT", ScreenView::Chat),
-            (182, 166, "FILES", ScreenView::Files),
-            (356, 166, "SETTINGS", ScreenView::Settings),
-            (530, 182, "ROBIN", ScreenView::Robinhood),
-        ]
-    } else if capabilities.settings {
-        vec![
-            (10, 220, "CHAT", ScreenView::Chat),
-            (250, 220, "FILES", ScreenView::Files),
-            (490, 220, "SETTINGS", ScreenView::Settings),
-        ]
-    } else if capabilities.portfolio {
-        vec![
-            (10, 220, "CHAT", ScreenView::Chat),
-            (250, 220, "FILES", ScreenView::Files),
-            (490, 220, "ROBIN", ScreenView::Robinhood),
-        ]
-    } else {
-        vec![
-            (10, 340, "CHAT", ScreenView::Chat),
-            (370, 340, "FILES", ScreenView::Files),
-        ]
-    };
-    for (x, width, label, view) in tabs {
+    for (x, label, view) in [
+        (10, "CHAT", ScreenView::Chat),
+        (250, "FILES", ScreenView::Files),
+        (490, "SETTINGS", ScreenView::Settings),
+    ] {
         rect(
             words,
             x,
             BOTTOM_BAR_Y + 16,
-            width,
+            220,
             76,
             if active == view {
-                if view == ScreenView::Robinhood {
-                    UI_GAIN_GREEN
-                } else {
-                    0xff25_63eb
-                }
+                0xff25_63eb
             } else {
                 0xff1e_293b
             },
         );
-        let label_x = x + (width as i16 - label.len() as i16 * 12) / 2;
+        let label_x = x + (220 - label.len() as i16 * 12) / 2;
         push_text_bold(ui, words, label, label_x, BOTTOM_BAR_Y + 44, 8, 0xffff_ffff);
     }
 }
@@ -2510,28 +1583,6 @@ fn push_text_bold(
         20,
         color,
         font::TextStyle::Bold,
-    );
-}
-
-fn push_display(
-    ui: &Ui,
-    words: &mut Vec<u32>,
-    text: &str,
-    x: i16,
-    y: i16,
-    max_columns: usize,
-    color: u32,
-) {
-    font::append_text(
-        ui,
-        words,
-        text,
-        x,
-        y,
-        max_columns,
-        1,
-        color,
-        font::TextStyle::Display,
     );
 }
 
