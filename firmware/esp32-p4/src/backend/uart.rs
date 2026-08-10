@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pocket_pi_embedded::ModelBackend;
+use pocket_pi_protocols::model::ModelStreamEvent;
 
 use crate::transport::LineTransport;
 
@@ -23,7 +24,7 @@ impl ModelBackend for UartBackend {
     fn complete(
         &self,
         request_json: &str,
-        _on_delta: &mut dyn FnMut(&str),
+        _on_event: &mut dyn FnMut(ModelStreamEvent),
     ) -> Result<String, String> {
         self.transport.write_line("PPI-RPC-WAITING");
         self.transport
@@ -42,9 +43,6 @@ impl ModelBackend for UartBackend {
             )
             .map_err(|error| format!("UART stream JSON: {error}"))?;
             match event.get("type").and_then(serde_json::Value::as_str) {
-                // Backward-compatible with an older bridge, but do not forward
-                // fine-grained text updates into the embedded Agent runtime.
-                Some("text_delta") => {}
                 Some("done") => {
                     return serde_json::to_string(
                         event

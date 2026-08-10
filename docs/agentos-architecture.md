@@ -774,7 +774,7 @@ Context Assembler 把选定 workspace files 组装成有严格上限的 Agent co
 | `data.fs` | confinement、quota、atomic replace | App files 和 config |
 | `net.http` | TLS、credential、policy allowlist、limits、non-blocking transport | `fetch()`、endpoint 选择和 domain decoding |
 | `mcp.client` | auth、session、framing、limits | safe operation mapping 和 domain semantics |
-| `model.stream` | provider transport、内部 stream decode 和完整 result | Agent policy；ESP32 presentation 每次 request 只接收一次完整文本更新 |
+| `model.stream` | provider transport、内部 stream decode 和完整 result | Agent policy；thinking/text delta 在每次 host poll 合并后进入 Guest，Root View 只渲染正文 delta |
 | `schedule.wake` | clock、persistence、claiming | AgentWake 或 AppTask declaration |
 | `shell.bounded` | allowlisted device/workspace operations | Agent 决定何时调用 |
 | `device.settings` | Wi-Fi、NVS、restart | Settings View |
@@ -813,7 +813,7 @@ Guest 中运行，但 Root View 暂不产生前台 DrawList。用户仍可操作
 | 当前能力 | 新架构归属 |
 | --- | --- |
 | model request 和 streaming | `model.stream` + Pi Agent Runtime |
-| OpenAI/OpenRouter/Anthropic/UART adapters | Host/provider adapters |
+| OpenAI/OpenRouter/Anthropic/DeepSeek/UART adapters | Host/provider adapters |
 | workspace read/write/edit/find/grep/ls | Root Agent workspace Tools |
 | bounded bash | `shell.bounded` |
 | `device.status` 和 `time.now` | native device/time Tools |

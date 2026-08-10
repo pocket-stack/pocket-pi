@@ -1532,11 +1532,20 @@ mod tests {
         fn complete(
             &self,
             _request_json: &str,
-            on_delta: &mut dyn FnMut(&str),
+            on_event: &mut dyn FnMut(pocket_pi_embedded::ModelStreamEvent),
         ) -> Result<String, String> {
             std::thread::sleep(Duration::from_millis(20));
-            on_delta("background-ok");
-            Ok(r#"{"text":"background-ok"}"#.to_owned())
+            on_event(pocket_pi_embedded::ModelStreamEvent::Text(
+                "background-ok".into(),
+            ));
+            Ok(serde_json::json!({
+                "thinking":"",
+                "text":"background-ok",
+                "toolCalls":[],
+                "usage":{},
+                "stopReason":"stop"
+            })
+            .to_string())
         }
     }
 
@@ -1558,20 +1567,32 @@ mod tests {
         fn complete(
             &self,
             _request_json: &str,
-            on_delta: &mut dyn FnMut(&str),
+            on_event: &mut dyn FnMut(pocket_pi_embedded::ModelStreamEvent),
         ) -> Result<String, String> {
             if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
                 Ok(serde_json::json!({
-                    "toolCall":{
+                    "thinking":"get portfolio",
+                    "thinkingSignature":"reasoning_content",
+                    "text":"",
+                    "toolCalls":[{
                         "id":"call_portfolio",
                         "name":"robinhood.get_portfolio",
                         "arguments":{"account_number":"SIM-001"}
-                    }
+                    }],
+                    "usage":{},
+                    "stopReason":"toolUse"
                 })
                 .to_string())
             } else {
-                on_delta("tool-ok");
-                Ok(r#"{"text":"tool-ok"}"#.to_owned())
+                on_event(pocket_pi_embedded::ModelStreamEvent::Text("tool-ok".into()));
+                Ok(serde_json::json!({
+                    "thinking":"",
+                    "text":"tool-ok",
+                    "toolCalls":[],
+                    "usage":{},
+                    "stopReason":"stop"
+                })
+                .to_string())
             }
         }
     }

@@ -90,6 +90,10 @@ pub fn run() -> anyhow::Result<()> {
     };
 
     let model_settings = runtime_config.model.clone();
+    let wireless_model = matches!(
+        model_settings.backend,
+        ModelBackendSettings::Wireless { .. }
+    );
     let provider = match model_settings.backend {
         ModelBackendSettings::Uart { .. } => "uart",
         ModelBackendSettings::Wireless { provider } => provider.id(),
@@ -151,7 +155,8 @@ pub fn run() -> anyhow::Result<()> {
     let config = json!({
         "provider":provider,
         "model":resolved_model,
-        "systemPrompt":"You are Pi Agent, the first-class system App in Pocket Pi AgentOS on an ESP32-P4. You can manage the top-level /workspace and use installed App tools. Be concise. Robinhood data is owned by the Robinhood App; Exa research history is owned by the Exa App."
+        "thinkingLevel":model_settings.thinking_level.id(),
+        "systemPrompt":"You are Pi Agent, the first-class system App in Pocket Pi AgentOS on an ESP32-P4. You can manage the top-level /workspace and use installed App tools. Use /workspace for durable memory, notes, plans, and artifacts; read and update relevant files when continuity matters. Be concise. Robinhood data is owned by the Robinhood App; Exa research history is owned by the Exa App."
     });
     supervisor.boot_agent(&config.to_string(), backend, Arc::new(routed_tools))?;
 
@@ -417,6 +422,7 @@ pub fn run() -> anyhow::Result<()> {
                         }
                     }
                     AgentEvent::Done => {
+                        log::info!("Pi Agent turn completed");
                         agent_status = "IDLE";
                         busy = false;
                     }
@@ -439,6 +445,7 @@ pub fn run() -> anyhow::Result<()> {
             && !busy
             && initial_prompt.is_some()
             && Instant::now() >= initial_prompt_not_before
+            && (!wireless_model || network_ready.load(Ordering::Acquire))
         {
             if let Some(prompt) = initial_prompt.take() {
                 submit_prompt(

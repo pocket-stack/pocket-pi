@@ -101,6 +101,9 @@ OPENROUTER_API_KEY=... \
 ANTHROPIC_API_KEY=... \
   cargo xtask run esp32-p4-sim \
   --backend anthropic --model claude-sonnet-4-6
+
+DEEPSEEK_API_KEY=... DEEPSEEK_THINKING_LEVEL=xhigh \
+  cargo xtask run esp32-p4-sim --backend deepseek
 ```
 
 The window uses the ESP32's 720x1280 coordinate system. Mouse input is mapped
@@ -170,13 +173,18 @@ Backends belong to their host composition, not to the Agent core:
 | Host | Supported backends |
 |---|---|
 | Native macOS | OpenAI, Anthropic, offline Faux Provider |
-| ESP32 simulator | local Codex, OpenAI, OpenRouter, Anthropic |
-| Physical ESP32-P4 | UART to Mac Codex or Claude Code; wireless OpenAI, OpenRouter or Anthropic |
+| ESP32 simulator | local Codex, OpenAI, OpenRouter, Anthropic, DeepSeek V4 |
+| Physical ESP32-P4 | UART to Mac Codex or Claude Code; wireless OpenAI, OpenRouter, Anthropic or DeepSeek V4 |
 
 `UartBackend` and `WirelessBackend` expose the same streaming model boundary to
 the embedded Agent. Provider request/streaming codecs live in
 `pocket-pi-protocols`; serial framing, desktop CLIs and ESP-IDF HTTPS stay in
 their platform layers.
+
+DeepSeek defaults to `deepseek-v4-pro` with thinking level `high`. Set
+`DEEPSEEK_THINKING_LEVEL=xhigh` in the simulator, or pass
+`--thinking-level xhigh` while provisioning the physical board, to request the
+provider's `max` reasoning effort.
 
 ## Embedded Agent capabilities
 

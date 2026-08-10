@@ -5,11 +5,8 @@ use embedded_svc::io::Write;
 use esp_idf_svc::http::client::{Configuration, EspHttpConnection};
 use pocket_pi_embedded::ModelBackend;
 use pocket_pi_protocols::anthropic_messages;
-use pocket_pi_protocols::model::WirelessProvider;
+use pocket_pi_protocols::model::{ModelStreamEvent, WirelessProvider};
 use pocket_pi_protocols::openai_chat;
-
-const MAX_REQUEST_BYTES: usize = 128 * 1024;
-const MAX_RESPONSE_BYTES: usize = 128 * 1024;
 
 pub struct WirelessBackend {
     provider: WirelessProvider,
@@ -34,6 +31,10 @@ impl WirelessBackend {
                 "https://openrouter.ai/api/v1/chat/completions",
                 openai_chat::build_request_for(pi_request, openai_chat::Dialect::OpenRouter)?,
             )),
+            WirelessProvider::DeepSeek => Ok((
+                "https://api.deepseek.com/chat/completions",
+                openai_chat::build_request_for(pi_request, openai_chat::Dialect::DeepSeek)?,
+            )),
             WirelessProvider::Anthropic => Ok((
                 "https://api.anthropic.com/v1/messages",
                 anthropic_messages::build_request(pi_request)?,
@@ -46,12 +47,9 @@ impl ModelBackend for WirelessBackend {
     fn complete(
         &self,
         request_json: &str,
-        _on_delta: &mut dyn FnMut(&str),
+        on_event: &mut dyn FnMut(ModelStreamEvent),
     ) -> Result<String, String> {
         let (endpoint, body) = self.request(request_json)?;
-        if body.len() > MAX_REQUEST_BYTES {
-            return Err("model request exceeded 128 KiB".into());
-        }
         let content_length = body.len().to_string();
         let bearer = format!("Bearer {}", self.api_key);
         let mut headers = vec![
@@ -65,7 +63,9 @@ impl ModelBackend for WirelessBackend {
                 headers.push(("x-api-key", self.api_key.as_str()));
                 headers.push(("anthropic-version", "2023-06-01"));
             }
-            WirelessProvider::OpenAi | WirelessProvider::OpenRouter => {
+            WirelessProvider::OpenAi
+            | WirelessProvider::OpenRouter
+            | WirelessProvider::DeepSeek => {
                 headers.push(("authorization", bearer.as_str()));
             }
         }
@@ -96,11 +96,13 @@ impl ModelBackend for WirelessBackend {
         let status = response.status();
         let mut decoder = match self.provider {
             WirelessProvider::Anthropic => ProviderStream::Anthropic(Default::default()),
+            WirelessProvider::DeepSeek => {
+                ProviderStream::Chat(openai_chat::Stream::new(openai_chat::Dialect::DeepSeek))
+            }
             WirelessProvider::OpenAi | WirelessProvider::OpenRouter => {
                 ProviderStream::Chat(Default::default())
             }
         };
-        let mut received = 0usize;
         let mut pending = Vec::with_capacity(4 * 1024);
         let mut chunk = [0u8; 2 * 1024];
         loop {
@@ -110,13 +112,9 @@ impl ModelBackend for WirelessBackend {
             if count == 0 {
                 break;
             }
-            received = received.saturating_add(count);
-            if received > MAX_RESPONSE_BYTES {
-                return Err("model response exceeded 128 KiB".into());
-            }
             pending.extend_from_slice(&chunk[..count]);
             if (200..300).contains(&status) {
-                drain_sse_lines(&mut pending, &mut decoder)?;
+                drain_sse_lines(&mut pending, &mut decoder, on_event)?;
             }
         }
         if !(200..300).contains(&status) {
@@ -131,7 +129,7 @@ impl ModelBackend for WirelessBackend {
         }
         if !pending.is_empty() {
             pending.push(b'\n');
-            drain_sse_lines(&mut pending, &mut decoder)?;
+            drain_sse_lines(&mut pending, &mut decoder, on_event)?;
         }
         decoder.finish()
     }
@@ -140,6 +138,7 @@ impl ModelBackend for WirelessBackend {
 fn drain_sse_lines(
     pending: &mut Vec<u8>,
     decoder: &mut ProviderStream,
+    on_event: &mut dyn FnMut(ModelStreamEvent),
 ) -> Result<(), String> {
     while let Some(end) = pending.iter().position(|byte| *byte == b'\n') {
         let mut line = pending.drain(..=end).collect::<Vec<_>>();
@@ -153,7 +152,9 @@ fn drain_sse_lines(
         };
         let data = data.trim_start();
         if !data.is_empty() && data != "[DONE]" {
-            let _ = decoder.push(data)?;
+            for event in decoder.push(data)? {
+                on_event(event);
+            }
         }
     }
     Ok(())
@@ -165,7 +166,7 @@ enum ProviderStream {
 }
 
 impl ProviderStream {
-    fn push(&mut self, data: &str) -> Result<Option<String>, String> {
+    fn push(&mut self, data: &str) -> Result<Vec<ModelStreamEvent>, String> {
         match self {
             Self::Chat(stream) => stream.push(data),
             Self::Anthropic(stream) => stream.push(data),

@@ -15,7 +15,7 @@ View. The Pi Agent Root View displays Chat, Apps, Files and Settings; there is
 no parallel Rust product UI.
 
 The physical host selects `UartBackend` for a Mac Codex/Claude Code bridge or
-`WirelessBackend` for direct OpenAI/OpenRouter/Anthropic HTTPS. These remain
+`WirelessBackend` for direct OpenAI/OpenRouter/Anthropic/DeepSeek HTTPS. These remain
 host adapters; they do not belong in the UI or embedded Agent core.
 
 ```sh
@@ -45,6 +45,8 @@ OPENROUTER_API_KEY=... cargo xtask run esp32-p4-sim \
   --backend openrouter --model openai/gpt-5.6
 ANTHROPIC_API_KEY=... cargo xtask run esp32-p4-sim \
   --backend anthropic --model claude-sonnet-4-6
+DEEPSEEK_API_KEY=... DEEPSEEK_THINKING_LEVEL=xhigh \
+  cargo xtask run esp32-p4-sim --backend deepseek
 
 # Real Agent -> native write tool -> simulated LittleFS workspace
 cargo xtask run esp32-p4-sim --backend codex \

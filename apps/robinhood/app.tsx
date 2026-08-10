@@ -392,7 +392,7 @@ function Chart() {
       <View class="relative w-[632] h-[160] overflow-hidden">
         <View class="absolute w-[632] h-[2] bg-slate-200" style={{ posType: 1, insetL: 0, insetT: 158 }} />
         <Text class="absolute text-sm text-slate-500 font-bold" style={{ posType: 1, insetL: 174, insetT: 72 }}>{chartPoints().length < 2 ? "COLLECTING 5M VALUE HISTORY" : ""}</Text>
-        <For each={chartSegments()}>{(item) => <View class={trend().positive ? "absolute rounded-lg bg-emerald-500" : "absolute rounded-lg bg-red-500"} style={{ posType: 1, insetL: item.x, insetT: item.y - 2, width: item.width, height: 4, rotate: item.angle, originX: 0, originY: 0.5 }} />}</For>
+        <For each={chartSegments()}>{(item) => <View class={trend().positive ? "absolute rounded-lg bg-emerald-500" : "absolute rounded-lg bg-red-500"} style={{ posType: 1, insetL: item.x, insetT: item.y - 2, width: item.width, height: 4, rotate: item.angle, originX: -0.5, originY: 0 }} />}</For>
         <For each={chartPoints()}>{(item) => <View class={trend().positive ? "absolute w-[9] h-[9] rounded-lg bg-emerald-500" : "absolute w-[9] h-[9] rounded-lg bg-red-500"} style={{ posType: 1, insetL: item.x - 4, insetT: item.y - 4 }} />}</For>
       </View>
       <View class="h-[36] px-1 flex-row items-center justify-between"><Text class="text-sm text-slate-500">{chartLabels()[0] || ""}</Text><Text class="text-sm text-slate-500">{chartLabels()[1] || ""}</Text><Text class="text-sm text-slate-500">{chartLabels()[2] || ""}</Text></View>

@@ -26,8 +26,8 @@ ROBINHOOD_KEYCHAIN_SERVICE = "Codex MCP Credentials"
 ROBINHOOD_KEYCHAIN_ACCOUNT = "robinhood-trading|5cbe81c78ff5ae58"
 EXA_KEYCHAIN_SERVICE = "Pocket Pi Credentials"
 EXA_KEYCHAIN_ACCOUNT = "exa-api-key"
-WIFI_KEYCHAIN_SERVICE = "Pocket Pi Wi-Fi"
-WIFI_KEYCHAIN_ACCOUNT = "TUF WIFI6"
+DEEPSEEK_KEYCHAIN_SERVICE = "Pocket Pi Credentials"
+DEEPSEEK_KEYCHAIN_ACCOUNT = "deepseek-api-key"
 
 
 def keychain_secret(service: str, account: str) -> str | None:
@@ -79,10 +79,9 @@ def exa_api_key() -> str | None:
     return keychain_secret(EXA_KEYCHAIN_SERVICE, EXA_KEYCHAIN_ACCOUNT)
 
 
-def saved_wifi() -> tuple[str, str] | None:
-    """Load the development board Wi-Fi without exposing it to source or logs."""
-    password = keychain_secret(WIFI_KEYCHAIN_SERVICE, WIFI_KEYCHAIN_ACCOUNT)
-    return (WIFI_KEYCHAIN_ACCOUNT, password) if password else None
+def deepseek_api_key() -> str | None:
+    """Load the user-provided DeepSeek key from macOS Keychain."""
+    return keychain_secret(DEEPSEEK_KEYCHAIN_SERVICE, DEEPSEEK_KEYCHAIN_ACCOUNT)
 
 
 def write_line(fd: int, line: str) -> None:
@@ -128,24 +127,25 @@ def config(args: argparse.Namespace) -> dict[str, object]:
     }
     if args.model:
         value["model"] = args.model
-    wifi = None if args.provision_wifi else saved_wifi()
-    if wifi:
-        value["wifiSsid"], value["wifiPassword"] = wifi
-        print(f"Wi-Fi: provisioning {wifi[0]} from Keychain", flush=True)
+    value["thinkingLevel"] = args.thinking_level
     if args.provision_wifi:
         value["wifiSsid"] = input("Wi-Fi SSID: ").strip()
         value["wifiPassword"] = getpass.getpass("Wi-Fi password: ")
     if args.backend == "wireless":
-        value["modelApiKey"] = getpass.getpass(f"{provider} API key: ")
-    if args.provision_exa:
-        key = exa_api_key()
+        key = deepseek_api_key() if provider == "deepseek" else None
+        if key:
+            value["modelApiKey"] = key
+            print("DeepSeek: reusing Keychain API key (RAM only on device)", flush=True)
+        else:
+            value["modelApiKey"] = getpass.getpass(f"{provider} API key: ")
+    key = exa_api_key()
+    if key:
+        value["exaApiKey"] = key
+        print("Exa: reusing Keychain API key (RAM only on device)", flush=True)
+    elif args.provision_exa:
+        key = getpass.getpass("Exa API key: ")
         if key:
             value["exaApiKey"] = key
-            print("Exa: reusing Keychain API key (RAM only on device)", flush=True)
-        else:
-            key = getpass.getpass("Exa API key: ")
-            if key:
-                value["exaApiKey"] = key
     token = robinhood_access_token()
     if token:
         value["robinhoodAccessToken"] = token
@@ -170,9 +170,10 @@ def main() -> int:
     parser.add_argument("--backend", choices=("uart", "wireless"), default="uart")
     parser.add_argument(
         "--provider",
-        choices=("codex", "claude-code", "openai", "openrouter", "anthropic"),
+        choices=("codex", "claude-code", "openai", "openrouter", "anthropic", "deepseek"),
     )
     parser.add_argument("--model")
+    parser.add_argument("--thinking-level", choices=("high", "xhigh"), default="high")
     parser.add_argument("--prompt", help="submit one prompt after the board agent is ready")
     parser.add_argument(
         "--prompt-delay-seconds",
@@ -189,8 +190,8 @@ def main() -> int:
     provider = args.provider or ("codex" if args.backend == "uart" else "openai")
     if args.backend == "uart" and provider not in ("codex", "claude-code"):
         parser.error("UART provider must be codex or claude-code")
-    if args.backend == "wireless" and provider not in ("openai", "openrouter", "anthropic"):
-        parser.error("wireless provider must be openai, openrouter or anthropic")
+    if args.backend == "wireless" and provider not in ("openai", "openrouter", "anthropic", "deepseek"):
+        parser.error("wireless provider must be openai, openrouter, anthropic or deepseek")
     runtime_config = config(args)
     model_backend = create_backend(provider) if args.backend == "uart" else None
 
@@ -250,13 +251,14 @@ def main() -> int:
                             request_payload,
                             emit_delta,
                         )
-                        call = result.get("toolCall")
-                        if isinstance(call, dict):
-                            print(
-                                f"[bridge] ESP tool {call.get('name')}: "
-                                + json.dumps(call.get("arguments", {}), ensure_ascii=False),
-                                flush=True,
-                            )
+                        calls = result.get("toolCalls")
+                        if isinstance(calls, list) and calls:
+                            for call in calls:
+                                print(
+                                    f"[bridge] ESP tool {call.get('name')}: "
+                                    + json.dumps(call.get("arguments", {}), ensure_ascii=False),
+                                    flush=True,
+                                )
                         elif isinstance(result.get("text"), str):
                             print(f"[bridge] Pi reply: {result['text']}", flush=True)
                             print(

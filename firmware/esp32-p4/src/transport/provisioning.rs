@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use pocket_pi_protocols::model::{
-    ModelBackendSettings, ModelSettings, UartProvider, WirelessProvider,
+    ModelBackendSettings, ModelSettings, ThinkingLevel, UartProvider, WirelessProvider,
 };
 
 use super::LineTransport;
@@ -44,7 +44,7 @@ pub fn request_runtime_config(
         ("uart", "claude-code") => ModelBackendSettings::Uart {
             provider: UartProvider::ClaudeCode,
         },
-        ("wireless", "openai" | "openrouter" | "anthropic") => {
+        ("wireless", "openai" | "openrouter" | "anthropic" | "deepseek") => {
             if model_api_key.is_none() {
                 return Err(format!("{provider} requires modelApiKey"));
             }
@@ -53,19 +53,25 @@ pub fn request_runtime_config(
                     "openai" => WirelessProvider::OpenAi,
                     "openrouter" => WirelessProvider::OpenRouter,
                     "anthropic" => WirelessProvider::Anthropic,
+                    "deepseek" => WirelessProvider::DeepSeek,
                     _ => unreachable!(),
                 },
             }
         }
         ("uart", _) => return Err("UART provider must be codex or claude-code".into()),
         ("wireless", _) => {
-            return Err("wireless provider must be openai, openrouter or anthropic".into())
+            return Err("wireless provider must be openai, openrouter, anthropic or deepseek".into())
         }
         _ => return Err("model backend must be uart or wireless".into()),
     };
     let model = ModelSettings {
         backend: model_backend,
         model: text(&value, "model", 128)?,
+        thinking_level: match text(&value, "thinkingLevel", 8)?.as_deref() {
+            None | Some("high") => ThinkingLevel::High,
+            Some("xhigh") => ThinkingLevel::Xhigh,
+            Some(_) => return Err("thinkingLevel must be high or xhigh".into()),
+        },
     };
     model.resolved_model()?;
     Ok(RuntimeConfig {

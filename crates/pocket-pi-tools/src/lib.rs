@@ -104,13 +104,19 @@ impl ToolHost for CoreToolHost {
             Err(error) => return ToolResult::error(format!("invalid tool arguments: {error}")),
         };
         match self.execute_value(call_id, name, &args) {
-            Ok(result) => ToolResult {
-                text: result.text,
-                details: result.details,
-                is_error: false,
-                terminate: result.terminate,
-            },
-            Err(error) => ToolResult::error(error),
+            Ok(result) => {
+                log::info!("Native tool {name} completed");
+                ToolResult {
+                    text: result.text,
+                    details: result.details,
+                    is_error: false,
+                    terminate: result.terminate,
+                }
+            }
+            Err(error) => {
+                log::warn!("Native tool {name} failed: {error}");
+                ToolResult::error(error)
+            }
         }
     }
 }
@@ -151,7 +157,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use pocket_pi_embedded::{ModelBackend, PiEmbedded};
+    use pocket_pi_embedded::{ModelBackend, ModelStreamEvent, PiEmbedded};
 
     struct TestPlatform;
 
@@ -244,7 +250,7 @@ mod tests {
         fn complete(
             &self,
             request_json: &str,
-            on_delta: &mut dyn FnMut(&str),
+            on_event: &mut dyn FnMut(ModelStreamEvent),
         ) -> Result<String, String> {
             let request: Value = serde_json::from_str(request_json).unwrap();
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
@@ -257,11 +263,16 @@ mod tests {
                     .collect::<Vec<_>>();
                 assert!(names.contains(&"write"));
                 return Ok(json!({
-                    "toolCall":{
+                    "thinking":"use write",
+                    "thinkingSignature":"reasoning_content",
+                    "text":"",
+                    "toolCalls":[{
                         "id":"write-1",
                         "name":"write",
                         "arguments":{"path":"agent-created.txt","content":"created through pi-agent-core"}
-                    }
+                    }],
+                    "usage":{},
+                    "stopReason":"toolUse"
                 })
                 .to_string());
             }
@@ -270,8 +281,15 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|message| message["role"] == "toolResult"));
-            on_delta("tool complete");
-            Ok(json!({"text":"tool complete"}).to_string())
+            on_event(ModelStreamEvent::Text("tool complete".into()));
+            Ok(json!({
+                "thinking":"",
+                "text":"tool complete",
+                "toolCalls":[],
+                "usage":{},
+                "stopReason":"stop"
+            })
+            .to_string())
         }
     }
 
