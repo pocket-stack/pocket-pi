@@ -1007,12 +1007,31 @@ isolation 和 lifecycle。App Bundle 拥有名称、schema、provider mapping、
     `searches=1`、`search_results=0`、`documents=0`；
     `robinhood.storage_status` 返回 9 张新 domain tables，其中 `refresh_runs=1`、
     其余业务表为 0。旧 `tool_events/search_history/raw JSON` 表均不存在。
+22. Exa 只保存有上限的规范化字段，不保存 provider 原始 JSON：每次 search 最多
+    8 条结果、highlight 最多 1200 字符，document text 最多 12000 字符。每个
+    search/fetch 写事务同时删除 7 天前的 searches、对应 search_results 和
+    documents；SQLite freelist 页面留作后续写入复用，不在闪存上自动执行
+    `VACUUM`。`research.storage_status` 只返回行数、allocated/reusable bytes、
+    retention policy 和最近一次运行状态，不再把完整 schema 或多行内容送入模型。
+    该策略直接 bump `dataVersion`/schema v4 并一次性重建 Exa cache，不保留旧索引
+    或兼容迁移分支。
+23. 正式 `pocket-net` 路径已在实体 ESP32-P4 上完成 Exa provider success：一次
+    `research.search` 完成后 storage counts 为 `searches=4`、`search_results=13`、
+    `documents=2`，其中新增 search 为 `ok` 且有 3 条结果。紧凑版
+    `research.storage_status` 的实机
+    Agent 回复为 114 字符，报告 4/13/2、7-day retention 和 57344/0 bytes；继续
+    观察 30 秒没有 watchdog。最终 schema v4 镜像又确认旧 cache 被一次性 reset，
+    compact status 先为 0/0/0；随后同一镜像的 provider search 持久化成功，重启后
+    status 为 schema 4/4、1 search、3 results、0 documents、latest `ok`/3，继续
+    观察 30 秒仍无 watchdog。
+24. UART bridge 现在默认复用 Keychain 中已有的 Robinhood OAuth session，并只把
+    access token 注入板子的 RAM-only boot config；`--provision-robinhood` 只在没有
+    saved authorization 时交互补录。未传该 flag 的实机 `get_accounts` 已完成 MCP
+    initialize 与 provider HTTP 200，收到 7222-byte body，不再出现
+    `OAuth token not provided`。
 
 ### 22.2 待补齐，不能视为已实现
 
-- 正式 `pocket-net` 路径已通过 Simulator E2E 与 ESP32-P4 release cross-build；
-  尚未刷板验证一次新的 Exa provider success，因此不能把旧同步 service 路径的
-  实机证据沿用为新 NET adapter 的实体板证据。
 - Root Files 已有只读文件阅读器；conversation/message/run/tool call 还没有落入
   `data/agent.sqlite`。
 - release 已有 descriptor/`pocket.json` 校验和 atomic `current` 写入，但由
@@ -1026,16 +1045,15 @@ isolation 和 lifecycle。App Bundle 拥有名称、schema、provider mapping、
   LRU/residency policy，也不能把 App UI/数据逻辑写回 Rust。
 - Robinhood OAuth grant 与 Exa key 都由 Mac Keychain 复用，并只在本次 UART
   boot config 中以内存态注入；credential 不进入 App DB、workspace 或 View。
-  上一个 schema 的物理板验证曾证明 Exa/Robinhood provider -> SQLite -> View
-  链路可达；本节定义的新 normalized schema 已在实体板创建，并验证断网 terminal
-  rows 与 storage projection，但尚未取得一次新 schema 下的 provider success。
+  当前 normalized schema 已分别取得 Exa search 和 Robinhood get_accounts 的实机
+  provider success。
   `agent.robinhood.com` 从当前 AP 建连仍有波动，失败轮次会写 error batch，但不会
   覆盖最后一次成功的 portfolio projection。
 - 实机已验证后台 Agent turn，但“turn 运行中连续触摸切换 Robinhood/Exa 再返回”
   仍需人工操作验收；自动 lifecycle/tool-routing test 已覆盖同一状态机路径。
 - 通用 Data Action runner 已在当前实机验证 FreeRTOS pthread stack、断网
-  failure transaction、SQLite dump 与 network fail-fast；真实 provider success、
-  持续触摸切换和成功/失败交替 retry 仍待验证。
+  failure transaction、SQLite dump、network fail-fast 与 provider success；持续
+  触摸切换和成功/失败交替 retry 仍待验证。
 - 当前修改型 App Tool 返回的是 queued run receipt，Data Action completion 记录在
   App SQLite 和日志。若 Agent 需要同步获得 provider 的最终 ToolResult，应在后续
   增加一个 bounded completion delivery contract；不能为此把网络调用搬回 View

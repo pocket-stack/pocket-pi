@@ -6,7 +6,9 @@ const nativeDb = (globalThis as any).db;
 const handle = nativeDb.open("exa");
 if (handle < 0) throw new Error("open exa.sqlite");
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
+const RETENTION_DAYS = 7;
+const RETENTION_SECONDS = RETENTION_DAYS * 24 * 60 * 60;
 
 function dbError(): string { return String(nativeDb.lastError(handle) || "SQLite operation failed"); }
 function exec(sql: string): void { if (nativeDb.exec(handle, sql) !== 0) throw new Error(dbError()); }
@@ -20,7 +22,10 @@ function run(sql: string, args: any[] = []): any { return query(sql, args); }
 const version = query("PRAGMA user_version") as { user_version?: number } | null;
 if (Number(version?.user_version ?? 0) !== SCHEMA_VERSION) {
   exec(`
-    CREATE TABLE IF NOT EXISTS searches (
+    DROP TABLE IF EXISTS search_results;
+    DROP TABLE IF EXISTS searches;
+    DROP TABLE IF EXISTS documents;
+    CREATE TABLE searches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     query TEXT NOT NULL,
     searched_at INTEGER NOT NULL,
@@ -28,8 +33,8 @@ if (Number(version?.user_version ?? 0) !== SCHEMA_VERSION) {
     result_count INTEGER NOT NULL DEFAULT 0,
     error TEXT
   );
-  CREATE INDEX IF NOT EXISTS searches_recent ON searches(id DESC);
-  CREATE TABLE IF NOT EXISTS search_results (
+  CREATE INDEX searches_retention ON searches(searched_at);
+  CREATE TABLE search_results (
     search_id INTEGER NOT NULL,
     rank INTEGER NOT NULL,
     title TEXT,
@@ -40,8 +45,7 @@ if (Number(version?.user_version ?? 0) !== SCHEMA_VERSION) {
     highlight TEXT,
     PRIMARY KEY(search_id, rank)
   );
-  CREATE INDEX IF NOT EXISTS search_results_url ON search_results(url);
-  CREATE TABLE IF NOT EXISTS documents (
+  CREATE TABLE documents (
     url TEXT PRIMARY KEY,
     fetched_at INTEGER NOT NULL,
     title TEXT,
@@ -49,12 +53,18 @@ if (Number(version?.user_version ?? 0) !== SCHEMA_VERSION) {
     author TEXT,
     text TEXT NOT NULL
   );
-  CREATE INDEX IF NOT EXISTS documents_recent ON documents(fetched_at DESC);
-    PRAGMA user_version=3;
+  CREATE INDEX documents_recent ON documents(fetched_at DESC);
+    PRAGMA user_version=4;
   `);
 }
 
 function now(): number { return Math.floor(Date.now() / 1000); }
+function cleanupExpired(referenceTime: number): void {
+  const cutoff = referenceTime - RETENTION_SECONDS;
+  run("DELETE FROM search_results WHERE search_id IN (SELECT id FROM searches WHERE searched_at < ?)", [cutoff]);
+  run("DELETE FROM searches WHERE searched_at < ?", [cutoff]);
+  run("DELETE FROM documents WHERE fetched_at < ?", [cutoff]);
+}
 function text(value: unknown): string | null {
   return value === null || value === undefined || typeof value === "object" ? null : String(value);
 }
@@ -127,14 +137,18 @@ async function search(args: any): Promise<any> {
           [searchId, rank, firstText(item, ["title"]), url, firstText(item, ["publishedDate", "published_at", "date"]), firstText(item, ["author"]), firstText(item, ["score"]), highlight(item)],
         );
       });
+      cleanupExpired(searchedAt);
     });
     return value;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    transaction(() => run(
-      "INSERT INTO searches(query,searched_at,status,result_count,error) VALUES(?,?,?,0,?)",
-      [searchQuery, searchedAt, "error", message],
-    ));
+    transaction(() => {
+      run(
+        "INSERT INTO searches(query,searched_at,status,result_count,error) VALUES(?,?,?,0,?)",
+        [searchQuery, searchedAt, "error", message],
+      );
+      cleanupExpired(searchedAt);
+    });
     throw error;
   }
 }
@@ -153,12 +167,16 @@ async function fetchDocument(args: any): Promise<any> {
   if (!document) throw new Error("Exa returned no document");
   const url = firstText(document, ["url", "id"]) || requestedUrl;
   const body = firstText(document, ["text", "content", "summary"]) || "";
-  transaction(() => run(
-    `INSERT INTO documents(url,fetched_at,title,published_at,author,text) VALUES(?,?,?,?,?,?)
-     ON CONFLICT(url) DO UPDATE SET fetched_at=excluded.fetched_at,title=excluded.title,
-       published_at=excluded.published_at,author=excluded.author,text=excluded.text`,
-    [url, now(), firstText(document, ["title"]), firstText(document, ["publishedDate", "published_at", "date"]), firstText(document, ["author"]), body],
-  ));
+  const fetchedAt = now();
+  transaction(() => {
+    run(
+      `INSERT INTO documents(url,fetched_at,title,published_at,author,text) VALUES(?,?,?,?,?,?)
+       ON CONFLICT(url) DO UPDATE SET fetched_at=excluded.fetched_at,title=excluded.title,
+         published_at=excluded.published_at,author=excluded.author,text=excluded.text`,
+      [url, fetchedAt, firstText(document, ["title"]), firstText(document, ["publishedDate", "published_at", "date"]), firstText(document, ["author"]), body],
+    );
+    cleanupExpired(fetchedAt);
+  });
   return {
     status: "ok",
     provider: "exa",

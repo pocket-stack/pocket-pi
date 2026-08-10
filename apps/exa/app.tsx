@@ -3,7 +3,8 @@ import { Text, View } from "@pocketjs/framework/components";
 import { mount } from "@pocketjs/framework";
 import { Database } from "@pocketjs/framework/db";
 
-const DB_SCHEMA_VERSION = 3;
+const DB_SCHEMA_VERSION = 4;
+const RETENTION_DAYS = 7;
 const db = new Database("exa");
 
 type SearchRow = { id: number; query: string; searched_at: number; status: string; result_count: number; top_title: string | null; top_url: string | null; error: string | null };
@@ -44,28 +45,42 @@ function loadView(revision: number) {
   }
 }
 
-function storageStatus(): any {
-  const tables = db.query("SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as unknown as Array<{ name: string; sql: string }>;
-  const names = new Set(tables.map((table) => table.name));
-  const tableSummary = tables.map((table) => {
-    const rowCount = (db.query("SELECT COUNT(*) AS count FROM " + table.name).get() as unknown as { count: number }).count;
-    return { name: table.name, rowCount, schema: table.sql };
-  });
-  const latestSearches = names.has("searches") ? db.query(`
-    SELECT search.id,search.query,search.searched_at,search.status,search.result_count,
-           result.title AS top_title,result.url AS top_url,search.error
-    FROM searches search
-    LEFT JOIN search_results result ON result.search_id=search.id AND result.rank=0
-    ORDER BY search.id DESC LIMIT 8
-  `).all() : [];
-  const latestDocuments = names.has("documents")
-    ? db.query("SELECT fetched_at,url,title,LENGTH(text) AS text_bytes FROM documents ORDER BY fetched_at DESC LIMIT 5").all() : [];
-  return {
+function storageStatus(): { text: string; details: any } {
+  const tableRows = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as unknown as Array<{ name: string }>;
+  const names = new Set(tableRows.map((table) => table.name));
+  const count = (table: string): number => names.has(table)
+    ? Number((db.query(`SELECT COUNT(*) AS count FROM ${table}`).get() as unknown as { count?: number } | null)?.count ?? 0)
+    : 0;
+  const pageSize = Number((db.query("PRAGMA page_size").get() as unknown as { page_size?: number } | null)?.page_size ?? 0);
+  const pageCount = Number((db.query("PRAGMA page_count").get() as unknown as { page_count?: number } | null)?.page_count ?? 0);
+  const freelistCount = Number((db.query("PRAGMA freelist_count").get() as unknown as { freelist_count?: number } | null)?.freelist_count ?? 0);
+  const schemaVersion = Number((db.query("PRAGMA user_version").get() as unknown as { user_version?: number } | null)?.user_version ?? 0);
+  const latestSearch = names.has("searches") ? db.query(`
+    SELECT id,searched_at,status,result_count,error
+    FROM searches ORDER BY id DESC LIMIT 1
+  `).get() : null;
+  const tableCounts = {
+    searches: count("searches"),
+    searchResults: count("search_results"),
+    documents: count("documents"),
+  };
+  const details = {
     database: "exa.sqlite",
-    schemaVersion: DB_SCHEMA_VERSION,
-    tables: tableSummary,
-    latestSearches,
-    latestDocuments,
+    schemaVersion,
+    expectedSchemaVersion: DB_SCHEMA_VERSION,
+    retentionDays: RETENTION_DAYS,
+    tableCounts,
+    allocatedBytes: pageSize * pageCount,
+    reusableBytes: pageSize * freelistCount,
+    latestSearch,
+  };
+  const latest = latestSearch as null | { id?: number; status?: string; result_count?: number };
+  const latestText = latest
+    ? ` Latest #${latest.id ?? "?"}: ${latest.status ?? "unknown"}, ${latest.result_count ?? 0} results.`
+    : " No searches yet.";
+  return {
+    text: `Exa storage (schema ${schemaVersion}/${DB_SCHEMA_VERSION}): ${tableCounts.searches} searches, ${tableCounts.searchResults} results, ${tableCounts.documents} documents; ${RETENTION_DAYS}-day retention; ${details.allocatedBytes} bytes allocated (${details.reusableBytes} reusable).${latestText}`,
+    details,
   };
 }
 
@@ -128,7 +143,7 @@ mount(() => <Exa />);
     try {
       const value = name === "research.storage_status" ? storageStatus()
         : (() => { throw new Error("Data-writing tools run in the background App Data Action"); })();
-      return JSON.stringify({ text: JSON.stringify(value), details: value, isError: false });
+      return JSON.stringify({ text: value.text, details: value.details, isError: false });
     } catch (error) {
       return JSON.stringify({ text: error instanceof Error ? error.message : String(error), isError: true });
     }

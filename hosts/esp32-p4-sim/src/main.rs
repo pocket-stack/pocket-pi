@@ -846,33 +846,67 @@ mod tests {
         assert_eq!(result.details["status"], "queued");
         wait_for(|| {
             let storage = supervisor.invoke_tool("research.storage_status", "{}");
-            storage.details["latestSearches"]
-                .as_array()
-                .is_some_and(|rows| !rows.is_empty())
+            storage.details["tableCounts"]["searches"] == 1
         });
         assert!(temp.path().join("apps/exa/data/exa.sqlite").exists());
         let storage = supervisor.invoke_tool("research.storage_status", "{}");
         assert!(!storage.is_error, "{}", storage.text);
-        let searches = storage.details["tables"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|table| table["name"] == "searches")
-            .unwrap();
-        assert_eq!(searches["rowCount"], 1);
-        let results = storage.details["tables"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|table| table["name"] == "search_results")
-            .unwrap();
-        assert_eq!(results["rowCount"], 2);
-        assert!(storage.details["tables"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|table| table["name"] != "search_history"));
-        assert_eq!(storage.details["latestSearches"][0]["status"], "ok");
+        assert_eq!(storage.details["tableCounts"]["searches"], 1);
+        assert_eq!(storage.details["tableCounts"]["searchResults"], 2);
+        assert_eq!(storage.details["tableCounts"]["documents"], 0);
+        assert_eq!(storage.details["retentionDays"], 7);
+        assert_eq!(storage.details["schemaVersion"], 4);
+        assert_eq!(storage.details["expectedSchemaVersion"], 4);
+        assert_eq!(storage.details["latestSearch"]["status"], "ok");
+        assert!(storage.text.len() < 240, "{}", storage.text);
+        assert!(storage.details.get("tables").is_none());
+        assert!(storage.details.get("latestSearches").is_none());
+    }
+
+    #[test]
+    fn exa_write_removes_rows_older_than_seven_days() {
+        init_logs();
+        let temp = tempfile::tempdir().unwrap();
+        let mut supervisor =
+            AppSupervisor::new(temp.path(), Arc::new(SimAppServices::default())).unwrap();
+        let first = supervisor.invoke_tool("research.search", r#"{"query":"old search"}"#);
+        assert!(!first.is_error, "{}", first.text);
+        wait_for(|| {
+            supervisor
+                .invoke_tool("research.storage_status", "{}")
+                .details["tableCounts"]["searches"]
+                == 1
+        });
+
+        let mut database =
+            pocket_db::DbModule::new(pocket_db::Storage::Dir(temp.path().join("apps/exa/data")));
+        let handle = database.open("exa");
+        assert!(handle >= 0);
+        assert_eq!(
+            database.exec(
+                handle,
+                "UPDATE searches SET searched_at=0;\
+                 INSERT INTO documents(url,fetched_at,title,published_at,author,text)\
+                 VALUES('https://expired.example',0,NULL,NULL,NULL,'expired');",
+            ),
+            0,
+            "{}",
+            database.last_error(handle)
+        );
+        database.close(handle);
+
+        let second = supervisor.invoke_tool("research.search", r#"{"query":"new search"}"#);
+        assert!(!second.is_error, "{}", second.text);
+        wait_for(|| {
+            supervisor
+                .invoke_tool("research.storage_status", "{}")
+                .details["latestSearch"]["id"]
+                == 2
+        });
+        let storage = supervisor.invoke_tool("research.storage_status", "{}");
+        assert_eq!(storage.details["tableCounts"]["searches"], 1);
+        assert_eq!(storage.details["tableCounts"]["searchResults"], 2);
+        assert_eq!(storage.details["tableCounts"]["documents"], 0);
     }
 
     #[test]
@@ -888,7 +922,13 @@ mod tests {
 
         let exa = supervisor.invoke_tool("research.storage_status", "{}");
         assert!(!exa.is_error, "{}", exa.text);
-        assert!(exa.details["tables"].as_array().unwrap().is_empty());
+        assert_eq!(exa.details["tableCounts"]["searches"], 0);
+        assert_eq!(exa.details["tableCounts"]["searchResults"], 0);
+        assert_eq!(exa.details["tableCounts"]["documents"], 0);
+        assert_eq!(exa.details["retentionDays"], 7);
+        assert_eq!(exa.details["schemaVersion"], 0);
+        assert_eq!(exa.details["expectedSchemaVersion"], 4);
+        assert!(exa.details["latestSearch"].is_null());
     }
 
     #[test]

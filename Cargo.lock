@@ -2629,6 +2629,7 @@ dependencies = [
  "anyhow",
  "env_logger",
  "log",
+ "pocket-db",
  "pocket-pi-agentos",
  "pocket-pi-embedded",
  "pocket-pi-protocols",

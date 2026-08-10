@@ -22,3 +22,6 @@ tempfile = "3"
 ureq = { version = "2.12", features = ["json"] }
 wgpu = "25"
 winit = "0.30"
+
+[dev-dependencies]
+pocket-db.workspace = true

@@ -158,6 +158,11 @@ interactively. Wi-Fi can subsequently be changed from the device Settings UI
 without reflashing. Credentials are kept out of Agent workspace files and
 PocketJS UI state.
 
+The UART bridge automatically reuses an existing authorized Robinhood session
+from Keychain and injects its access token into the board's RAM-only boot
+configuration. `--provision-robinhood` is only the interactive fallback when no
+saved authorization exists.
+
 ## Model backends
 
 Backends belong to their host composition, not to the Agent core:

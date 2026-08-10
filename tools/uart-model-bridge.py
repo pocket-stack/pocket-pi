@@ -128,11 +128,11 @@ def config(args: argparse.Namespace) -> dict[str, object]:
     }
     if args.model:
         value["model"] = args.model
-    wifi = saved_wifi()
+    wifi = None if args.provision_wifi else saved_wifi()
     if wifi:
         value["wifiSsid"], value["wifiPassword"] = wifi
         print(f"Wi-Fi: provisioning {wifi[0]} from Keychain", flush=True)
-    elif args.provision_wifi:
+    if args.provision_wifi:
         value["wifiSsid"] = input("Wi-Fi SSID: ").strip()
         value["wifiPassword"] = getpass.getpass("Wi-Fi password: ")
     if args.backend == "wireless":
@@ -146,18 +146,17 @@ def config(args: argparse.Namespace) -> dict[str, object]:
             key = getpass.getpass("Exa API key: ")
             if key:
                 value["exaApiKey"] = key
-    if args.provision_robinhood:
-        token = robinhood_access_token()
+    token = robinhood_access_token()
+    if token:
+        value["robinhoodAccessToken"] = token
+        print(
+            "Robinhood: reusing existing authorized Codex MCP session (RAM only)",
+            flush=True,
+        )
+    elif args.provision_robinhood:
+        token = getpass.getpass("Robinhood OAuth access token: ")
         if token:
             value["robinhoodAccessToken"] = token
-            print(
-                "Robinhood: reusing existing authorized Codex MCP session (RAM only)",
-                flush=True,
-            )
-        else:
-            token = getpass.getpass("Robinhood OAuth access token: ")
-            if token:
-                value["robinhoodAccessToken"] = token
     if args.prompt:
         value["initialPrompt"] = args.prompt
         if args.prompt_delay_seconds:
