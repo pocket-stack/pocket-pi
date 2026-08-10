@@ -497,12 +497,13 @@ fn with_data_action_pthread_config<T>(
 ) -> anyhow::Result<T> {
     // std::thread maps to ESP-IDF pthread. Its default stack allocation is
     // internal RAM, where a QuickJS Data Action Guest cannot fit. Configure
-    // only this child creation to use byte-addressable PSRAM, then restore the
-    // platform default for unrelated threads created later by the System App.
+    // this worker family to use byte-addressable PSRAM. The Data Action thread
+    // must pass the allocation caps to its on-demand NET child; the platform
+    // default is restored before unrelated System App threads are created.
     let default = unsafe { esp_idf_svc::sys::esp_pthread_get_default_config() };
     let mut config = default;
     config.stack_size = DATA_ACTION_STACK_BYTES;
-    config.inherit_cfg = false;
+    config.inherit_cfg = true;
     config.pin_to_core = 1;
     config.stack_alloc_caps =
         esp_idf_svc::sys::MALLOC_CAP_SPIRAM | esp_idf_svc::sys::MALLOC_CAP_8BIT;

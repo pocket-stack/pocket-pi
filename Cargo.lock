@@ -2565,6 +2565,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pocket-net"
+version = "0.1.0"
+source = "git+https://github.com/pocket-stack/pocketjs.git?rev=9c809bbd047ddc75c27caa4990951a78d942477a#9c809bbd047ddc75c27caa4990951a78d942477a"
+dependencies = [
+ "anyhow",
+ "pocket-mod",
+ "pocketjs-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pocket-pi"
 version = "0.1.0"
 dependencies = [
@@ -2592,6 +2604,7 @@ dependencies = [
  "pocket-db",
  "pocket-fs",
  "pocket-mod",
+ "pocket-net",
  "pocket-pi-embedded",
  "pocket-ui-surface",
  "pocketjs-core",

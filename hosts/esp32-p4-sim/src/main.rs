@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
@@ -6,7 +7,8 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Result};
 use pocket3d::gpu::{Gpu, OffscreenTarget};
 use pocket_pi_agentos::{
-    AppServiceHost, AppSupervisor, AppToolRequest, RoutedToolHost, EXA_APP_ID, ROOT_APP_ID,
+    AppServiceHost, AppSupervisor, AppToolRequest, HttpRequest, NetFailure, RoutedToolHost,
+    TransportCompletion, EXA_APP_ID, ROOT_APP_ID,
 };
 use pocket_pi_embedded::{AgentEvent, ToolHost};
 use pocket_pi_tools::{CoreToolHost, PlatformTools};
@@ -257,31 +259,54 @@ impl AppServiceHost for SimAppServices {
             ("robinhood", "mcp.client", "callTool", name) => {
                 Ok(json!({"operation":name,"simulated":true,"args":tool_args}))
             }
-            ("exa", "net.http", "post", _)
-                if args.get("path").and_then(Value::as_str) == Some("/search") =>
-            {
-                let query = args
-                    .get("body")
-                    .unwrap_or(&Value::Null)
-                    .get("query")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Pocket Pi");
-                Ok(json!({"results":[
-                    {"title":format!("Research result for {query}"),"url":"https://example.com/research"},
-                    {"title":"PocketJS runtime notes","url":"https://pocketjs.dev/docs/concepts/"}
-                ]}))
-            }
-            ("exa", "net.http", "post", _)
-                if args.get("path").and_then(Value::as_str) == Some("/contents") =>
-            {
-                Ok(json!({
-                    "results":[{"title":"Simulated Exa document","url":"https://example.com/research","text":"Local simulator fixture"}]
-                }))
-            }
             _ => Err(format!(
                 "unsupported simulated service call: {app_id}/{service}/{operation}"
             )),
         }
+    }
+
+    fn http(
+        &self,
+        app_id: &str,
+        request: HttpRequest,
+    ) -> std::result::Result<TransportCompletion, NetFailure> {
+        if app_id != EXA_APP_ID || request.method != "POST" {
+            return Err(NetFailure::new(
+                "invalid_request",
+                "simulator denied HTTP request",
+            ));
+        }
+        let body: Value = serde_json::from_slice(&request.body)
+            .map_err(|error| NetFailure::new("invalid_request", error.to_string()))?;
+        let value = match request.url.as_str() {
+            "https://api.exa.ai/search" => {
+                let query = body
+                    .get("query")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Pocket Pi");
+                json!({"results":[
+                    {"title":format!("Research result for {query}"),"url":"https://example.com/research"},
+                    {"title":"PocketJS runtime notes","url":"https://pocketjs.dev/docs/concepts/"}
+                ]})
+            }
+            "https://api.exa.ai/contents" => json!({
+                "results":[{"title":"Simulated Exa document","url":"https://example.com/research","text":"Local simulator fixture"}]
+            }),
+            _ => {
+                return Err(NetFailure::new(
+                    "invalid_request",
+                    "simulator denied HTTP URL",
+                ))
+            }
+        };
+        Ok(TransportCompletion::Done {
+            handle: request.handle,
+            status: 200,
+            url: request.url,
+            headers: BTreeMap::from([("content-type".into(), "application/json".into())]),
+            body: serde_json::to_vec(&value)
+                .map_err(|error| NetFailure::new("other", error.to_string()))?,
+        })
     }
 }
 

@@ -90,15 +90,10 @@ fn build_agentos_apps(root: &Path) -> Result<()> {
         if data_entry.is_file() {
             command(
                 Command::new("bun")
-                    .arg("build")
+                    .arg(root.join("tools/build-agentos-data.ts"))
                     .arg(&data_entry)
-                    .arg(format!(
-                        "--outfile={}",
-                        app_root.join("dist/data-action.js").display()
-                    ))
-                    .arg("--target=browser")
-                    .arg("--format=iife")
-                    .arg("--minify"),
+                    .arg(app_root.join("dist/data-action.js"))
+                    .arg(&pocketjs),
                 &format!("building AgentOS data action {app}"),
             )?;
         }

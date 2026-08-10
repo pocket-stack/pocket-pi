@@ -8,13 +8,11 @@ use embedded_svc::http::{client::Client as HttpClient, Method};
 use embedded_svc::io::Write as _;
 use esp_idf_svc::http::client::{Configuration, EspHttpConnection};
 use esp_idf_svc::io::EspIOError;
-use pocket_pi_agentos::AppServiceHost;
+use pocket_pi_agentos::{AppServiceHost, HttpRequest, NetFailure, TransportCompletion};
 use serde_json::{json, Value};
 
-const EXA_ORIGIN: &str = "https://api.exa.ai";
 const ROBINHOOD_MCP_URL: &str = "https://agent.robinhood.com/mcp/trading";
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
-const MAX_EXA_RESPONSE: usize = 96 * 1024;
 const MAX_MCP_RESPONSE: usize = 160 * 1024;
 
 pub struct EspAppServices {
@@ -68,30 +66,44 @@ impl EspAppServicesInner {
         )
     }
 
-
-    fn exa_post(&self, args: &Value) -> Result<Value, String> {
+    fn exa_http(
+        &self,
+        request: HttpRequest,
+    ) -> std::result::Result<TransportCompletion, NetFailure> {
+        if request.method != "POST"
+            || !matches!(
+                request.url.as_str(),
+                "https://api.exa.ai/search" | "https://api.exa.ai/contents"
+            )
+        {
+            return Err(NetFailure::new(
+                "invalid_request",
+                "Exa NET capability permits only POST /search and /contents",
+            ));
+        }
+        if request
+            .headers
+            .keys()
+            .any(|name| !matches!(name.as_str(), "accept" | "content-type"))
+        {
+            return Err(NetFailure::new(
+                "invalid_request",
+                "Exa App supplied a forbidden HTTP header",
+            ));
+        }
+        let body: Value = serde_json::from_slice(&request.body)
+            .map_err(|error| NetFailure::new("invalid_request", error.to_string()))?;
+        if !body.is_object() {
+            return Err(NetFailure::new(
+                "invalid_request",
+                "Exa request body must be a JSON object",
+            ));
+        }
         let api_key = self
             .exa_api_key
             .as_deref()
-            .ok_or_else(|| "Exa API key was not provisioned for this boot".to_owned())?;
-        if args.get("connection").and_then(Value::as_str) != Some("exa") {
-            return Err("Exa App requested an unknown net connection".to_owned());
-        }
-        let path = args
-            .get("path")
-            .and_then(Value::as_str)
-            .filter(|path| matches!(*path, "/search" | "/contents"))
-            .ok_or_else(|| "Exa connection only permits /search and /contents".to_owned())?;
-        let body = args
-            .get("body")
-            .filter(|body| body.is_object())
-            .ok_or_else(|| "net.http post requires an object body".to_owned())?;
-        post_json(
-            &format!("{EXA_ORIGIN}{path}"),
-            &[("x-api-key", api_key)],
-            body,
-            MAX_EXA_RESPONSE,
-        )
+            .ok_or_else(|| NetFailure::new("unavailable", "Exa API key was not provisioned"))?;
+        execute_exa_http(request, api_key)
     }
 
     fn robinhood_call(&self, args: &Value) -> Result<Value, String> {
@@ -307,21 +319,35 @@ impl AppServiceHost for EspAppServices {
             return Err("Network is not connected; App data was not changed".to_owned());
         }
         match (app_id, service, operation) {
-            ("exa", "net.http", "post") => self.inner.exa_post(args),
             ("robinhood", "mcp.client", "callTool") => self.inner.robinhood_call(args),
             ("robinhood", "mcp.client", "callTools") => self.inner.robinhood_calls(args),
             _ => Err(format!("App {app_id} cannot access service {service}")),
         }
     }
+
+    fn http(
+        &self,
+        app_id: &str,
+        request: HttpRequest,
+    ) -> std::result::Result<TransportCompletion, NetFailure> {
+        if !self.inner.network_ready.load(Ordering::Acquire) {
+            return Err(NetFailure::new("unavailable", "network is not connected"));
+        }
+        if app_id != "exa" {
+            return Err(NetFailure::new(
+                "invalid_request",
+                format!("App {app_id} has no NET capability"),
+            ));
+        }
+        self.inner.exa_http(request)
+    }
 }
 
-fn client() -> Result<HttpClient<EspHttpConnection>, String> {
+fn client(timeout: Duration) -> Result<HttpClient<EspHttpConnection>, String> {
     EspHttpConnection::new(&Configuration {
         buffer_size: Some(8 * 1024),
         buffer_size_tx: Some(4 * 1024),
-        // A service call is still synchronous in v1, so a dead network must
-        // fail quickly enough for the App to leave its visible loading state.
-        timeout: Some(Duration::from_secs(12)),
+        timeout: Some(timeout),
         crt_bundle_attach: Some(esp_idf_svc::sys::esp_crt_bundle_attach),
         ..Default::default()
     })
@@ -338,47 +364,66 @@ fn transient_mcp_connect(error: &str) -> bool {
     error.contains("ESP_ERR_HTTP_CONNECT")
 }
 
-fn post_json(
-    url: &str,
-    extra_headers: &[(&str, &str)],
-    body: &Value,
-    limit: usize,
-) -> Result<Value, String> {
-    let payload = body.to_string();
-    let length = payload.len().to_string();
-    let mut headers = vec![
+fn execute_exa_http(
+    meta: HttpRequest,
+    api_key: &str,
+) -> std::result::Result<TransportCompletion, NetFailure> {
+    let length = meta.body.len().to_string();
+    let headers = [
         ("accept", "application/json"),
         ("content-type", "application/json"),
         ("content-length", length.as_str()),
         ("connection", "close"),
         ("user-agent", "pocket-pi-agentos/0.1"),
+        ("x-api-key", api_key),
     ];
-    headers.extend_from_slice(extra_headers);
-    let mut client = client()?;
+    let mut client =
+        client(Duration::from_millis(u64::from(meta.timeout_ms))).map_err(net_failure)?;
     let mut request = client
-        .request(Method::Post, url, &headers)
-        .map_err(|error| format!("create HTTPS request: {error}"))?;
+        .request(Method::Post, &meta.url, &headers)
+        .map_err(|error| net_failure(format!("create HTTPS request: {error}")))?;
     request
-        .write_all(payload.as_bytes())
-        .map_err(|error| format!("write HTTPS request: {error}"))?;
+        .write_all(&meta.body)
+        .map_err(|error| net_failure(format!("write HTTPS request: {error}")))?;
     request
         .flush()
-        .map_err(|error| format!("flush HTTPS request: {error}"))?;
+        .map_err(|error| net_failure(format!("flush HTTPS request: {error}")))?;
     let mut response = request
         .submit()
-        .map_err(|error| format!("send HTTPS request: {error}"))?;
+        .map_err(|error| net_failure(format!("send HTTPS request: {error}")))?;
     let status = response.status();
+    let content_type = response.header("content-type").map(str::to_owned);
     let expected_length = response
         .header("content-length")
         .and_then(|value| value.parse::<usize>().ok());
-    let bytes = read_bounded(&mut response, limit, expected_length)?;
-    if !(200..300).contains(&status) {
-        return Err(format!(
-            "HTTPS {status}: {}",
-            String::from_utf8_lossy(&bytes)
-        ));
+    let body = read_bounded(&mut response, meta.max_bytes, expected_length).map_err(net_failure)?;
+    let mut response_headers = BTreeMap::new();
+    if let Some(content_type) = content_type {
+        response_headers.insert("content-type".to_owned(), content_type);
     }
-    serde_json::from_slice(&bytes).map_err(|error| format!("parse HTTPS JSON: {error}"))
+    Ok(TransportCompletion::Done {
+        handle: meta.handle,
+        status,
+        url: meta.url,
+        headers: response_headers,
+        body,
+    })
+}
+
+fn net_failure(message: String) -> NetFailure {
+    let lower = message.to_ascii_lowercase();
+    let code = if lower.contains("exceeded") {
+        "response_too_large"
+    } else if lower.contains("timeout") {
+        "timeout"
+    } else if lower.contains("tls") || lower.contains("certificate") {
+        "tls"
+    } else if lower.contains("connect") {
+        "connect"
+    } else {
+        "other"
+    };
+    NetFailure::new(code, message)
 }
 
 fn post_mcp(
@@ -405,7 +450,7 @@ fn post_mcp(
     if let Some(session) = session {
         headers.push(("mcp-session-id", session));
     }
-    let mut client = client()?;
+    let mut client = client(Duration::from_secs(12))?;
     let mut request = client
         .request(Method::Post, ROBINHOOD_MCP_URL, &headers)
         .map_err(|error| format!("create Robinhood MCP request: {error}"))?;
@@ -477,7 +522,7 @@ fn post_mcp_batch(
     if let Some(session) = session {
         headers.push(("mcp-session-id", session));
     }
-    let mut client = client()?;
+    let mut client = client(Duration::from_secs(12))?;
     let mut request = client
         .request(Method::Post, ROBINHOOD_MCP_URL, &headers)
         .map_err(|error| format!("create Robinhood MCP batch request: {error}"))?;

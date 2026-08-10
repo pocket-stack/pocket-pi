@@ -561,22 +561,27 @@ function refreshPortfolio(args) {       // 只在 headless Data Action Guest
 
 ### 12.3 Exa 如何接入
 
-Exa 使用同一套边界，但走受限的 native `net.http` connection，而不是把 API
-key 或任意 URL 交给 Bundle：
+Exa 使用正式 PocketJS `fetch()` / `pocket-net` contract，而不是私有同步
+`services.call("net.http")`。Bundle 选择 Exa endpoint，native policy 再把它限制为
+两个固定 URL；API key 不进入 Bundle：
 
 ```text
 research.search / research.fetch
   -> Exa private task
-  -> net.http(connection="exa", path="/search" | "/contents")
+  -> fetch("https://api.exa.ai/search" | "/contents")
+  -> pocket-net start（立即返回 handle）
+  -> native HTTPS worker（注入 x-api-key）
+  -> tick boundary drain / fetch Promise resolve
   -> normalize response
   -> transaction 写 searches / search_results / documents
   -> app.commit() 递增 Exa revision
   -> 前台下一 rendered frame 最多重查一次搜索历史 projection
 ```
 
-Firmware 注入 credential、绑定 host/path、执行 TLS 和 response limit；Exa
-Bundle 拥有请求字段、结果归一化、SQLite schema 和搜索历史 View。这样 Exa
-不是 Rust 固件里的特例。
+Firmware 注入 credential、执行 host/path allowlist、TLS、timeout 和 response
+limit；Exa Bundle 拥有 endpoint 选择、请求字段、结果归一化、SQLite schema 和
+搜索历史 View。native transport 不调用 QuickJS；只有 Data Action runner 的 tick
+把完成事件带回 Guest。
 
 Native transport 在进入 ESP HTTP/MCP 之前必须读取一个无锁 connection-ready
 状态；未完成 association/DHCP 时立即向 Data Action 返回 error，不能让断网请求
@@ -767,7 +772,7 @@ Context Assembler 把选定 workspace files 组装成有严格上限的 Agent co
 | `ui` | retained tree、layout、text、animation、DrawList | JSX View 和 reactive state |
 | `data.sqlite` | SQLite、handles、limits、storage binding | schema、migrations、queries、transactions |
 | `data.fs` | confinement、quota、atomic replace | App files 和 config |
-| `net.http` | TLS、connection、limits、transport | endpoint 和 domain decoding |
+| `net.http` | TLS、credential、policy allowlist、limits、non-blocking transport | `fetch()`、endpoint 选择和 domain decoding |
 | `mcp.client` | auth、session、framing、limits | safe operation mapping 和 domain semantics |
 | `model.stream` | provider transport、内部 stream decode 和完整 result | Agent policy；ESP32 presentation 每次 request 只接收一次完整文本更新 |
 | `schedule.wake` | clock、persistence、claiming | AgentWake 或 AppTask declaration |
@@ -915,10 +920,10 @@ isolation 和 lifecycle。App Bundle 拥有名称、schema、provider mapping、
 
 1. PocketJS 固定在 upstream `origin/main` revision
    `9c809bbd047ddc75c27caa4990951a78d942477a`；Simulator 和 ESP32-P4 共用
-   正式合并的 `pocket-fs`、`pocket-db`、`pocket-mod` 和
-   `pocket-ui-surface` contracts。该 revision 同时包含正式 `pocket-net`
-   contract；Pocket Pi 对它的 Host adapter/mount 属于下一阶段，不在依赖迁移中
-   伪装成已经接入。
+   正式合并的 `pocket-fs`、`pocket-db`、`pocket-mod`、`pocket-net` 和
+   `pocket-ui-surface` contracts。Exa Data Action 已使用正式 `fetch()` API；
+   `pocket-net` 的 `start/cancel/drain` 由独立 native worker 实现，completion 只在
+   Data Action tick boundary 进入 Guest。
 2. Pi Agent 位于顶层 `/workspace`；Root View release 位于
    `/workspace/data/view`，其中 `app.js` 和 `agent.js` 是同一个 System App
    release；普通 App 位于 `/workspace/apps/<id>`。
@@ -947,8 +952,9 @@ isolation 和 lifecycle。App Bundle 拥有名称、schema、provider mapping、
    table，不保存原始 Tool payload。View 只拥有 accounts/portfolio/positions/
    activity/chart 的 bounded projection 和 cache。chart 的 1D/1W 窗口固定为 20 个
    time buckets，SQLite query 最多返回 20 行，render 不读取 DB。
-10. Exa Data Action 拥有 `research.search`、`research.fetch`、HTTP mapping 与
-    SQLite transaction；View 从 `searches + search_results` 只读取最近 8 次搜索。
+10. Exa Data Action 拥有 `research.search`、`research.fetch`、PocketJS `fetch()`
+    mapping 与 SQLite transaction；native 只允许 Exa 的 `/search`、`/contents`
+    并注入 API key。View 从 `searches + search_results` 只读取最近 8 次搜索。
 11. Root View 已提供 Chat、App 入口、Files、Runs/Schedules、Settings 摘要和
    屏幕键盘；Agent policy/loop 在 JS，workspace/App Tools 的受限底层实现和
    AgentWake 由 Rust host 提供。Pocket Pi 的小型 shared Design System inventory
@@ -956,7 +962,9 @@ isolation 和 lifecycle。App Bundle 拥有名称、schema、provider mapping、
    typography/tokens/components，不包含 App-specific View 或 native UI logic。
 12. ESP32-P4 使用 4 KiB PSRAM launcher，待 ESP-IDF entry task 退出后创建 64
     KiB internal AgentOS runtime stack；App bundle 构建后会 minify 以降低固件
-    footprint，但不会把 minify 当作 stack isolation。
+    footprint，但不会把 minify 当作 stack isolation。App Data pthread 使用 128
+    KiB PSRAM stack，并把 PSRAM allocation caps 只继承给按需创建的 96 KiB NET
+    worker；System App 的其他线程仍使用恢复后的 platform default。
 13. Simulator tests 已证明：Agent turn 进行中打开 Robinhood，仍能收到完整回复
     和 `agent_end`；前后台切换前后 System App Guest identity 不变；Exa 在前台
     时 Agent 仍能路由 Robinhood App Tool、写 SQLite 并完成 turn。新增 contract
@@ -1002,6 +1010,9 @@ isolation 和 lifecycle。App Bundle 拥有名称、schema、provider mapping、
 
 ### 22.2 待补齐，不能视为已实现
 
+- 正式 `pocket-net` 路径已通过 Simulator E2E 与 ESP32-P4 release cross-build；
+  尚未刷板验证一次新的 Exa provider success，因此不能把旧同步 service 路径的
+  实机证据沿用为新 NET adapter 的实体板证据。
 - Root Files 已有只读文件阅读器；conversation/message/run/tool call 还没有落入
   `data/agent.sqlite`。
 - release 已有 descriptor/`pocket.json` 校验和 atomic `current` 写入，但由

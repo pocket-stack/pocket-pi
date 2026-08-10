@@ -1,5 +1,7 @@
 // Headless Exa data plane. Search and document responses are normalized into
 // App-owned domain rows before one transaction invalidates the View cache.
+import { __pumpNet, fetch } from "@pocketjs/framework/net";
+
 const nativeDb = (globalThis as any).db;
 const handle = nativeDb.open("exa");
 if (handle < 0) throw new Error("open exa.sqlite");
@@ -69,14 +71,17 @@ function highlight(value: any): string | null {
   return firstText(value, ["highlight", "summary", "text"])?.slice(0, 1200) ?? null;
 }
 
-function post(path: string, body: any): any {
-  const envelope = JSON.parse((globalThis as any).services.call(
-    "net.http",
-    "post",
-    JSON.stringify({ connection: "exa", path, body }),
-  ));
-  if (!envelope.ok) throw new Error(envelope.error || "Exa service failed");
-  return envelope.value;
+async function post(path: "/search" | "/contents", body: any): Promise<any> {
+  const response = await fetch(`https://api.exa.ai${path}`, {
+    method: "POST",
+    headers: { accept: "application/json", "content-type": "application/json" },
+    body: JSON.stringify(body),
+    timeoutMs: 12_000,
+    maxBytes: 96 * 1024,
+  });
+  const value = await response.json<any>();
+  if (!response.ok) throw new Error(`Exa HTTP ${response.status}: ${JSON.stringify(value)}`);
+  return value;
 }
 
 function transaction(action: () => void): void {
@@ -91,7 +96,7 @@ function transaction(action: () => void): void {
   (globalThis as any).app.commit();
 }
 
-function search(args: any): any {
+async function search(args: any): Promise<any> {
   const searchQuery = String(args.query ?? "").trim();
   if (!searchQuery) throw new Error("query is required");
   const searchedAt = now();
@@ -105,7 +110,7 @@ function search(args: any): any {
     for (const key of ["includeDomains", "excludeDomains", "startPublishedDate", "endPublishedDate"]) {
       if (args[key] !== undefined) body[key] = args[key];
     }
-    const value = post("/search", body);
+    const value = await post("/search", body);
     const results = Array.isArray(value?.results) ? value.results.slice(0, 8) : [];
     transaction(() => {
       const inserted = run(
@@ -134,10 +139,10 @@ function search(args: any): any {
   }
 }
 
-function fetchDocument(args: any): any {
+async function fetchDocument(args: any): Promise<any> {
   const requestedUrl = String(args.url ?? "").trim();
   if (!requestedUrl) throw new Error("url is required");
-  const response = post("/contents", {
+  const response = await post("/contents", {
     urls: [requestedUrl],
     text: {
       maxCharacters: Math.max(200, Math.min(12000, Number(args.maxCharacters ?? 6000))),
@@ -163,22 +168,51 @@ function fetchDocument(args: any): any {
   };
 }
 
+let pendingResult: string | undefined;
+let active = false;
+
+function failure(error: unknown): string {
+  return JSON.stringify({
+    text: error instanceof Error ? error.message : String(error),
+    isError: true,
+  });
+}
+
+function begin(action: () => Promise<any>): void {
+  if (active) throw new Error("Exa Data Action is already running");
+  active = true;
+  pendingResult = undefined;
+  action().then(
+    (value) => {
+      pendingResult = JSON.stringify({ text: JSON.stringify(value), details: value, isError: false });
+      active = false;
+    },
+    (error) => {
+      pendingResult = failure(error);
+      active = false;
+    },
+  );
+}
+
 (globalThis as any).PocketPiData = {
-  invokeTask(name: string) {
-    return JSON.stringify({ text: "Unknown Exa Data Action: " + name, isError: true });
+  beginInvokeTask(name: string) {
+    begin(async () => { throw new Error("Unknown Exa Data Action: " + name); });
   },
-  invokeTool(name: string, argsLine: string) {
+  beginInvokeTool(name: string, argsLine: string) {
     try {
       const args = JSON.parse(argsLine);
-      const value = name === "research.search" ? search(args)
+      begin(() => name === "research.search" ? search(args)
         : name === "research.fetch" ? fetchDocument(args)
-        : (() => { throw new Error("Unknown Exa tool: " + name); })();
-      return JSON.stringify({ text: JSON.stringify(value), details: value, isError: false });
+        : Promise.reject(new Error("Unknown Exa tool: " + name)));
     } catch (error) {
-      return JSON.stringify({
-        text: error instanceof Error ? error.message : String(error),
-        isError: true,
-      });
+      pendingResult = failure(error);
+      active = false;
     }
+  },
+  tick() { __pumpNet(); },
+  pollResult() {
+    const result = pendingResult;
+    pendingResult = undefined;
+    return result;
   },
 };

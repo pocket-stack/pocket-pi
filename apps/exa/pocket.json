@@ -5,6 +5,6 @@
   "name": "exa",
   "title": "Exa Research",
   "version": "1.0.0",
-  "engine": {"capabilities":{"requires":["data.fs","data.sqlite"]}},
+  "engine": {"capabilities":{"requires":["data.fs","data.sqlite","net.http"]}},
   "app": {"entry":"app.tsx","output":"app","framework":"solid","viewport":{"logical":[720,1280],"presentation":"fit"}}
 }

@@ -13,6 +13,7 @@ log.workspace = true
 pocket-db.workspace = true
 pocket-fs.workspace = true
 pocket-mod.workspace = true
+pocket-net.workspace = true
 pocket-ui-surface.workspace = true
 pocket-pi-embedded = { path = "../pocket-pi-embedded" }
 pocketjs-core.workspace = true

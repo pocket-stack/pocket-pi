@@ -2,7 +2,7 @@
 //! app-owned FS/SQLite state, namespaced Agent tools and native AppTask wakes.
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -14,6 +14,8 @@ use pocket_db::{DbModule, Storage as DbStorage};
 use pocket_fs::{FsModule, Storage as FsStorage};
 use pocket_mod::qjs::{CatchResultExt as _, Function, Object};
 use pocket_mod::Guest;
+pub use pocket_net::{HttpRequest, NetFailure, TransportCompletion};
+use pocket_net::{HttpTransport, NetSurface};
 use pocket_pi_embedded::{AgentEvent, GuestAgent, ModelBackend, ToolHost, ToolResult};
 use pocket_ui_surface::UiSurface;
 use serde::{Deserialize, Serialize};
@@ -178,6 +180,19 @@ pub trait AppServiceHost: Send + Sync {
         args: &Value,
     ) -> Result<Value, String>;
 
+    /// Execute one policy-checked PocketJS HTTP request. This is called only
+    /// from the native NET worker, never from the QuickJS/App Data thread.
+    fn http(
+        &self,
+        _app_id: &str,
+        request: HttpRequest,
+    ) -> std::result::Result<TransportCompletion, NetFailure> {
+        Err(NetFailure::new(
+            "unavailable",
+            format!("HTTP is unavailable for handle {}", request.handle),
+        ))
+    }
+
     /// True while a native App worker owns network/TLS activity.
     fn busy(&self) -> bool {
         false
@@ -192,6 +207,8 @@ type SharedDb = Arc<Mutex<DbModule>>;
 type AppRevision = Arc<AtomicU32>;
 
 const DATA_ACTION_QUEUE: usize = 8;
+const NET_COMPLETION_QUEUE: usize = 2;
+const NET_WORKER_STACK_BYTES: usize = 96 * 1024;
 pub const DATA_ACTION_STACK_BYTES: usize = 128 * 1024;
 
 #[derive(Clone, Copy)]
@@ -214,10 +231,71 @@ struct DataAppConfig {
     source_path: PathBuf,
     database: SharedDb,
     revision: AppRevision,
+    net: bool,
+}
+
+struct AppNetTransport {
+    requests: mpsc::SyncSender<HttpRequest>,
+    completions: mpsc::Receiver<TransportCompletion>,
+    cancelled: BTreeSet<i32>,
+}
+
+impl AppNetTransport {
+    fn start(app_id: String, services: Arc<dyn AppServiceHost>) -> Result<Self> {
+        let (request_tx, request_rx) = mpsc::sync_channel::<HttpRequest>(NET_COMPLETION_QUEUE);
+        let (completion_tx, completion_rx) =
+            mpsc::sync_channel::<TransportCompletion>(NET_COMPLETION_QUEUE);
+        let worker_name = format!("net-{app_id}");
+        std::thread::Builder::new()
+            .name(worker_name)
+            .stack_size(NET_WORKER_STACK_BYTES)
+            .spawn(move || {
+                while let Ok(request) = request_rx.recv() {
+                    let handle = request.handle;
+                    let completion = services
+                        .http(&app_id, request)
+                        .unwrap_or_else(|failure| TransportCompletion::Error { handle, failure });
+                    if completion_tx.send(completion).is_err() {
+                        break;
+                    }
+                }
+            })
+            .context("start App NET worker")?;
+        Ok(Self {
+            requests: request_tx,
+            completions: completion_rx,
+            cancelled: BTreeSet::new(),
+        })
+    }
+}
+
+impl HttpTransport for AppNetTransport {
+    fn start(&mut self, request: HttpRequest) -> std::result::Result<(), NetFailure> {
+        self.requests
+            .try_send(request)
+            .map_err(|_| NetFailure::new("busy", "native HTTP worker queue is full"))
+    }
+
+    fn cancel(&mut self, handle: i32) {
+        self.cancelled.insert(handle);
+    }
+
+    fn drain(&mut self, completions: &mut Vec<TransportCompletion>) {
+        while let Ok(completion) = self.completions.try_recv() {
+            let handle = match &completion {
+                TransportCompletion::Done { handle, .. }
+                | TransportCompletion::Error { handle, .. } => *handle,
+            };
+            if !self.cancelled.remove(&handle) {
+                completions.push(completion);
+            }
+        }
+    }
 }
 
 struct DataActionRuntime {
     guest: Guest,
+    net: Option<NetSurface<AppNetTransport>>,
     _database: SharedDb,
     _revision: AppRevision,
 }
@@ -226,8 +304,15 @@ impl DataActionRuntime {
     fn load(config: &DataAppConfig, services: Arc<dyn AppServiceHost>) -> Result<Self> {
         let guest = Guest::new()?;
         mount_shared_db(&guest, config.database.clone())?;
-        mount_services(&guest, config.app_id.clone(), services)?;
         mount_data_lifecycle(&guest, config.revision.clone())?;
+        let net = if config.net {
+            let surface = NetSurface::new(AppNetTransport::start(config.app_id.clone(), services)?);
+            surface.mount(&guest)?;
+            Some(surface)
+        } else {
+            mount_services(&guest, config.app_id.clone(), services)?;
+            None
+        };
         let source = std::fs::read_to_string(&config.source_path)
             .with_context(|| format!("read {} Data Action", config.app_id))?;
         guest.eval(&format!("{}-data-action", config.app_id), &source)?;
@@ -238,12 +323,16 @@ impl DataActionRuntime {
         );
         Ok(Self {
             guest,
+            net,
             _database: config.database.clone(),
             _revision: config.revision.clone(),
         })
     }
 
     fn invoke(&self, request: &DataActionRequest) -> Result<ToolResult> {
+        if let Some(net) = &self.net {
+            return self.invoke_net(request, net);
+        }
         let method = match request.kind {
             DataActionKind::Task => "invokeTask",
             DataActionKind::Tool => "invokeTool",
@@ -261,21 +350,62 @@ impl DataActionRuntime {
                 .catch(&ctx)
                 .map_err(|error| anyhow!("PocketPiData.{method}: {error}"))
         })?;
-        let value: Value = serde_json::from_str(&line).context("parse Data Action result")?;
-        Ok(ToolResult {
-            text: value
-                .get("text")
-                .and_then(Value::as_str)
-                .unwrap_or(&line)
-                .to_owned(),
-            details: value.get("details").cloned().unwrap_or(Value::Null),
-            is_error: value
-                .get("isError")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            terminate: false,
-        })
+        parse_data_result(&line)
     }
+
+    fn invoke_net(
+        &self,
+        request: &DataActionRequest,
+        net: &NetSurface<AppNetTransport>,
+    ) -> Result<ToolResult> {
+        let method = match request.kind {
+            DataActionKind::Task => "beginInvokeTask",
+            DataActionKind::Tool => "beginInvokeTool",
+        };
+        self.guest.with(|ctx| -> Result<()> {
+            let data: Object = ctx.globals().get("PocketPiData")?;
+            let function: Function = data.get(method)?;
+            function.call::<_, ()>((request.name.clone(), request.args.to_string()))?;
+            Ok(())
+        })?;
+        let deadline = std::time::Instant::now() + TOOL_TIMEOUT;
+        loop {
+            net.begin_tick();
+            let line = self.guest.with(|ctx| -> Result<Option<String>> {
+                let data: Object = ctx.globals().get("PocketPiData")?;
+                let tick: Function = data.get("tick")?;
+                tick.call::<_, ()>(())?;
+                let poll: Function = data.get("pollResult")?;
+                Ok(poll.call::<_, Option<String>>(())?)
+            })?;
+            self.guest.drain_jobs();
+            if let Some(line) = line {
+                return parse_data_result(&line);
+            }
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "PocketPiData.{method} timed out"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+fn parse_data_result(line: &str) -> Result<ToolResult> {
+    let value: Value = serde_json::from_str(line).context("parse Data Action result")?;
+    Ok(ToolResult {
+        text: value
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or(line)
+            .to_owned(),
+        details: value.get("details").cloned().unwrap_or(Value::Null),
+        is_error: value
+            .get("isError")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        terminate: false,
+    })
 }
 
 struct AppDataRunner {
@@ -387,7 +517,6 @@ impl AppRuntime {
         tmp_root: &Path,
         db: SharedDb,
         revision: AppRevision,
-        services: Arc<dyn AppServiceHost>,
     ) -> Result<Self> {
         let descriptor: AppDescriptor = serde_json::from_slice(
             &std::fs::read(release_dir.join("agent-app.json")).context("read agent-app.json")?,
@@ -417,7 +546,7 @@ impl AppRuntime {
             .filter_map(Value::as_str)
         {
             anyhow::ensure!(
-                matches!(capability, "data.fs" | "data.sqlite"),
+                matches!(capability, "data.fs" | "data.sqlite" | "net.http"),
                 "unsupported App capability: {capability}"
             );
         }
@@ -439,7 +568,6 @@ impl AppRuntime {
         pocket_fs::mount(&guest, fs.clone())?;
         mount_shared_db(&guest, db.clone())?;
 
-        mount_services(&guest, descriptor.id.clone(), services)?;
         let source =
             std::fs::read_to_string(release_dir.join("app.js")).context("read App bundle")?;
         eval_bundle(&guest, &descriptor.id, &source)?;
@@ -702,8 +830,10 @@ impl AppSupervisor {
             revisions.insert(descriptor.id.clone(), Arc::new(AtomicU32::new(0)));
         }
         let data_configs = catalog
-            .descriptors()
-            .filter_map(|descriptor| {
+            .apps
+            .values()
+            .filter_map(|app| {
+                let descriptor = &app.descriptor;
                 let (release_dir, _, _, _) = paths(&workspace, &descriptor.id);
                 let source_path = release_dir.join("data-action.js");
                 source_path.is_file().then(|| DataAppConfig {
@@ -717,19 +847,23 @@ impl AppSupervisor {
                         .get(&descriptor.id)
                         .expect("revision created for descriptor")
                         .clone(),
+                    net: serde_json::from_str::<Value>(app.pocket_json)
+                        .ok()
+                        .and_then(|manifest| {
+                            manifest
+                                .pointer("/engine/capabilities/requires")
+                                .and_then(Value::as_array)
+                                .cloned()
+                        })
+                        .is_some_and(|capabilities| {
+                            capabilities.iter().any(|value| value == "net.http")
+                        }),
                 })
             })
             .collect();
         let data_runner = AppDataRunner::start(data_configs, services.clone())?;
         log::info!("preloading View Runtime: {ROOT_APP_ID}");
-        let system = load_runtime(
-            &workspace,
-            &catalog,
-            &databases,
-            &revisions,
-            ROOT_APP_ID,
-            services.clone(),
-        )?;
+        let system = load_runtime(&workspace, &catalog, &databases, &revisions, ROOT_APP_ID)?;
         log::info!("preloaded View Runtime: {ROOT_APP_ID}");
         // v1 has a small fixed App catalog. Load every ordinary View once at
         // boot so foreground navigation is only a surface switch. Background
@@ -742,14 +876,7 @@ impl AppSupervisor {
         let mut runtimes = BTreeMap::new();
         for app_id in ordinary_app_ids {
             log::info!("preloading View Runtime: {app_id}");
-            let runtime = load_runtime(
-                &workspace,
-                &catalog,
-                &databases,
-                &revisions,
-                &app_id,
-                services.clone(),
-            )?;
+            let runtime = load_runtime(&workspace, &catalog, &databases, &revisions, &app_id)?;
             log::info!("preloaded View Runtime: {app_id}");
             runtimes.insert(app_id, runtime);
         }
@@ -981,7 +1108,6 @@ fn load_runtime(
     databases: &BTreeMap<String, SharedDb>,
     revisions: &BTreeMap<String, AppRevision>,
     app_id: &str,
-    services: Arc<dyn AppServiceHost>,
 ) -> Result<AppRuntime> {
     let app = catalog
         .app(app_id)
@@ -996,16 +1122,8 @@ fn load_runtime(
         .cloned()
         .ok_or_else(|| anyhow!("App {app_id} has no revision owner"))?;
     let _ = db_root;
-    AppRuntime::load(
-        app,
-        &release_dir,
-        &fs_root,
-        &tmp_root,
-        db,
-        revision,
-        services,
-    )
-    .with_context(|| format!("load App {app_id}"))
+    AppRuntime::load(app, &release_dir, &fs_root, &tmp_root, db, revision)
+        .with_context(|| format!("load App {app_id}"))
 }
 
 fn paths(workspace: &Path, app_id: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
@@ -1079,13 +1197,17 @@ fn seed_builtin_releases(workspace: &Path, catalog: &AppCatalog) -> Result<()> {
             app.descriptor_json.as_bytes(),
         )?;
         atomic_write(&release_dir.join("pocket.json"), app.pocket_json.as_bytes())?;
+        let mut modules = vec!["ui", "data.fs", "data.sqlite"];
+        if app.descriptor.id == EXA_APP_ID {
+            modules.push("net.http");
+        }
         atomic_write(
             &release_dir.join("plan.json"),
             &serde_json::to_vec_pretty(&json!({
                 "runtime":"pocket-pi-agentos",
                 "pocketjsRevision":"9c809bbd047ddc75c27caa4990951a78d942477a",
                 "app":app.descriptor.id,
-                "modules":["ui","data.fs","data.sqlite"]
+                "modules":modules
             }))?,
         )?;
         let current = if app.descriptor.id == ROOT_APP_ID {

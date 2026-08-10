@@ -45,5 +45,9 @@ rev = "9c809bbd047ddc75c27caa4990951a78d942477a"
 git = "https://github.com/pocket-stack/pocketjs.git"
 rev = "9c809bbd047ddc75c27caa4990951a78d942477a"
 
+[workspace.dependencies.pocket-net]
+git = "https://github.com/pocket-stack/pocketjs.git"
+rev = "9c809bbd047ddc75c27caa4990951a78d942477a"
+
 [profile.release]
 opt-level = 2
