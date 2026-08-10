@@ -450,6 +450,15 @@ impl Product {
         Ok(())
     }
 
+    fn pointer_down(&mut self, x: u16, y: u16) -> Result<()> {
+        self.supervisor.pointer_down(x, y)?;
+        self.tap(x, y)
+    }
+
+    fn pointer_up(&mut self) -> Result<()> {
+        self.supervisor.pointer_up()
+    }
+
     fn run_pending_ui_task(&mut self) {
         let Some(task) = self.pending_ui_task.take() else {
             return;
@@ -770,7 +779,7 @@ impl ApplicationHandler for WindowApp {
                 ..
             } if !state.touch_down => {
                 state.touch_down = true;
-                if let Err(error) = state.product.tap(state.cursor.0, state.cursor.1) {
+                if let Err(error) = state.product.pointer_down(state.cursor.0, state.cursor.1) {
                     self.error = Some(error);
                     event_loop.exit();
                 }
@@ -779,7 +788,13 @@ impl ApplicationHandler for WindowApp {
                 button: MouseButton::Left,
                 state: ElementState::Released,
                 ..
-            } => state.touch_down = false,
+            } => {
+                state.touch_down = false;
+                if let Err(error) = state.product.pointer_up() {
+                    self.error = Some(error);
+                    event_loop.exit();
+                }
+            }
             WindowEvent::KeyboardInput { event, .. }
                 if event.state == ElementState::Pressed
                     && matches!(event.physical_key, PhysicalKey::Code(KeyCode::Escape)) =>

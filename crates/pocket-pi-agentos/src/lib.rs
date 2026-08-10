@@ -646,6 +646,14 @@ impl AppRuntime {
         serde_json::from_str(&line).context("parse App tap action")
     }
 
+    pub fn pointer_down(&self, x: u16, y: u16) -> Result<()> {
+        self.call_optional_method("pointerDown", (x as i32, y as i32))
+    }
+
+    pub fn pointer_up(&self) -> Result<()> {
+        self.call_optional_method("pointerUp", ())
+    }
+
     pub fn invoke_tool(&self, name: &str, args_json: &str) -> Result<ToolResult> {
         let line: String =
             self.call_method("invokeTool", (name.to_owned(), args_json.to_owned()))?;
@@ -695,6 +703,26 @@ impl AppRuntime {
                 .call::<_, R>(args)
                 .catch(&ctx)
                 .map_err(|error| anyhow!("PocketPiApp.{name}: {error}"))
+        })
+    }
+
+    fn call_optional_method<A>(&self, name: &str, args: A) -> Result<()>
+    where
+        A: for<'js> pocket_mod::qjs::function::IntoArgs<'js>,
+    {
+        self.guest.with(|ctx| {
+            let app: Object = ctx
+                .globals()
+                .get("PocketPiApp")
+                .map_err(|error| anyhow!("PocketPiApp missing: {error}"))?;
+            let Some(function) = app.get::<_, Function>(name).ok() else {
+                return Ok(());
+            };
+            function
+                .call::<_, String>(args)
+                .catch(&ctx)
+                .map_err(|error| anyhow!("PocketPiApp.{name}: {error}"))?;
+            Ok(())
         })
     }
 }
@@ -996,6 +1024,14 @@ impl AppSupervisor {
 
     pub fn tap(&self, x: u16, y: u16) -> Result<Value> {
         self.active().tap(x, y)
+    }
+
+    pub fn pointer_down(&self, x: u16, y: u16) -> Result<()> {
+        self.active().pointer_down(x, y)
+    }
+
+    pub fn pointer_up(&self) -> Result<()> {
+        self.active().pointer_up()
     }
 
     pub fn with_ui<R>(&self, f: impl FnOnce(&mut pocketjs_core::Ui) -> R) -> R {
@@ -1664,6 +1700,28 @@ mod tests {
         let action = supervisor.tap(560, 170).unwrap();
         assert_eq!(action["type"], "settings");
         assert_eq!(action["command"], "scan");
+    }
+
+    #[test]
+    fn keyboard_key_has_a_bounded_pointer_down_visual_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let supervisor = AppSupervisor::new(temp.path(), Arc::new(NoServices)).unwrap();
+
+        // Open the prompt keyboard, then press Q without invoking the key. The
+        // DrawList must change only while the pointer is held down.
+        supervisor.tap(300, 1110).unwrap();
+        supervisor.frame().unwrap();
+        let idle = supervisor.with_ui(|ui| ui.draw().words.clone());
+
+        supervisor.pointer_down(50, 520).unwrap();
+        supervisor.frame().unwrap();
+        let pressed = supervisor.with_ui(|ui| ui.draw().words.clone());
+        assert_ne!(pressed, idle);
+
+        supervisor.pointer_up().unwrap();
+        supervisor.frame().unwrap();
+        let released = supervisor.with_ui(|ui| ui.draw().words.clone());
+        assert_eq!(released, idle);
     }
 
     #[test]

@@ -185,6 +185,7 @@ pub fn run() -> anyhow::Result<()> {
         if let Some(display) = display.as_mut() {
             if let Some((x, y)) = display.read_touch() {
                 if !touch_was_down {
+                    supervisor.pointer_down(x, y)?;
                     let action = supervisor.tap(x, y)?;
                     match action.get("type").and_then(Value::as_str) {
                         Some("navigate") => {
@@ -280,6 +281,10 @@ pub fn run() -> anyhow::Result<()> {
                 }
                 touch_was_down = true;
             } else {
+                if touch_was_down {
+                    supervisor.pointer_up()?;
+                    redraw = true;
+                }
                 touch_was_down = false;
             }
         }

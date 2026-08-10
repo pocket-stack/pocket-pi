@@ -57,6 +57,7 @@ const [input, setInput] = createSignal("");
 const [keyboardMode, setKeyboardMode] = createSignal<"letters" | "numbers">("letters");
 const [uppercase, setUppercase] = createSignal(false);
 const [keyboardPurpose, setKeyboardPurpose] = createSignal<KeyboardPurpose>({ type: "prompt" });
+const [pressedKey, setPressedKey] = createSignal<string | null>(null);
 const [wifiOffset, setWifiOffset] = createSignal(0);
 const fileCache = new Map<string, FileEntry[]>();
 
@@ -322,23 +323,23 @@ function KeyboardScreen() {
         <View class="h-[270] px-[22] pt-6 bg-white">
           <Text class={input() ? "text-lg text-slate-900" : "text-lg text-slate-400"}>{display() || (purpose().type === "wifi" ? "ENTER NETWORK PASSWORD..." : "TYPE YOUR MESSAGE...")}</Text>
         </View>
-        <View class="h-[86] px-1 flex-row items-center justify-between"><Text class="text-sm text-slate-500">{String(input().length) + " / " + (purpose().type === "wifi" ? "63" : "256") + " CHARACTERS"}</Text><View class="w-[132] h-[58] items-center justify-center bg-slate-100"><Text class="text-sm text-slate-900 font-bold">CLEAR</Text></View></View>
+        <View class="h-[86] px-1 flex-row items-center justify-between"><Text class="text-sm text-slate-500">{String(input().length) + " / " + (purpose().type === "wifi" ? "63" : "256") + " CHARACTERS"}</Text><View class={pressedKey() === "clear" ? "w-[132] h-[58] items-center justify-center bg-slate-300" : "w-[132] h-[58] items-center justify-center bg-slate-100"}><Text class="text-sm text-slate-900 font-bold">CLEAR</Text></View></View>
         <For each={rows()}>{(row, rowIndex) => (
           <View class="h-[140] flex-row gap-2">
             <For each={row.split("")}>{(key) => (
-              <View class="grow h-[120] items-center justify-center bg-white"><Text class="text-xl text-slate-900 font-bold">{uppercase() ? key.toUpperCase() : key}</Text></View>
+              <View class={pressedKey() === "char:" + key ? "grow h-[120] items-center justify-center bg-slate-300" : "grow h-[120] items-center justify-center bg-white"}><Text class="text-xl text-slate-900 font-bold">{uppercase() ? key.toUpperCase() : key}</Text></View>
             )}</For>
-            <Show when={rowIndex() === 2}><View class="w-[104] h-[120] items-center justify-center bg-slate-100"><Text class="text-sm text-slate-900 font-bold">DEL</Text></View></Show>
+            <Show when={rowIndex() === 2}><View class={pressedKey() === "delete" ? "w-[104] h-[120] items-center justify-center bg-slate-300" : "w-[104] h-[120] items-center justify-center bg-slate-100"}><Text class="text-sm text-slate-900 font-bold">DEL</Text></View></Show>
           </View>
         )}</For>
         <View class="h-[176] flex-row gap-2">
-          <View class="w-[92] h-[156] items-center justify-center bg-slate-100"><Text class="text-sm text-slate-900 font-bold">{keyboardMode() === "letters" ? "123" : "ABC"}</Text></View>
-          <View class="w-[300] h-[156] items-center justify-center bg-slate-100"><Text class="text-sm text-slate-900 font-bold">SPACE</Text></View>
-          <View class="w-[144] h-[156] items-center justify-center bg-slate-100"><Text class="text-sm text-slate-900 font-bold">{keyboardMode() === "letters" ? "SHIFT" : ".  ?"}</Text></View>
-          <View class="w-[112] h-[156] items-center justify-center bg-emerald-500"><Text class="text-sm text-slate-950 font-bold">{purpose().type === "wifi" ? "JOIN" : "SEND"}</Text></View>
+          <View class={pressedKey() === "mode" ? "w-[92] h-[156] items-center justify-center bg-slate-300" : "w-[92] h-[156] items-center justify-center bg-slate-100"}><Text class="text-sm text-slate-900 font-bold">{keyboardMode() === "letters" ? "123" : "ABC"}</Text></View>
+          <View class={pressedKey() === "space" ? "w-[300] h-[156] items-center justify-center bg-slate-300" : "w-[300] h-[156] items-center justify-center bg-slate-100"}><Text class="text-sm text-slate-900 font-bold">SPACE</Text></View>
+          <View class={pressedKey() === "shift" ? "w-[144] h-[156] items-center justify-center bg-slate-300" : "w-[144] h-[156] items-center justify-center bg-slate-100"}><Text class="text-sm text-slate-900 font-bold">{keyboardMode() === "letters" ? "SHIFT" : ".  ?"}</Text></View>
+          <View class={pressedKey() === "submit" ? "w-[112] h-[156] items-center justify-center bg-emerald-700" : "w-[112] h-[156] items-center justify-center bg-emerald-500"}><Text class="text-sm text-slate-950 font-bold">{purpose().type === "wifi" ? "JOIN" : "SEND"}</Text></View>
         </View>
       </View>
-      <View class="h-[108] px-6 py-3 flex-col bg-slate-50"><View class="h-[84] items-center justify-center bg-slate-100"><Text class="text-sm text-slate-900 font-bold">CLOSE KEYBOARD</Text></View></View>
+      <View class="h-[108] px-6 py-3 flex-col bg-slate-50"><View class={pressedKey() === "close" ? "h-[84] items-center justify-center bg-slate-300" : "h-[84] items-center justify-center bg-slate-100"}><Text class="text-sm text-slate-900 font-bold">CLOSE KEYBOARD</Text></View></View>
     </View>
   );
 }
@@ -419,6 +420,19 @@ function keyboardCharacterAt(x: number, y: number): string | null {
   return null;
 }
 
+function keyboardButtonAt(x: number, y: number): string | null {
+  if (y >= 1164) return "close";
+  if (x >= 548 && y >= 402 && y <= 482) return "clear";
+  const character = keyboardCharacterAt(x, y);
+  if (character) return "char:" + character;
+  if (x >= 592 && y >= 768 && y <= 888) return "delete";
+  if (y < 908 || y > 1064) return null;
+  if (x <= 116) return "mode";
+  if (x <= 424) return "space";
+  if (x <= 576) return "shift";
+  return "submit";
+}
+
 function handleKeyboardTap(x: number, y: number): string {
   if (y >= 1164) {
     setInput("");
@@ -484,6 +498,14 @@ queueMicrotask(() => refreshFiles("", true));
   },
   invokeTask() {
     return JSON.stringify({ text: "Pi Agent has no App tasks", isError: true });
+  },
+  pointerDown(x: number, y: number) {
+    setPressedKey(screen() === "keyboard" ? keyboardButtonAt(x, y) : null);
+    return "";
+  },
+  pointerUp() {
+    setPressedKey(null);
+    return "";
   },
   tap(x: number, y: number) {
     if (screen() === "keyboard") return handleKeyboardTap(x, y);
