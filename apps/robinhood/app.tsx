@@ -2,7 +2,7 @@ import { batch, createMemo, createSignal, For, Show } from "solid-js";
 import { Text, View } from "@pocketjs/framework/components";
 import { mount } from "@pocketjs/framework";
 import { Database } from "@pocketjs/framework/db";
-import { ActionButton, PocketHeader, SectionHeading } from "../_shared/ui";
+import { ActionButton, EmptyState, MetricCard, PocketHeader, ScrollButtons, SectionHeading, statusBadge, StatusBar } from "../_shared/ui";
 
 const DB_SCHEMA_VERSION = 4;
 const db = new Database("robinhood");
@@ -354,12 +354,7 @@ function Header(props: { title: string; metaBottom?: string }) {
 }
 
 function Metric(props: { label: string; value: string | null }) {
-  return (
-    <View class="w-[210] h-[104] px-5 py-4 flex-col gap-3 rounded-xl shadow bg-white border-slate-100">
-      <Text class="text-sm text-slate-500 font-bold">{props.label}</Text>
-      <Text class="text-lg text-slate-900 font-bold">{money(props.value)}</Text>
-    </View>
-  );
+  return <View class="w-[210] h-[104]"><MetricCard label={props.label} value={money(props.value)} /></View>;
 }
 
 function SectionTitle(props: { title: string; detail?: string }) {
@@ -373,7 +368,7 @@ function activityPreview(index: number): Activity {
 
 function CompactActivity(props: { index: number }) {
   const item = () => activityPreview(props.index);
-  return <View class="h-[72] px-5 flex-row items-center justify-between"><View class="w-[450] flex-col gap-2"><Text class="text-base text-slate-900 font-bold">{item().title}</Text><Text class="text-sm text-slate-500">{item().timestamp ? item().timestamp + "  ·  " + item().detail : ""}</Text></View><Text class={item().side === "SELL" ? "text-sm text-emerald-600 font-bold" : "text-sm text-slate-900 font-bold"}>{item().amount ? money(item().amount) : ""}</Text></View>;
+  return <View class="h-[72] px-5 flex-row items-center justify-between"><View class="w-[450] flex-col gap-2"><Text class="text-lg text-slate-900 font-bold">{item().title}</Text><Text class="text-base text-slate-500">{item().timestamp ? item().timestamp + "  ·  " + item().detail : ""}</Text></View><Text class={item().side === "SELL" ? "text-base text-emerald-600 font-bold" : "text-base text-slate-900 font-bold"}>{item().amount ? money(item().amount) : ""}</Text></View>;
 }
 
 function positionPreview(index: number): Position {
@@ -383,7 +378,7 @@ function positionPreview(index: number): Position {
 
 function CompactPosition(props: { index: number }) {
   const item = () => positionPreview(props.index);
-  return <View class="h-[64] px-5 flex-row items-center"><Text class="w-[240] text-base text-slate-900 font-bold">{item().symbol}</Text><Text class="w-[156] text-sm text-slate-500">{item().quantity ? item().quantity + " SH" : ""}</Text><Text class="text-sm text-slate-500">{item().averagePrice ? "AVG " + money(item().averagePrice) : ""}</Text></View>;
+  return <View class="h-[64] px-5 flex-row items-center"><Text class="w-[240] text-lg text-slate-900 font-bold">{item().symbol}</Text><Text class="w-[156] text-base text-slate-500">{item().quantity ? item().quantity + " SH" : ""}</Text><Text class="text-base text-slate-500">{item().averagePrice ? "AVG " + money(item().averagePrice) : ""}</Text></View>;
 }
 
 function Chart() {
@@ -391,11 +386,11 @@ function Chart() {
     <View class="relative w-[632] h-[196] flex-col">
       <View class="relative w-[632] h-[160] overflow-hidden">
         <View class="absolute w-[632] h-[2] bg-slate-200" style={{ posType: 1, insetL: 0, insetT: 158 }} />
-        <Text class="absolute text-sm text-slate-500 font-bold" style={{ posType: 1, insetL: 174, insetT: 72 }}>{chartPoints().length < 2 ? "COLLECTING 5M VALUE HISTORY" : ""}</Text>
-        <For each={chartSegments()}>{(item) => <View class={trend().positive ? "absolute rounded-lg bg-emerald-500" : "absolute rounded-lg bg-red-500"} style={{ posType: 1, insetL: item.x, insetT: item.y - 2, width: item.width, height: 4, rotate: item.angle, originX: -0.5, originY: 0 }} />}</For>
-        <For each={chartPoints()}>{(item) => <View class={trend().positive ? "absolute w-[9] h-[9] rounded-lg bg-emerald-500" : "absolute w-[9] h-[9] rounded-lg bg-red-500"} style={{ posType: 1, insetL: item.x - 4, insetT: item.y - 4 }} />}</For>
+        <Text class="absolute text-base text-slate-500 font-bold" style={{ posType: 1, insetL: 152, insetT: 72 }}>{chartPoints().length < 2 ? "COLLECTING 5M VALUE HISTORY" : ""}</Text>
+        <For each={chartSegments()}>{(item) => <View class={trend().positive ? "absolute rounded-lg bg-emerald-500" : "absolute rounded-lg bg-red-500"} style={{ posType: 1, insetL: item.x, insetT: item.y - 1, width: item.width, height: 2, rotate: item.angle, originX: -0.5, originY: 0 }} />}</For>
+        <For each={chartPoints()}>{(item) => <View class={trend().positive ? "absolute w-[6] h-[6] rounded-lg bg-emerald-500" : "absolute w-[6] h-[6] rounded-lg bg-red-500"} style={{ posType: 1, insetL: item.x - 3, insetT: item.y - 3 }} />}</For>
       </View>
-      <View class="h-[36] px-1 flex-row items-center justify-between"><Text class="text-sm text-slate-500">{chartLabels()[0] || ""}</Text><Text class="text-sm text-slate-500">{chartLabels()[1] || ""}</Text><Text class="text-sm text-slate-500">{chartLabels()[2] || ""}</Text></View>
+      <View class="h-[36] px-1 flex-row items-center justify-between"><Text class="text-base text-slate-500">{chartLabels()[0] || ""}</Text><Text class="text-base text-slate-500">{chartLabels()[1] || ""}</Text><Text class="text-base text-slate-500">{chartLabels()[2] || ""}</Text></View>
     </View>
   );
 }
@@ -406,28 +401,31 @@ function DashboardScreen() {
     <View class="flex-col w-full h-full bg-slate-50">
       <Header title="ROBINHOOD" />
       <View class="h-[64] px-6 pt-2"><View class="w-full h-[56] px-5 flex-row items-center justify-between rounded-xl shadow bg-white border-slate-100">
-          <Text class="text-sm text-slate-500 font-bold">ACCOUNT</Text>
-          <Text class="text-sm text-slate-900 font-bold">{dashboard().account.label + (dashboard().account.suffix ? "  ····" + dashboard().account.suffix + "  " + (accounts().findIndex((item) => item.number === selectedAccount()) + 1) + "/" + accounts().length : "") + "   ›"}</Text>
+          <Text class="text-base text-slate-500 font-bold">ACCOUNT</Text>
+          <Text class="text-base text-slate-900 font-bold">{dashboard().account.label + (dashboard().account.suffix ? "  ····" + dashboard().account.suffix + "  " + (accounts().findIndex((item) => item.number === selectedAccount()) + 1) + "/" + accounts().length : "") + "   ›"}</Text>
       </View></View>
       <View class="h-[304] px-6 pt-3"><View class="h-[291] px-5 pt-4 flex-col rounded-xl shadow bg-white border-slate-100">
           <View class="h-[64] flex-row items-end justify-between">
             <Text class="text-2xl text-slate-950 font-bold">{money(dashboard().totalValue)}</Text>
-            <Text class={currentTrend().positive ? "text-base text-emerald-600 font-bold" : "text-base text-red-500 font-bold"}>{currentTrend().change + "  (" + currentTrend().percent + ")"}</Text>
+            <Text class={currentTrend().positive ? "text-lg text-emerald-600 font-bold" : "text-lg text-red-500 font-bold"}>{currentTrend().change + "  (" + currentTrend().percent + ")"}</Text>
           </View>
           <Chart />
       </View></View>
-      <View class="h-[60] px-6 pt-2 flex-row gap-3"><View class={span() === "day" ? "w-[100] h-[44] items-center justify-center rounded-lg bg-orange-600" : "w-[100] h-[44] items-center justify-center rounded-lg bg-white"}><Text class={span() === "day" ? "text-sm text-white font-bold" : "text-sm text-slate-500 font-bold"}>1D</Text></View><View class={span() === "week" ? "w-[100] h-[44] items-center justify-center rounded-lg bg-orange-600" : "w-[100] h-[44] items-center justify-center rounded-lg bg-white"}><Text class={span() === "week" ? "text-sm text-white font-bold" : "text-sm text-slate-500 font-bold"}>1W</Text></View><Text class="pt-3 text-sm text-slate-500">{span() === "day" ? "TODAY" : "PAST WEEK"}</Text></View>
+      <View class="h-[60] px-6 pt-2 flex-row gap-3"><View class={span() === "day" ? "w-[100] h-[44] items-center justify-center rounded-lg bg-orange-600" : "w-[100] h-[44] items-center justify-center rounded-lg bg-white"}><Text class={span() === "day" ? "text-base text-white font-bold" : "text-base text-slate-500 font-bold"}>1D</Text></View><View class={span() === "week" ? "w-[100] h-[44] items-center justify-center rounded-lg bg-orange-600" : "w-[100] h-[44] items-center justify-center rounded-lg bg-white"}><Text class={span() === "week" ? "text-base text-white font-bold" : "text-base text-slate-500 font-bold"}>1W</Text></View><Text class="pt-3 text-base text-slate-500">{span() === "day" ? "TODAY" : "PAST WEEK"}</Text></View>
       <View class="h-[126] px-6 pt-3 flex-row items-start gap-[21]"><Metric label="VALUE" value={dashboard().totalValue} /><Metric label="CASH" value={dashboard().cash} /><Metric label="BUY POWER" value={dashboard().buyingPower} /></View>
       <View class="h-[200] px-6 flex-col"><SectionTitle title="ACTIVITY" detail="LAST 7 DAYS" /><View class="h-[150] flex-col rounded-xl shadow bg-white border-slate-100"><CompactActivity index={0} /><CompactActivity index={1} /></View></View>
       <View class="h-[184] px-6 flex-col"><SectionTitle title="POSITIONS" /><View class="h-[136] flex-col rounded-xl shadow bg-white border-slate-100"><CompactPosition index={0} /><CompactPosition index={1} /></View></View>
-      <View class="h-[126] px-6 pt-2"><View class="w-full h-[110] px-5 flex-row items-center justify-between rounded-xl shadow bg-white border-slate-100"><View class="flex-col gap-3"><Text class="text-lg text-slate-900 font-bold">{"REALIZED P&L"}</Text><Text class="text-sm text-slate-500">{"EQUITIES / " + (span() === "day" ? "TODAY" : "WEEK")}</Text></View><Text class={(number(span() === "day" ? dashboard().pnlDay : dashboard().pnlWeek) ?? 0) >= 0 ? "text-xl text-emerald-600 font-bold" : "text-xl text-red-500 font-bold"}>{money(span() === "day" ? dashboard().pnlDay : dashboard().pnlWeek)}</Text></View></View>
-      <View class="h-[104] px-6 flex-row items-center justify-between"><Text class={status().startsWith("REFRESH FAILED") ? "w-[460] text-sm text-red-500" : "w-[460] text-sm text-slate-500"}>{status()}</Text><View class="w-[176] h-[64]"><ActionButton label={refreshing() ? "REFRESHING" : "REFRESH NOW"} disabled={refreshing()} /></View></View>
+      <View class="h-[126] px-6 pt-2"><View class="w-full h-[110] px-5 flex-row items-center justify-between rounded-xl shadow bg-white border-slate-100"><View class="flex-col gap-3"><Text class="text-xl text-slate-900 font-bold">{"REALIZED P&L"}</Text><Text class="text-base text-slate-500">{"EQUITIES / " + (span() === "day" ? "TODAY" : "WEEK")}</Text></View><Text class={(number(span() === "day" ? dashboard().pnlDay : dashboard().pnlWeek) ?? 0) >= 0 ? "text-2xl text-emerald-600 font-bold" : "text-2xl text-red-500 font-bold"}>{money(span() === "day" ? dashboard().pnlDay : dashboard().pnlWeek)}</Text></View></View>
+      <View class="h-[104] px-6 flex-row items-center justify-between"><View class="w-[460] h-[64]"><StatusBar text={status()} tone={status().startsWith("REFRESH FAILED") ? "danger" : "neutral"} /></View><View class="w-[176] h-[64]"><ActionButton label={refreshing() ? "REFRESHING" : "REFRESH NOW"} disabled={refreshing()} /></View></View>
     </View>
   );
 }
 
 function SideButtons() {
-  return <><View class="absolute w-[68] h-[132] items-center justify-center rounded-xl bg-orange-100" style={{ posType: 1, insetL: 628, insetT: 156 }}><Text class="text-sm text-orange-600 font-bold">UP</Text></View><View class="absolute w-[68] h-[132] items-center justify-center rounded-xl bg-orange-100" style={{ posType: 1, insetL: 628, insetT: 972 }}><Text class="text-sm text-orange-600 font-bold">DN</Text></View></>;
+  return <ScrollButtons
+    top="absolute left-[628] top-[156] w-[68] h-[132] items-center justify-center rounded-xl bg-orange-100"
+    bottom="absolute left-[628] top-[972] w-[68] h-[132] items-center justify-center rounded-xl bg-orange-100"
+  />;
 }
 
 function AccountsScreen() {
@@ -438,8 +436,8 @@ function AccountsScreen() {
       <Header title="ACCOUNTS" />
       <View class="px-6 pt-[14] flex-col gap-[12]"><For each={visible()}>{(account) => (
         <View class={account.number === selectedAtOpen ? "w-[584] h-[100] px-5 flex-col justify-center gap-3 rounded-xl shadow bg-emerald-100 border-emerald-500" : "w-[584] h-[100] px-5 flex-col justify-center gap-3 rounded-xl shadow bg-white border-slate-100"}>
-            <View class="flex-row items-center justify-between"><Text class="text-lg text-slate-900 font-bold">{account.label}</Text><Text class="text-base text-slate-500 font-bold">{"····" + account.suffix}</Text></View>
-            <View class="flex-row items-center justify-between"><Text class="text-sm text-emerald-600">{account.status}</Text><Show when={account.number === selectedAtOpen}><Text class="text-sm text-emerald-600 font-bold">SELECTED</Text></Show></View>
+            <View class="flex-row items-center justify-between"><Text class="text-xl text-slate-900 font-bold">{account.label}</Text><Text class="text-lg text-slate-500 font-bold">{"····" + account.suffix}</Text></View>
+            <View class="flex-row items-center justify-between"><View class={statusBadge.success.surface}><Text class={statusBadge.success.text}>{account.status}</Text></View><Show when={account.number === selectedAtOpen}><Text class="text-base text-emerald-600 font-bold">SELECTED</Text></Show></View>
         </View>
       )}</For></View>
       <SideButtons />
@@ -453,12 +451,12 @@ function ActivityScreen() {
     <View class="relative flex-col w-full h-full bg-slate-50">
       <Header title="ACTIVITY" metaBottom="LAST 7 DAYS" />
       <View class="px-6 pt-[14] flex-col gap-[14]"><Show when={dashboard().activityAvailable && visible().length > 0} fallback={
-        <View class="w-[584] h-[150] px-5 justify-center rounded-xl shadow bg-white border-slate-100"><Text class="text-base text-slate-500">{dashboard().activityAvailable ? "NO ACTIVITY YET" : "ACTIVITY UNAVAILABLE"}</Text></View>
+        <EmptyState title={dashboard().activityAvailable ? "NO ACTIVITY YET" : "ACTIVITY UNAVAILABLE"} compact />
       }><For each={visible()}>{(item) => (
         <View class="w-[584] h-[112] px-5 flex-col justify-center gap-2 rounded-xl shadow bg-white border-slate-100">
-          <View class="flex-row items-center justify-between"><Text class="text-base text-slate-900 font-bold">{item.title}</Text><Text class={item.side === "SELL" ? "text-base text-emerald-600 font-bold" : "text-base text-slate-900 font-bold"}>{money(item.amount)}</Text></View>
-          <Text class="text-sm text-slate-500">{item.timestamp + "  ·  " + item.detail}</Text>
-          <Text class="text-sm text-emerald-600 font-bold">{item.state}</Text>
+          <View class="flex-row items-center justify-between"><Text class="text-lg text-slate-900 font-bold">{item.title}</Text><Text class={item.side === "SELL" ? "text-lg text-emerald-600 font-bold" : "text-lg text-slate-900 font-bold"}>{money(item.amount)}</Text></View>
+          <Text class="text-base text-slate-500">{item.timestamp + "  ·  " + item.detail}</Text>
+          <Text class="text-base text-emerald-600 font-bold">{item.state}</Text>
         </View>
       )}</For></Show></View>
       <SideButtons />
@@ -472,11 +470,11 @@ function PositionsScreen() {
     <View class="relative flex-col w-full h-full bg-slate-50">
       <Header title="POSITIONS" />
       <View class="px-6 pt-[14] flex-col gap-[12]"><Show when={dashboard().positionsAvailable && visible().length > 0} fallback={
-        <View class="w-[584] h-[150] px-5 justify-center rounded-xl shadow bg-white border-slate-100"><Text class="text-base text-slate-500">{dashboard().positionsAvailable ? "NO OPEN POSITIONS" : "POSITIONS UNAVAILABLE"}</Text></View>
+        <EmptyState title={dashboard().positionsAvailable ? "NO OPEN POSITIONS" : "POSITIONS UNAVAILABLE"} compact />
       }><For each={visible()}>{(item) => (
         <View class="w-[584] h-[98] px-5 flex-col justify-center gap-3 rounded-xl shadow bg-white border-slate-100">
-          <View class="flex-row items-center"><Text class="w-[170] text-lg text-slate-900 font-bold">{item.symbol}</Text><Text class="text-base text-slate-900 font-bold">{item.quantity + " SH"}</Text></View>
-          <Text class="text-sm text-slate-500">{"AVERAGE COST  " + money(item.averagePrice) + (item.marketValue ? "  ·  VALUE " + money(item.marketValue) : "")}</Text>
+          <View class="flex-row items-center"><Text class="w-[170] text-xl text-slate-900 font-bold">{item.symbol}</Text><Text class="text-lg text-slate-900 font-bold">{item.quantity + " SH"}</Text></View>
+          <Text class="text-base text-slate-500">{"AVERAGE COST  " + money(item.averagePrice) + (item.marketValue ? "  ·  VALUE " + money(item.marketValue) : "")}</Text>
         </View>
       )}</For></Show></View>
       <SideButtons />

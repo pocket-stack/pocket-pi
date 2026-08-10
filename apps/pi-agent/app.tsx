@@ -2,14 +2,14 @@ import { batch, createSignal, For, Show } from "solid-js";
 import { Text, View } from "@pocketjs/framework/components";
 import { mount } from "@pocketjs/framework";
 import { readFileSync, readdirSync, type DirEntry } from "@pocketjs/framework/fs";
-import { ActionButton, PocketHeader } from "../_shared/ui";
+import { ActionButton, PocketHeader, ScrollButtons } from "../_shared/ui";
 import { wrapLines, wrapPreview } from "../_shared/text";
 
-const FONT_BODY = 2;
-const FONT_CAPTION = 1;
+const FONT_BODY = 3;
+const FONT_CAPTION = 2;
 const CHAT_TEXT_WIDTH = 536;
 const READER_TEXT_WIDTH = 544;
-const READER_PAGE_LINES = 46;
+const READER_PAGE_LINES = 39;
 
 type Message = { role: string; text: string };
 type Network = { ssid: string; rssiDbm: number; secured: boolean };
@@ -130,15 +130,6 @@ function Header(props: { title: string }) {
   );
 }
 
-function ScrollButtons(props: { top: string; bottom: string }) {
-  return (
-    <>
-      <View class={props.top}><Text class="text-lg text-orange-600 font-bold">UP</Text></View>
-      <View class={props.bottom}><Text class="text-lg text-orange-600 font-bold">DN</Text></View>
-    </>
-  );
-}
-
 function BottomBar() {
   return (
     <View class="h-[108] px-[10] py-4 flex-row gap-[10] bg-slate-950">
@@ -146,7 +137,7 @@ function BottomBar() {
         <View class={activeTab() === name
           ? "w-[165] h-[76] items-center justify-center bg-orange-600"
           : "w-[165] h-[76] items-center justify-center bg-slate-900"}>
-          <Text class="text-sm text-white font-bold">{name.toUpperCase()}</Text>
+          <Text class="text-base text-white font-bold">{name.toUpperCase()}</Text>
         </View>
       )}</For>
     </View>
@@ -163,15 +154,15 @@ function ChatScreen() {
           <View class="w-[584] h-[298] px-6 py-5 flex-col rounded-xl shadow bg-white border-slate-100">
               <View class="h-[28] flex-row items-center gap-3">
                 <View class="w-[10] h-[10] rounded bg-orange-500" />
-                <Text class="text-sm text-orange-600 font-bold">YOU</Text>
+                <Text class="text-base text-orange-600 font-bold">YOU</Text>
               </View>
-              <Text class="h-[76] pt-3 text-base text-slate-900">{wrapPreview(turn.user, FONT_BODY, CHAT_TEXT_WIDTH, 3)}</Text>
+              <Text class="h-[76] pt-3 text-lg text-slate-900">{wrapPreview(turn.user, FONT_BODY, CHAT_TEXT_WIDTH, 3)}</Text>
               <View class="h-[2] mx-1 my-4 bg-slate-100" />
               <View class="h-[28] flex-row items-center gap-3">
                 <View class="w-[10] h-[10] rounded bg-emerald-500" />
-                <Text class="text-sm text-emerald-700 font-bold">PI</Text>
+                <Text class="text-base text-emerald-700 font-bold">PI</Text>
               </View>
-              <Text class="h-[84] pt-3 text-base text-slate-900">{wrapPreview(turn.assistant, FONT_BODY, CHAT_TEXT_WIDTH, 3)}</Text>
+              <Text class="h-[84] pt-3 text-lg text-slate-900">{wrapPreview(turn.assistant, FONT_BODY, CHAT_TEXT_WIDTH, 3)}</Text>
           </View>
         )}</For>
         <ScrollButtons
@@ -180,11 +171,11 @@ function ChatScreen() {
         />
       </View>
       <View class="h-[228] mx-6 px-6 py-5 flex-col rounded-xl shadow bg-white border-slate-100">
-          <Text class="text-sm text-slate-600 font-bold">NEXT WAKE</Text>
+          <Text class="text-base text-slate-600 font-bold">NEXT WAKE</Text>
           <Show when={schedule()?.name} fallback={
-            <Text class="pt-6 text-base text-slate-500">{"NO WAKE SCHEDULED\n\nASK PI TO CREATE ONE WITH SCHEDULE.SET"}</Text>
+            <Text class="pt-6 text-lg text-slate-500">{"NO WAKE SCHEDULED\n\nASK PI TO CREATE ONE WITH SCHEDULE.SET"}</Text>
           }>
-            <Text class="pt-6 text-base text-slate-900 font-bold">
+            <Text class="pt-6 text-lg text-slate-900 font-bold">
               {String(schedule()?.name) + "  " + String(schedule()?.next ?? "") + "\n\n" + String(schedule()?.prompt ?? "")}
             </Text>
           </Show>
@@ -204,23 +195,23 @@ function FilesScreen() {
       <Header title={filePath() ? "< WORKSPACE FILES" : "WORKSPACE FILES"} />
       <View class="h-[1060] px-6 pt-5 flex-col">
         <View class="h-[48] px-4 justify-center bg-slate-100">
-          <Text class="text-sm text-slate-600">{"/workspace" + (filePath() ? "/" + filePath() : "")}</Text>
+          <Text class="text-base text-slate-600">{"/workspace" + (filePath() ? "/" + filePath() : "")}</Text>
         </View>
         <View class="pt-[10] flex-col gap-[12]">
           <For each={visible()}>{(entry) => (
             <View class="w-[584] h-[92] px-[18] flex-row items-center gap-5 bg-white">
               <View class={entry.kind === "dir" ? "w-[48] h-[48] items-center justify-center bg-blue-100" : "w-[48] h-[48] items-center justify-center bg-emerald-100"}>
-                <Text class={entry.kind === "dir" ? "text-base text-blue-700 font-bold" : "text-base text-emerald-700 font-bold"}>{entry.kind === "dir" ? "D" : "F"}</Text>
+                <Text class={entry.kind === "dir" ? "text-lg text-blue-700 font-bold" : "text-lg text-emerald-700 font-bold"}>{entry.kind === "dir" ? "D" : "F"}</Text>
               </View>
               <View class="w-[474] flex-col gap-2">
-                <Text class="text-base text-slate-900 font-bold">{(entry.name + (entry.kind === "dir" ? "/" : "")).slice(0, 60)}</Text>
-                <Text class="text-sm text-slate-500">{entry.kind === "dir" ? "FOLDER" : formatSize(entry.size)}</Text>
+                <Text class="text-lg text-slate-900 font-bold">{(entry.name + (entry.kind === "dir" ? "/" : "")).slice(0, 52)}</Text>
+                <Text class="text-base text-slate-500">{entry.kind === "dir" ? "FOLDER" : formatSize(entry.size)}</Text>
               </View>
             </View>
           )}</For>
         </View>
         <Show when={files().length === 0}>
-          <Text class="pt-20 pl-10 text-base text-slate-500">{fileError() || "THIS DIRECTORY IS EMPTY"}</Text>
+          <Text class="pt-20 pl-10 text-lg text-slate-500">{fileError() || "THIS DIRECTORY IS EMPTY"}</Text>
         </Show>
         <Show when={files().length > 8}><ScrollButtons
             top="absolute left-[628] top-[78] w-[68] h-[132] items-center justify-center bg-orange-100"
@@ -237,23 +228,23 @@ function AppsScreen() {
     <View class="flex-col w-full h-full bg-slate-50">
       <Header title="APPS" />
       <View class="h-[1060] px-6 pt-7 flex-col gap-4">
-        <Text class="text-sm text-slate-500 font-bold">2 INSTALLED APPS</Text>
+        <Text class="text-base text-slate-500 font-bold">2 INSTALLED APPS</Text>
         <View class="w-[672] h-[150] px-6 flex-row items-center justify-between bg-white">
           <View class="flex-row items-center gap-5">
             <View class="w-[68] h-[68] items-center justify-center bg-emerald-100"><Text class="text-xl text-emerald-700 font-bold">R</Text></View>
-            <View class="flex-col gap-2"><Text class="text-lg text-slate-900 font-bold">Robinhood</Text><Text class="text-base text-slate-600">Portfolio and positions</Text><Text class="text-sm text-slate-500">UPDATES EVERY 5 MINUTES</Text></View>
+            <View class="flex-col gap-2"><Text class="text-xl text-slate-900 font-bold">Robinhood</Text><Text class="text-lg text-slate-600">Portfolio and positions</Text><Text class="text-base text-slate-500">UPDATES EVERY 5 MINUTES</Text></View>
           </View>
           <Text class="text-2xl text-orange-600">›</Text>
         </View>
         <View class="w-[672] h-[150] px-6 flex-row items-center justify-between bg-white">
           <View class="flex-row items-center gap-5">
             <View class="w-[68] h-[68] items-center justify-center bg-indigo-100"><Text class="text-xl text-indigo-700 font-bold">E</Text></View>
-            <View class="flex-col gap-2"><Text class="text-lg text-slate-900 font-bold">Exa Research</Text><Text class="text-base text-slate-600">Agent search history</Text><Text class="text-sm text-slate-500">STORED LOCALLY IN SQLITE</Text></View>
+            <View class="flex-col gap-2"><Text class="text-xl text-slate-900 font-bold">Exa Research</Text><Text class="text-lg text-slate-600">Agent search history</Text><Text class="text-base text-slate-500">STORED LOCALLY IN SQLITE</Text></View>
           </View>
           <Text class="text-2xl text-orange-600">›</Text>
         </View>
         <View class="mt-4 h-[112] px-6 justify-center bg-slate-100">
-          <Text class="text-sm text-slate-600">{"APP DATA STAYS ISOLATED.\nPI AGENT CAN USE EACH APP'S TOOLS."}</Text>
+          <Text class="text-base text-slate-600">{"APP DATA STAYS ISOLATED.\nPI AGENT CAN USE EACH APP'S TOOLS."}</Text>
         </View>
       </View>
       <BottomBar />
@@ -273,22 +264,22 @@ function SettingsScreen() {
       <Header title="SETTINGS" />
       <View class="h-[1060] px-6 pt-5 flex-col">
         <View class="relative h-[154] px-5 pt-5 flex-col bg-white">
-          <Text class="text-base text-slate-900 font-bold">WI-FI</Text>
-          <Text class="pt-3 text-base text-orange-600 font-bold">{wifi().connectedSsid || "NOT CONNECTED"}</Text>
-          <Text class="pt-3 text-sm text-slate-500">{detail()}</Text>
+          <Text class="text-lg text-slate-900 font-bold">WI-FI</Text>
+          <Text class="pt-3 text-lg text-orange-600 font-bold">{wifi().connectedSsid || "NOT CONNECTED"}</Text>
+          <Text class="pt-3 text-base text-slate-500">{detail()}</Text>
           <View class="absolute left-[456] top-[14] w-[196] h-[72] items-center justify-center bg-orange-600">
-            <Text class="text-base text-white font-bold">{wifi().scanning ? "SCANNING" : "SCAN"}</Text>
+            <Text class="text-lg text-white font-bold">{wifi().scanning ? "SCANNING" : "SCAN"}</Text>
           </View>
         </View>
-        <Text class="h-[40] pt-3 text-sm text-slate-500">AVAILABLE NETWORKS</Text>
+        <Text class="h-[40] pt-3 text-base text-slate-500">AVAILABLE NETWORKS</Text>
         <View class="h-[470] flex-col gap-2">
           <Show when={networks().length > 0} fallback={
-            <View class="h-[214] px-7 items-center justify-center bg-slate-100"><Text class="text-base text-slate-500 font-bold">{"NO NETWORK LIST YET\n\nTAP SCAN TO FIND WI-FI"}</Text></View>
+            <View class="h-[214] px-7 items-center justify-center bg-slate-100"><Text class="text-lg text-slate-500 font-bold">{"NO NETWORK LIST YET\n\nTAP SCAN TO FIND WI-FI"}</Text></View>
           }>
             <For each={networks()}>{(network) => (
               <View class="w-[584] h-[84] px-5 flex-row items-center justify-between bg-white">
-                <Text class="text-base text-slate-900 font-bold">{network.ssid}</Text>
-                <Text class="text-sm text-slate-500">{String(network.rssiDbm) + " DBM  " + (network.secured ? "LOCK" : "OPEN")}</Text>
+                <Text class="text-lg text-slate-900 font-bold">{network.ssid}</Text>
+                <Text class="text-base text-slate-500">{String(network.rssiDbm) + " DBM  " + (network.secured ? "LOCK" : "OPEN")}</Text>
               </View>
             )}</For>
           </Show>
@@ -298,13 +289,13 @@ function SettingsScreen() {
             /></Show>
         </View>
         <View class="h-[160] px-5 pt-5 flex-col bg-white">
-          <Text class="text-sm text-slate-500">MODEL BACKEND</Text>
-          <Text class="pt-3 text-base text-slate-900 font-bold">{projection().model ?? "UNKNOWN"}</Text>
-          <Text class="pt-3 text-sm text-slate-600">{"FIRMWARE " + String(settings().firmwareVersion ?? "0.1.0") + "  ·  WORKSPACE FREE " + String(settings().workspaceFree ?? "--")}</Text>
+          <Text class="text-base text-slate-500">MODEL BACKEND</Text>
+          <Text class="pt-3 text-lg text-slate-900 font-bold">{projection().model ?? "UNKNOWN"}</Text>
+          <Text class="pt-3 text-base text-slate-600">{"FIRMWARE " + String(settings().firmwareVersion ?? "0.1.0") + "  ·  WORKSPACE FREE " + String(settings().workspaceFree ?? "--")}</Text>
         </View>
         <View class="h-[108] pt-7 flex-row gap-4">
-          <View class="w-[316] h-[80] items-center justify-center bg-slate-100"><Text class="text-base text-slate-900 font-bold">FORGET WI-FI</Text></View>
-          <View class="w-[340] h-[80] items-center justify-center bg-red-100"><Text class="text-base text-red-500 font-bold">RESTART DEVICE</Text></View>
+          <View class="w-[316] h-[80] items-center justify-center bg-slate-100"><Text class="text-lg text-slate-900 font-bold">FORGET WI-FI</Text></View>
+          <View class="w-[340] h-[80] items-center justify-center bg-red-100"><Text class="text-lg text-red-500 font-bold">RESTART DEVICE</Text></View>
         </View>
       </View>
       <BottomBar />
@@ -323,23 +314,23 @@ function KeyboardScreen() {
         <View class="h-[270] px-[22] pt-6 bg-white">
           <Text class={input() ? "text-lg text-slate-900" : "text-lg text-slate-400"}>{display() || (purpose().type === "wifi" ? "ENTER NETWORK PASSWORD..." : "TYPE YOUR MESSAGE...")}</Text>
         </View>
-        <View class="h-[86] px-1 flex-row items-center justify-between"><Text class="text-sm text-slate-500">{String(input().length) + " / " + (purpose().type === "wifi" ? "63" : "256") + " CHARACTERS"}</Text><View class={pressedKey() === "clear" ? "w-[132] h-[58] items-center justify-center bg-slate-300" : "w-[132] h-[58] items-center justify-center bg-slate-100"}><Text class="text-sm text-slate-900 font-bold">CLEAR</Text></View></View>
+        <View class="h-[86] px-1 flex-row items-center justify-between"><Text class="text-base text-slate-500">{String(input().length) + " / " + (purpose().type === "wifi" ? "63" : "256") + " CHARACTERS"}</Text><View class={pressedKey() === "clear" ? "w-[132] h-[58] items-center justify-center bg-slate-300" : "w-[132] h-[58] items-center justify-center bg-slate-100"}><Text class="text-base text-slate-900 font-bold">CLEAR</Text></View></View>
         <For each={rows()}>{(row, rowIndex) => (
           <View class="h-[140] flex-row gap-2">
             <For each={row.split("")}>{(key) => (
               <View class={pressedKey() === "char:" + key ? "grow h-[120] items-center justify-center bg-slate-300" : "grow h-[120] items-center justify-center bg-white"}><Text class="text-xl text-slate-900 font-bold">{uppercase() ? key.toUpperCase() : key}</Text></View>
             )}</For>
-            <Show when={rowIndex() === 2}><View class={pressedKey() === "delete" ? "w-[104] h-[120] items-center justify-center bg-slate-300" : "w-[104] h-[120] items-center justify-center bg-slate-100"}><Text class="text-sm text-slate-900 font-bold">DEL</Text></View></Show>
+            <Show when={rowIndex() === 2}><View class={pressedKey() === "delete" ? "w-[104] h-[120] items-center justify-center bg-slate-300" : "w-[104] h-[120] items-center justify-center bg-slate-100"}><Text class="text-base text-slate-900 font-bold">DEL</Text></View></Show>
           </View>
         )}</For>
         <View class="h-[176] flex-row gap-2">
-          <View class={pressedKey() === "mode" ? "w-[92] h-[156] items-center justify-center bg-slate-300" : "w-[92] h-[156] items-center justify-center bg-slate-100"}><Text class="text-sm text-slate-900 font-bold">{keyboardMode() === "letters" ? "123" : "ABC"}</Text></View>
-          <View class={pressedKey() === "space" ? "w-[300] h-[156] items-center justify-center bg-slate-300" : "w-[300] h-[156] items-center justify-center bg-slate-100"}><Text class="text-sm text-slate-900 font-bold">SPACE</Text></View>
-          <View class={pressedKey() === "shift" ? "w-[144] h-[156] items-center justify-center bg-slate-300" : "w-[144] h-[156] items-center justify-center bg-slate-100"}><Text class="text-sm text-slate-900 font-bold">{keyboardMode() === "letters" ? "SHIFT" : ".  ?"}</Text></View>
-          <View class={pressedKey() === "submit" ? "w-[112] h-[156] items-center justify-center bg-emerald-700" : "w-[112] h-[156] items-center justify-center bg-emerald-500"}><Text class="text-sm text-slate-950 font-bold">{purpose().type === "wifi" ? "JOIN" : "SEND"}</Text></View>
+          <View class={pressedKey() === "mode" ? "w-[92] h-[156] items-center justify-center bg-slate-300" : "w-[92] h-[156] items-center justify-center bg-slate-100"}><Text class="text-base text-slate-900 font-bold">{keyboardMode() === "letters" ? "123" : "ABC"}</Text></View>
+          <View class={pressedKey() === "space" ? "w-[300] h-[156] items-center justify-center bg-slate-300" : "w-[300] h-[156] items-center justify-center bg-slate-100"}><Text class="text-base text-slate-900 font-bold">SPACE</Text></View>
+          <View class={pressedKey() === "shift" ? "w-[144] h-[156] items-center justify-center bg-slate-300" : "w-[144] h-[156] items-center justify-center bg-slate-100"}><Text class="text-base text-slate-900 font-bold">{keyboardMode() === "letters" ? "SHIFT" : ".  ?"}</Text></View>
+          <View class={pressedKey() === "submit" ? "w-[112] h-[156] items-center justify-center bg-emerald-700" : "w-[112] h-[156] items-center justify-center bg-emerald-500"}><Text class="text-base text-slate-950 font-bold">{purpose().type === "wifi" ? "JOIN" : "SEND"}</Text></View>
         </View>
       </View>
-      <View class="h-[108] px-6 py-3 flex-col bg-slate-50"><View class={pressedKey() === "close" ? "h-[84] items-center justify-center bg-slate-300" : "h-[84] items-center justify-center bg-slate-100"}><Text class="text-sm text-slate-900 font-bold">CLOSE KEYBOARD</Text></View></View>
+      <View class="h-[108] px-6 py-3 flex-col bg-slate-50"><View class={pressedKey() === "close" ? "h-[84] items-center justify-center bg-slate-300" : "h-[84] items-center justify-center bg-slate-100"}><Text class="text-base text-slate-900 font-bold">CLOSE KEYBOARD</Text></View></View>
     </View>
   );
 }
@@ -352,11 +343,11 @@ function ViewerScreen() {
     <View class="flex-col w-full h-full bg-slate-50">
       <Header title="< FILE VIEWER" />
       <View class="h-[1168] px-6 pt-5 flex-col">
-        <View class="h-[82] px-4 justify-center bg-white"><Text class="text-base text-slate-900 font-bold">{current()?.path ?? "NO FILE OPEN"}</Text></View>
+        <View class="h-[82] px-4 justify-center bg-white"><Text class="text-lg text-slate-900 font-bold">{current()?.path ?? "NO FILE OPEN"}</Text></View>
         <View class="w-[584] h-[900] px-5 pt-5 bg-slate-950">
-          <Text class="text-sm text-slate-200">{lines().slice(offset(), offset() + 39).join("\n")}</Text>
+          <Text class="text-base text-slate-200">{lines().slice(offset(), offset() + 39).join("\n")}</Text>
         </View>
-        <Text class="pt-3 text-sm text-slate-500">{"LINES " + String(offset() + 1) + "-" + String(Math.min(offset() + 39, lines().length)) + " / " + String(lines().length)}</Text>
+        <Text class="pt-3 text-base text-slate-500">{"LINES " + String(offset() + 1) + "-" + String(Math.min(offset() + 39, lines().length)) + " / " + String(lines().length)}</Text>
         <ScrollButtons
           top="absolute left-[628] top-[58] w-[68] h-[132] items-center justify-center bg-orange-100"
           bottom="absolute left-[628] top-[828] w-[68] h-[132] items-center justify-center bg-orange-100"
@@ -373,8 +364,8 @@ function ReaderScreen() {
     <View class="flex-col w-full h-full bg-slate-50">
       <Header title="< MESSAGE READER" />
       <View class="h-[1168] px-6 pt-5 flex-col">
-        <View class="h-[82] px-4 justify-center bg-white"><Text class="text-base text-orange-600 font-bold">{current()?.author ?? "PI"}</Text></View>
-        <View class="w-[584] h-[900] px-5 pt-5 bg-white"><Text class="text-sm text-slate-900">{lines().slice(readerOffset(), readerOffset() + READER_PAGE_LINES).join("\n")}</Text></View>
+        <View class="h-[82] px-4 justify-center bg-white"><Text class="text-lg text-orange-600 font-bold">{current()?.author ?? "PI"}</Text></View>
+        <View class="w-[584] h-[900] px-5 pt-5 bg-white"><Text class="text-base text-slate-900">{lines().slice(readerOffset(), readerOffset() + READER_PAGE_LINES).join("\n")}</Text></View>
         <ScrollButtons
           top="absolute left-[628] top-[58] w-[68] h-[132] items-center justify-center bg-orange-100"
           bottom="absolute left-[628] top-[828] w-[68] h-[132] items-center justify-center bg-orange-100"

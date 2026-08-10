@@ -2,6 +2,7 @@ import { createSignal, For, Show } from "solid-js";
 import { Text, View } from "@pocketjs/framework/components";
 import { mount } from "@pocketjs/framework";
 import { Database } from "@pocketjs/framework/db";
+import { EmptyState, PageIntro, PocketHeader, statusBadge, StatusBar } from "../_shared/ui";
 
 const DB_SCHEMA_VERSION = 4;
 const RETENTION_DAYS = 7;
@@ -87,40 +88,36 @@ function storageStatus(): { text: string; details: any } {
 function Exa() {
   return (
     <View class="flex-col w-full h-full bg-slate-50">
-      <View class="h-[112] px-6 flex-row items-center justify-between bg-slate-950">
-        <View class="flex-row items-center gap-4">
-          <Text class="text-2xl text-white">‹</Text>
-          <View class="flex-col"><Text class="text-sm text-indigo-300 tracking-wide">POCKET APP</Text><Text class="text-2xl text-white font-bold">Exa Research</Text></View>
-        </View>
-        <View class="px-3 py-2 bg-indigo-900"><Text class="text-sm text-indigo-200">SQLITE HISTORY</Text></View>
-      </View>
-      <View class="p-6 flex-col gap-3">
-        <Text class="text-sm text-indigo-700 font-bold">AGENT RESEARCH MEMORY</Text>
-        <Text class="text-2xl text-slate-950 font-bold">Search history</Text>
-        <Text class="text-base text-slate-600">Every research.search call is saved here automatically.</Text>
-      </View>
+      <PocketHeader title="EXA RESEARCH" back metaTop="POCKET APP" metaBottom="SQLITE HISTORY" />
+      <PageIntro
+        eyebrow="AGENT RESEARCH MEMORY"
+        title="Search history"
+        description="Every research.search call is saved here automatically."
+        tone="info"
+      />
       <View class="grow px-6 pt-4 flex-col gap-3">
         <Show when={history().length === 0}>
-          <View class="h-[430] px-12 flex-col items-center justify-center bg-white">
-            <View class="w-[88] h-[88] items-center justify-center bg-indigo-100"><Text class="text-2xl text-indigo-700 font-bold">E</Text></View>
-            <Text class="pt-7 text-xl text-slate-900 font-bold">No searches yet</Text>
-            <Text class="pt-4 text-base text-slate-500">{"Ask Pi Agent to research a topic.\nThe search and its results will appear here."}</Text>
-          </View>
+          <EmptyState
+            icon="E"
+            title="No searches yet"
+            detail={"Ask Pi Agent to research a topic.\nThe search and its results will appear here."}
+            tone="info"
+          />
         </Show>
         <For each={history()}>{(item) => (
-          <View class="h-[118] px-5 flex-row items-center justify-between bg-white">
-            <View class="w-[500] flex-col gap-2">
-              <Text class="text-base text-slate-900 font-bold">{item.query.slice(0, 72)}</Text>
-              <Text class="text-sm text-slate-500">{(item.top_title || item.error || "No result title").slice(0, 92)}</Text>
-              <Text class="text-sm text-indigo-600 font-bold">{searchTime(item.searched_at)}</Text>
+          <View class="h-[126] px-5 flex-row items-center justify-between rounded-xl shadow bg-white border-slate-100">
+            <View class="w-[474] flex-col gap-2">
+              <Text class="text-lg text-slate-900 font-bold">{item.query.slice(0, 60)}</Text>
+              <Text class="text-base text-slate-500">{(item.top_title || item.error || "No result title").slice(0, 76)}</Text>
+              <Text class="text-base text-indigo-600 font-bold">{searchTime(item.searched_at)}</Text>
             </View>
-            <View class={item.status === "ok" ? "px-3 py-2 bg-emerald-100" : "px-3 py-2 bg-red-100"}>
-              <Text class={item.status === "ok" ? "text-sm text-emerald-700" : "text-sm text-red-500"}>{item.status === "ok" ? item.result_count + " RESULTS" : "FAILED"}</Text>
+            <View class={item.status === "ok" ? statusBadge.success.surface : statusBadge.danger.surface}>
+              <Text class={item.status === "ok" ? statusBadge.success.text : statusBadge.danger.text}>{item.status === "ok" ? item.result_count + " RESULTS" : "FAILED"}</Text>
             </View>
           </View>
         )}</For>
       </View>
-      <View class="h-[96] px-6 flex-row items-center bg-slate-950"><Text class="text-sm text-slate-300">{status()}</Text></View>
+      <View class="h-[96]"><StatusBar text={status()} tone={status().includes("FAILED") ? "danger" : "neutral"} dark /></View>
     </View>
   );
 }
