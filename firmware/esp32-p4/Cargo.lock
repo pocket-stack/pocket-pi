@@ -1124,7 +1124,7 @@ checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 [[package]]
 name = "pocket-db"
 version = "0.1.0"
-source = "git+https://github.com/siwei-yuan/pocketjs.git?rev=afc8d4e8e877dac7f9b0c01b5c0d667642009fc0#afc8d4e8e877dac7f9b0c01b5c0d667642009fc0"
+source = "git+https://github.com/pocket-stack/pocketjs.git?rev=9c809bbd047ddc75c27caa4990951a78d942477a#9c809bbd047ddc75c27caa4990951a78d942477a"
 dependencies = [
  "anyhow",
  "base64",
@@ -1137,7 +1137,7 @@ dependencies = [
 [[package]]
 name = "pocket-fs"
 version = "0.1.0"
-source = "git+https://github.com/siwei-yuan/pocketjs.git?rev=afc8d4e8e877dac7f9b0c01b5c0d667642009fc0#afc8d4e8e877dac7f9b0c01b5c0d667642009fc0"
+source = "git+https://github.com/pocket-stack/pocketjs.git?rev=9c809bbd047ddc75c27caa4990951a78d942477a#9c809bbd047ddc75c27caa4990951a78d942477a"
 dependencies = [
  "anyhow",
  "base64",
@@ -1149,7 +1149,7 @@ dependencies = [
 [[package]]
 name = "pocket-mod"
 version = "0.1.0"
-source = "git+https://github.com/siwei-yuan/pocketjs.git?rev=afc8d4e8e877dac7f9b0c01b5c0d667642009fc0#afc8d4e8e877dac7f9b0c01b5c0d667642009fc0"
+source = "git+https://github.com/pocket-stack/pocketjs.git?rev=9c809bbd047ddc75c27caa4990951a78d942477a#9c809bbd047ddc75c27caa4990951a78d942477a"
 dependencies = [
  "anyhow",
  "log",
@@ -1197,7 +1197,6 @@ dependencies = [
  "pocket-pi-tools",
  "pocketjs-core",
  "pocketjs-esp32p4-ppa",
- "rusqlite",
  "serde_json",
 ]
 
@@ -1223,7 +1222,7 @@ dependencies = [
 [[package]]
 name = "pocket-ui-surface"
 version = "0.1.0"
-source = "git+https://github.com/siwei-yuan/pocketjs.git?rev=afc8d4e8e877dac7f9b0c01b5c0d667642009fc0#afc8d4e8e877dac7f9b0c01b5c0d667642009fc0"
+source = "git+https://github.com/pocket-stack/pocketjs.git?rev=9c809bbd047ddc75c27caa4990951a78d942477a#9c809bbd047ddc75c27caa4990951a78d942477a"
 dependencies = [
  "anyhow",
  "log",
@@ -1234,7 +1233,7 @@ dependencies = [
 [[package]]
 name = "pocketjs-core"
 version = "0.1.0"
-source = "git+https://github.com/siwei-yuan/pocketjs.git?rev=afc8d4e8e877dac7f9b0c01b5c0d667642009fc0#afc8d4e8e877dac7f9b0c01b5c0d667642009fc0"
+source = "git+https://github.com/pocket-stack/pocketjs.git?rev=9c809bbd047ddc75c27caa4990951a78d942477a#9c809bbd047ddc75c27caa4990951a78d942477a"
 dependencies = [
  "taffy",
 ]
@@ -1242,7 +1241,7 @@ dependencies = [
 [[package]]
 name = "pocketjs-esp32p4-ppa"
 version = "0.1.0"
-source = "git+https://github.com/siwei-yuan/pocketjs.git?rev=afc8d4e8e877dac7f9b0c01b5c0d667642009fc0#afc8d4e8e877dac7f9b0c01b5c0d667642009fc0"
+source = "git+https://github.com/pocket-stack/pocketjs.git?rev=9c809bbd047ddc75c27caa4990951a78d942477a#9c809bbd047ddc75c27caa4990951a78d942477a"
 dependencies = [
  "pocketjs-core",
 ]

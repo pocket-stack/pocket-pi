@@ -57,7 +57,7 @@ fn main() -> Result<()> {
 }
 
 fn build_agentos_apps(root: &Path) -> Result<()> {
-    const POCKETJS_REV: &str = "afc8d4e8e877dac7f9b0c01b5c0d667642009fc0";
+    const POCKETJS_REV: &str = "9c809bbd047ddc75c27caa4990951a78d942477a";
     let pocketjs = std::env::var_os("POCKETJS_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| root.parent().unwrap_or(root).join("pocketjs"));
@@ -69,7 +69,7 @@ fn build_agentos_apps(root: &Path) -> Result<()> {
     let actual = String::from_utf8_lossy(&revision.stdout).trim().to_owned();
     if !revision.status.success() || actual != POCKETJS_REV {
         bail!(
-            "POCKETJS_ROOT={} must be checked out at feat/fs-surface revision {POCKETJS_REV}; found {actual}",
+            "POCKETJS_ROOT={} must be checked out at the pinned upstream PocketJS revision {POCKETJS_REV}; found {actual}",
             pocketjs.display()
         );
     }

@@ -15,8 +15,8 @@ pocket-pi-embedded = { path = "../../crates/pocket-pi-embedded" }
 pocket-pi-protocols = { path = "../../crates/pocket-pi-protocols" }
 pocket-pi-tools = { path = "../../crates/pocket-pi-tools" }
 pocketjs-core.workspace = true
-pocket-ui-wgpu = { git = "https://github.com/siwei-yuan/pocketjs.git", rev = "afc8d4e8e877dac7f9b0c01b5c0d667642009fc0" }
-pocket3d = { git = "https://github.com/siwei-yuan/pocketjs.git", rev = "afc8d4e8e877dac7f9b0c01b5c0d667642009fc0", default-features = false }
+pocket-ui-wgpu = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "9c809bbd047ddc75c27caa4990951a78d942477a" }
+pocket3d = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "9c809bbd047ddc75c27caa4990951a78d942477a", default-features = false }
 serde_json.workspace = true
 tempfile = "3"
 ureq = { version = "2.12", features = ["json"] }

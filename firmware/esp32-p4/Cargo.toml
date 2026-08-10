@@ -12,12 +12,6 @@ publish = false
 name = "pocket-pi-p4"
 harness = false
 
-# Temporary SQLite spike (src/bin/sqlite_probe.rs) — delete with the probe.
-[[bin]]
-name = "sqlite-probe"
-path = "src/bin/sqlite_probe.rs"
-harness = false
-
 [profile.release]
 opt-level = "s"
 lto = "thin"
@@ -36,12 +30,9 @@ pocket-pi-embedded = { path = "../../crates/pocket-pi-embedded" }
 pocket-pi-protocols = { path = "../../crates/pocket-pi-protocols" }
 pocket-pi-tools = { path = "../../crates/pocket-pi-tools" }
 esp-idf-svc = { version = "0.52.1", features = ["critical-section"] }
-# Temporary: SQLite spike dependency (src/bin/sqlite_probe.rs). Same version
-# as pocketjs pocket-db so the spike proves the exact engine we will reuse.
-rusqlite = { version = "0.40", features = ["bundled"] }
 embedded-svc = "0.29"
-pocketjs-core = { git = "https://github.com/siwei-yuan/pocketjs.git", rev = "afc8d4e8e877dac7f9b0c01b5c0d667642009fc0" }
-pocketjs-esp32p4-ppa = { git = "https://github.com/siwei-yuan/pocketjs.git", rev = "afc8d4e8e877dac7f9b0c01b5c0d667642009fc0", features = ["esp-idf"] }
+pocketjs-core = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "9c809bbd047ddc75c27caa4990951a78d942477a" }
+pocketjs-esp32p4-ppa = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "9c809bbd047ddc75c27caa4990951a78d942477a", features = ["esp-idf"] }
 
 [build-dependencies]
 embuild = "0.33"

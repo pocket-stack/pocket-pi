@@ -1083,7 +1083,7 @@ fn seed_builtin_releases(workspace: &Path, catalog: &AppCatalog) -> Result<()> {
             &release_dir.join("plan.json"),
             &serde_json::to_vec_pretty(&json!({
                 "runtime":"pocket-pi-agentos",
-                "pocketjsRevision":"afc8d4e8e877dac7f9b0c01b5c0d667642009fc0",
+                "pocketjsRevision":"9c809bbd047ddc75c27caa4990951a78d942477a",
                 "app":app.descriptor.id,
                 "modules":["ui","data.fs","data.sqlite"]
             }))?,

@@ -913,9 +913,12 @@ isolation 和 lifecycle。App Bundle 拥有名称、schema、provider mapping、
 
 ### 22.1 已实现
 
-1. PocketJS 固定在 `feat/fs-surface` revision
-   `afc8d4e8e877dac7f9b0c01b5c0d667642009fc0`；Simulator 和 ESP32-P4 共用
-   `pocket-fs`、`pocket-db`、`pocket-mod` 和 `pocket-ui-surface` contracts。
+1. PocketJS 固定在 upstream `origin/main` revision
+   `9c809bbd047ddc75c27caa4990951a78d942477a`；Simulator 和 ESP32-P4 共用
+   正式合并的 `pocket-fs`、`pocket-db`、`pocket-mod` 和
+   `pocket-ui-surface` contracts。该 revision 同时包含正式 `pocket-net`
+   contract；Pocket Pi 对它的 Host adapter/mount 属于下一阶段，不在依赖迁移中
+   伪装成已经接入。
 2. Pi Agent 位于顶层 `/workspace`；Root View release 位于
    `/workspace/data/view`，其中 `app.js` 和 `agent.js` 是同一个 System App
    release；普通 App 位于 `/workspace/apps/<id>`。
