@@ -1,0 +1,12 @@
+{
+  "id": "exa",
+  "version": "1.0.0",
+  "dataVersion": 3,
+  "tools": [
+    {"name":"research.search","description":"Search the web through Exa, return bounded source-linked highlights, and save the search to local history.","parameters":{"type":"object","properties":{"query":{"type":"string","minLength":1,"maxLength":2000},"numResults":{"type":"integer","minimum":1,"maximum":8},"searchType":{"type":"string","enum":["auto","fast","instant"]},"includeDomains":{"type":"array","items":{"type":"string"},"maxItems":8},"excludeDomains":{"type":"array","items":{"type":"string"},"maxItems":8}},"required":["query"],"additionalProperties":false}},
+    {"name":"research.fetch","description":"Fetch a bounded research document through Exa and save it as the latest opened document.","parameters":{"type":"object","properties":{"url":{"type":"string","maxLength":2048},"maxCharacters":{"type":"integer","minimum":200,"maximum":12000}},"required":["url"],"additionalProperties":false}},
+    {"name":"research.storage_status","description":"Inspect this App's local SQLite schema, row counts, and bounded recent row summaries without contacting Exa.","parameters":{"type":"object","properties":{},"additionalProperties":false}}
+  ],
+  "tasks": [],
+  "schedules": []
+}

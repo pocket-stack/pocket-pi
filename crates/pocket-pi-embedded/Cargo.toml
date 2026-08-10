@@ -7,5 +7,6 @@ repository.workspace = true
 description = "Small pi-agent-core runtime for embedded Pocket Pi hosts"
 
 [dependencies]
+pocket-mod.workspace = true
 rquickjs = { version = "=0.12.1", default-features = false, features = ["bindgen", "std"] }
 serde_json.workspace = true

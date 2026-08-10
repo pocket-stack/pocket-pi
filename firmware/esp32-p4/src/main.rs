@@ -1,383 +1,92 @@
 use core::time::Duration;
-use std::sync::Arc;
 use std::time::Instant;
 
-use embedded_svc::http::{client::Client as HttpClient, Method};
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::handle::RawHandle;
-use esp_idf_svc::http::client::{Configuration as HttpConfiguration, EspHttpConnection};
 use esp_idf_svc::netif::{EspNetif, NetifStack};
 use esp_idf_svc::nvs::{EspDefaultNvs, EspDefaultNvsPartition};
 use esp_idf_svc::wifi::{AuthMethod, ClientConfiguration, Configuration, WifiDriver};
-use pocket_pi_device_ui::{
-    load_fonts, AgentState, ChatProjection, DeviceState, ScreenInteraction, ScreenState,
-    SettingsCommand, SettingsProjection, SystemTelemetry,
-};
-use pocket_pi_embedded::{spawn_agent_worker, AgentEvent, ModelBackend};
-use pocket_pi_protocols::model::ModelBackendSettings;
-use pocket_pi_tools::{CoreToolHost, PlatformTools};
-use pocketjs_core::Ui;
-use pocketjs_esp32p4_ppa::{PpaOps, Rect, Renderer, RendererConfig, SrmTransform};
+use pocket_pi_tools::PlatformTools;
+use pocketjs_esp32p4_ppa::RenderTargetState;
 
+mod agentos_main;
+mod app_services;
 mod backend;
+mod device_state;
 mod storage;
 mod transport;
+
+use device_state::{SettingsProjection, WifiNetworkProjection};
 
 const BOARD_NAME: &str = "Waveshare ESP32-P4-WIFI6-Touch-LCD-5";
 const PANEL_WIDTH: u32 = 720;
 const PANEL_HEIGHT: u32 = 1280;
-const LCD_REFRESH_HZ: u16 = 32;
 const WIFI_NVS_NAMESPACE: &str = "pocket_pi";
 const WIFI_NVS_SSID_KEY: &str = "wifi_ssid";
 const WIFI_NVS_PASSWORD_KEY: &str = "wifi_pass";
+const AGENTOS_LAUNCHER_STACK_BYTES: u32 = 4 * 1024;
+const AGENTOS_TASK_STACK_BYTES: u32 = 64 * 1024;
 
 fn main() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
 
-    let mut ui = Ui::new();
-    ui.set_viewport(PANEL_WIDTH as f32, PANEL_HEIGHT as f32);
-    if !load_fonts(&mut ui) {
-        anyhow::bail!("PocketJS rejected the shared Inter font atlases")
+    let mut task = core::ptr::null_mut();
+    let result = unsafe {
+        esp_idf_svc::sys::xTaskCreatePinnedToCoreWithCaps(
+            Some(agentos_launcher_task),
+            c"agentos-launch".as_ptr(),
+            AGENTOS_LAUNCHER_STACK_BYTES,
+            core::ptr::null_mut(),
+            esp_idf_svc::sys::ESP_TASK_MAIN_PRIO,
+            &mut task,
+            0,
+            esp_idf_svc::sys::MALLOC_CAP_SPIRAM | esp_idf_svc::sys::MALLOC_CAP_8BIT,
+        )
+    };
+    if result != 1 || task.is_null() {
+        anyhow::bail!("could not create AgentOS launcher task (result={result})")
     }
-    let _workspace = storage::mount_workspace()?;
+    log::info!("AgentOS runtime launcher queued");
+    Ok(())
+}
 
-    let mut device = DeviceState {
-        agent: AgentState::Starting,
-    };
-    let mut chat = ChatProjection::new("TYPE A MESSAGE", "BOOTING PI AGENT...");
-    let mut screen = ScreenState::new(storage::WORKSPACE_ROOT);
-    screen.refresh_workspace();
-    screen.set_telemetry(system_telemetry(0));
-
-    let mut renderer = Renderer::new(RendererConfig::default())
-        .ok_or_else(|| anyhow::anyhow!("invalid PocketJS renderer configuration"))?;
-    log::info!("Pocket Pi ESP32-P4 hardware probe: {BOARD_NAME}");
-    log::info!(
-        "PocketJS shared device UI ready: viewport={:?} scale={}",
-        ui.viewport(),
-        renderer.config().scale,
+unsafe extern "C" fn agentos_launcher_task(_argument: *mut core::ffi::c_void) {
+    // Let ESP-IDF delete its entry task first. That releases enough contiguous
+    // internal RAM for the large runtime stack required by QuickJS. The tiny
+    // launcher itself lives in PSRAM and never performs flash I/O.
+    esp_idf_svc::sys::vTaskDelay(10);
+    let mut task = core::ptr::null_mut();
+    let result = esp_idf_svc::sys::xTaskCreatePinnedToCoreWithCaps(
+        Some(agentos_task),
+        c"agentos".as_ptr(),
+        AGENTOS_TASK_STACK_BYTES,
+        core::ptr::null_mut(),
+        esp_idf_svc::sys::ESP_TASK_MAIN_PRIO,
+        &mut task,
+        0,
+        esp_idf_svc::sys::MALLOC_CAP_INTERNAL | esp_idf_svc::sys::MALLOC_CAP_8BIT,
     );
-
-    let mut display = match init_display_probe(&mut renderer, &ui, &device, &chat, &screen) {
-        Ok(display) => {
-            log::info!("MIPI-DSI panel active");
-            Some(display)
-        }
-        Err(error) => {
-            log::error!("MIPI-DSI panel failed: {error:#}");
-            None
-        }
-    };
-
-    let uart = Arc::new(
-        transport::UartLineTransport::new()
-            .map_err(|error| anyhow::anyhow!("initialize UART transport: {error}"))?,
-    );
-    let runtime_config =
-        match transport::request_runtime_config(uart.as_ref(), Duration::from_secs(5)) {
-            Ok(config) => config,
-            Err(error) => {
-                log::warn!("No UART runtime config received: {error}");
-                transport::RuntimeConfig::default()
-            }
-        };
-    let clock_seeded_by_uart = if let Some(seconds) = runtime_config.unix_time_seconds {
-        let time = esp_idf_svc::sys::timeval {
-            tv_sec: seconds as i64,
-            tv_usec: 0,
-        };
-        if unsafe { esp_idf_svc::sys::settimeofday(&time, core::ptr::null()) } == 0 {
-            log::info!("clock seeded by UART bridge");
-            true
-        } else {
-            log::warn!("UART bridge clock seed failed");
-            false
-        }
-    } else {
-        false
-    };
-    screen.set_model_backend(&runtime_config.model);
-
-    let mut wifi = match init_wifi(
-        runtime_config.wifi_ssid.as_deref(),
-        runtime_config.wifi_password.as_deref(),
-    ) {
-        Ok(wifi) => {
-            log::info!("C6-SDIO Wi-Fi and lwIP netif active");
-            Some(wifi)
-        }
-        Err(error) => {
-            log::error!("C6-SDIO Wi-Fi radio probe failed: {error:#}");
-            None
-        }
-    };
-    let mut settings = wifi
-        .as_ref()
-        .map(|wifi| wifi.projection("READY"))
-        .unwrap_or_else(|| SettingsProjection {
-            firmware_version: env!("CARGO_PKG_VERSION").into(),
-            workspace_free_bytes: storage::workspace_free_bytes().ok(),
-            wifi: pocket_pi_device_ui::WifiSettingsProjection {
-                status: "WI-FI DRIVER UNAVAILABLE".into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        });
-    screen.set_settings(settings.clone());
-    let _sntp = if wifi.is_some() {
-        match esp_idf_svc::sntp::EspSntp::new_default() {
-            Ok(sntp) => {
-                if !clock_seeded_by_uart && wifi.as_ref().is_some_and(WifiConnection::is_connected)
-                {
-                    let started = Instant::now();
-                    while started.elapsed() < Duration::from_secs(15)
-                        && sntp.get_sync_status() != esp_idf_svc::sntp::SyncStatus::Completed
-                    {
-                        std::thread::sleep(Duration::from_millis(200));
-                    }
-                    if sntp.get_sync_status() == esp_idf_svc::sntp::SyncStatus::Completed {
-                        log::info!("SNTP clock synchronized");
-                    } else {
-                        log::warn!("SNTP synchronization is still pending");
-                    }
-                }
-                Some(sntp)
-            }
-            Err(error) => {
-                log::error!("SNTP initialization failed: {error}");
-                None
-            }
-        }
-    } else {
-        None
-    };
-    let direct_wireless = matches!(
-        &runtime_config.model.backend,
-        ModelBackendSettings::Wireless { .. }
-    );
-    if direct_wireless && wifi.as_ref().is_some_and(WifiConnection::is_connected) {
+    if result == 1 && !task.is_null() {
         log::info!(
-            "network targets staged: openai={} codex_plan={}",
-            pocket_pi_protocols::model::OPENAI_API_BASE_URL,
-            pocket_pi_protocols::model::CODEX_BACKEND_BASE_URL,
+            "AgentOS runtime started on a {} KiB internal stack",
+            AGENTOS_TASK_STACK_BYTES / 1024
         );
-        match probe_https_origins() {
-            Ok(reachability) => log::info!("HTTPS connectivity probe completed: {reachability:?}"),
-            Err(error) => log::error!("HTTPS connectivity probe failed: {error:#}"),
-        }
-    } else if !direct_wireless {
-        log::info!("direct model HTTPS probes skipped for UART backend");
+    } else {
+        log::error!("could not create AgentOS runtime task (result={result})");
     }
-
-    let uart_poc = matches!(
-        runtime_config.model.backend,
-        ModelBackendSettings::Uart { .. }
-    );
-    let backend: Arc<dyn ModelBackend> = match runtime_config.model.backend {
-        ModelBackendSettings::Uart { .. } => {
-            let transport: Arc<dyn transport::LineTransport> = uart;
-            Arc::new(backend::UartBackend::new(transport))
-        }
-        ModelBackendSettings::Wireless { provider } => Arc::new(
-            backend::WirelessBackend::new(
-                provider,
-                runtime_config
-                    .model_api_key
-                    .ok_or_else(|| anyhow::anyhow!("wireless backend is missing API key"))?,
-            )
-            .map_err(anyhow::Error::msg)?,
-        ),
-    };
-    let tools = Arc::new(CoreToolHost::new(
-        storage::WORKSPACE_ROOT,
-        Arc::new(EspPlatform),
-    ));
-    let provider = match runtime_config.model.backend {
-        ModelBackendSettings::Uart { .. } => "uart",
-        ModelBackendSettings::Wireless { provider } => provider.id(),
-    };
-    let config = serde_json::json!({
-        "provider":provider,
-        "model":runtime_config.model.resolved_model().unwrap_or_else(|_| "unknown".into()),
-        "systemPrompt":"You are Pocket Pi on an ESP32-P4. Be concise."
-    });
-    let (prompt_tx, agent_rx) =
-        spawn_agent_worker(config.to_string(), backend, tools.clone(), Some(64 * 1024))
-            .map_err(anyhow::Error::msg)?;
-    let mut initial_prompt = runtime_config.initial_prompt;
-
-    let mut touch_was_down = false;
-    let mut redraw = true;
-    let mut pending_settings = None;
-    let mut last_telemetry = Instant::now();
-    let mut last_heartbeat = Instant::now();
     loop {
-        while let Ok(event) = agent_rx.try_recv() {
-            match event {
-                AgentEvent::Ready => {
-                    log::info!("PocketJS Pi Harness ready");
-                    if uart_poc {
-                        unsafe {
-                            esp_idf_svc::sys::esp_log_level_set(
-                                c"*".as_ptr(),
-                                esp_idf_svc::sys::esp_log_level_t_ESP_LOG_NONE,
-                            );
-                        }
-                    }
-                    chat.set_latest_assistant("ESP32-P4 PI AGENT READY.");
-                    if let Some(prompt) = initial_prompt.take() {
-                        chat.push_pending(prompt.clone());
-                        screen.show_latest_chat();
-                        device.agent = AgentState::Thinking;
-                        if prompt_tx.send(prompt).is_err() {
-                            chat.fail_pending("AGENT WORKER IS NOT AVAILABLE");
-                            device.agent = AgentState::Faulted;
-                        }
-                    } else {
-                        device.agent = AgentState::Idle;
-                    }
-                }
-                AgentEvent::Delta(delta) => {
-                    if chat.append_model_delta(&delta) {
-                        screen.show_latest_chat();
-                    }
-                }
-                AgentEvent::Done => {
-                    chat.finish_pending();
-                    screen.refresh_workspace();
-                    device.agent = AgentState::Idle;
-                }
-                AgentEvent::Failed(error) => {
-                    log::error!("PocketJS Pi Harness failed: {error}");
-                    chat.fail_pending(format!("AGENT FAILED: {error}"));
-                    device.agent = AgentState::Faulted;
-                }
-            }
-            redraw = true;
-        }
+        esp_idf_svc::sys::vTaskDelay(1000);
+    }
+}
 
-        if let Some(display) = display.as_mut() {
-            if let Some((x, y)) = display.read_touch() {
-                if !touch_was_down {
-                    match screen.handle_tap(x, y, &chat, &ui) {
-                        ScreenInteraction::None => {}
-                        ScreenInteraction::Redraw => redraw = true,
-                        ScreenInteraction::SubmitPrompt(prompt) => {
-                            chat.push_pending(prompt.clone());
-                            screen.show_latest_chat();
-                            device.agent = AgentState::Thinking;
-                            if prompt_tx.send(prompt).is_err() {
-                                chat.fail_pending("AGENT WORKER IS NOT AVAILABLE");
-                                device.agent = AgentState::Faulted;
-                            }
-                            redraw = true;
-                        }
-                        ScreenInteraction::Settings(command) => {
-                            if command == SettingsCommand::ScanWifi {
-                                settings.wifi.scanning = true;
-                                settings.wifi.status = "SCANNING...".into();
-                                screen.set_settings(settings.clone());
-                            }
-                            pending_settings = Some(command);
-                            redraw = true;
-                        }
-                    }
-                }
-                touch_was_down = true;
-            } else {
-                if touch_was_down && screen.handle_touch_release() {
-                    redraw = true;
-                }
-                touch_was_down = false;
-            }
-        }
-
-        if last_telemetry.elapsed() >= Duration::from_secs(2) {
-            let ui_fps_tenths = display
-                .as_mut()
-                .map(DisplayProbe::sample_ui_fps_tenths)
-                .unwrap_or(0);
-            screen.set_telemetry(system_telemetry(ui_fps_tenths));
-            settings.workspace_free_bytes = storage::workspace_free_bytes().ok();
-            screen.set_settings(settings.clone());
-            let schedule = tools.schedule_projection();
-            screen.set_schedule(pocket_pi_device_ui::ScheduleProjection {
-                name: schedule.name,
-                prompt: schedule.prompt,
-                next_in_seconds: schedule.next_in_seconds,
-                every_minutes: schedule.every_minutes,
-            });
-            if device.agent == AgentState::Idle {
-                if let Some(wake) = tools.claim_due() {
-                    chat.push_pending(wake.prompt.clone());
-                    screen.show_latest_chat();
-                    device.agent = AgentState::Thinking;
-                    if prompt_tx.send(wake.prompt).is_err() {
-                        chat.fail_pending("AGENT WORKER IS NOT AVAILABLE");
-                        device.agent = AgentState::Faulted;
-                    }
-                }
-            }
-            redraw = true;
-            last_telemetry = Instant::now();
-        }
-        if redraw {
-            if let Some(display) = display.as_mut() {
-                display.render(&mut renderer, &ui, &device, &chat, &screen)?;
-            }
-            redraw = false;
-        }
-        if let Some(command) = pending_settings.take() {
-            match command {
-                SettingsCommand::ScanWifi => match wifi.as_mut() {
-                    Some(wifi) => match wifi.scan() {
-                        Ok(networks) => {
-                            settings = wifi.projection("");
-                            settings.wifi.networks = networks;
-                        }
-                        Err(error) => {
-                            settings.wifi.scanning = false;
-                            settings.wifi.status = format!("SCAN FAILED: {error}");
-                        }
-                    },
-                    None => settings.wifi.status = "WI-FI DRIVER UNAVAILABLE".into(),
-                },
-                SettingsCommand::ConnectWifi { ssid, password } => match wifi.as_mut() {
-                    Some(wifi) => match wifi.connect(&ssid, &password) {
-                        Ok(()) => settings = wifi.projection("CONNECTED"),
-                        Err(error) => settings.wifi.status = format!("CONNECT FAILED: {error}"),
-                    },
-                    None => settings.wifi.status = "WI-FI DRIVER UNAVAILABLE".into(),
-                },
-                SettingsCommand::ForgetWifi => match wifi.as_mut() {
-                    Some(wifi) => match wifi.forget() {
-                        Ok(()) => settings = wifi.projection("NETWORK FORGOTTEN"),
-                        Err(error) => settings.wifi.status = format!("FORGET FAILED: {error}"),
-                    },
-                    None => settings.wifi.status = "WI-FI DRIVER UNAVAILABLE".into(),
-                },
-                SettingsCommand::Restart => {
-                    let _ = EspPlatform.reboot();
-                    settings.wifi.status = "RESTARTING...".into();
-                }
-            }
-            settings.wifi.scanning = false;
-            screen.set_settings(settings.clone());
-            redraw = true;
-        }
-        if last_heartbeat.elapsed() >= Duration::from_secs(5) {
-            let memory = memory_snapshot();
-            log::info!(
-                "heartbeat heap={} psram_free={} agent={:?}",
-                memory.free_heap,
-                memory.psram_free,
-                device.agent,
-            );
-            last_heartbeat = Instant::now();
-        }
-        std::thread::sleep(Duration::from_millis(16));
+unsafe extern "C" fn agentos_task(_argument: *mut core::ffi::c_void) {
+    if let Err(error) = agentos_main::run() {
+        log::error!("AgentOS runtime stopped: {error:#}");
+    }
+    loop {
+        esp_idf_svc::sys::vTaskDelay(1000);
     }
 }
 
@@ -390,12 +99,7 @@ impl PlatformTools for EspPlatform {
             "board":"esp32-p4",
             "piHarness":"pi-agent-core",
             "jsRuntime":"QuickJS via PocketJS host",
-            "freeHeapBytes":unsafe { esp_idf_svc::sys::esp_get_free_heap_size() },
-            "freePsramBytes":unsafe {
-                esp_idf_svc::sys::heap_caps_get_free_size(
-                    esp_idf_svc::sys::MALLOC_CAP_SPIRAM,
-                )
-            }
+            "memoryTelemetry":"boot projection only"
         })
     }
 
@@ -432,79 +136,6 @@ impl PlatformTools for EspPlatform {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct HttpsReachability {
-    openai_api: bool,
-    codex_backend: bool,
-}
-
-fn probe_https_origins() -> anyhow::Result<HttpsReachability> {
-    let probes = [
-        ("control", "https://api.github.com/zen", true),
-        ("openai-api", "https://api.openai.com/v1/models", false),
-        (
-            "codex-backend",
-            "https://chatgpt.com/backend-api/models",
-            false,
-        ),
-    ];
-
-    let mut control_ok = false;
-    let mut target_ok = 0u8;
-    let mut reachability = HttpsReachability::default();
-    for (name, url, control) in probes {
-        let configuration = HttpConfiguration {
-            timeout: Some(Duration::from_secs(10)),
-            crt_bundle_attach: Some(esp_idf_svc::sys::esp_crt_bundle_attach),
-            ..Default::default()
-        };
-        let mut client = HttpClient::wrap(EspHttpConnection::new(&configuration)?);
-        let request = match client.request(
-            Method::Get,
-            url,
-            &[
-                ("accept", "application/json"),
-                ("user-agent", "pocket-pi-p4/0.1"),
-            ],
-        ) {
-            Ok(request) => request,
-            Err(error) => {
-                log::warn!("HTTPS probe setup failed: origin={name} error={error}");
-                continue;
-            }
-        };
-        match request.submit() {
-            Ok(response) => {
-                let status = response.status();
-                if !(100..600).contains(&status) {
-                    log::warn!("HTTPS probe invalid status: origin={name} status={status}");
-                    continue;
-                }
-                log::info!("HTTPS probe complete: origin={name} status={status}");
-                if control {
-                    control_ok = true;
-                } else {
-                    target_ok = target_ok.saturating_add(1);
-                    match name {
-                        "openai-api" => reachability.openai_api = true,
-                        "codex-backend" => reachability.codex_backend = true,
-                        _ => {}
-                    }
-                }
-            }
-            Err(error) => {
-                log::warn!("HTTPS probe unavailable: origin={name} error={error}");
-            }
-        }
-    }
-
-    if !control_ok {
-        anyhow::bail!("control HTTPS origin was unreachable")
-    }
-    log::info!("target HTTPS reachability: {target_ok}/2");
-    Ok(reachability)
-}
-
 fn init_wifi(
     provisioned_ssid: Option<&str>,
     provisioned_password: Option<&str>,
@@ -534,11 +165,12 @@ fn init_wifi(
         driver,
         sta_netif,
         nvs,
+        pending: None,
     };
     match load_wifi_credentials(wifi.nvs.clone(), provisioned_ssid, provisioned_password) {
         Ok((ssid, password)) => {
-            if let Err(error) = wifi.connect(&ssid, &password) {
-                log::warn!("saved Wi-Fi did not connect: {error:#}");
+            if let Err(error) = wifi.begin_connect(&ssid, &password, false) {
+                log::warn!("saved Wi-Fi connection could not start: {error:#}");
             }
         }
         Err(error) => log::warn!("Wi-Fi is not configured: {error:#}"),
@@ -550,14 +182,18 @@ struct WifiConnection {
     driver: WifiDriver<'static>,
     sta_netif: EspNetif,
     nvs: EspDefaultNvsPartition,
+    pending: Option<PendingWifiConnect>,
+}
+
+struct PendingWifiConnect {
+    ssid: String,
+    password: String,
+    started_at: Instant,
+    persist_on_success: bool,
 }
 
 impl WifiConnection {
-    fn is_connected(&self) -> bool {
-        self.driver.is_connected().unwrap_or(false) && self.sta_netif.is_up().unwrap_or(false)
-    }
-
-    fn scan(&mut self) -> anyhow::Result<Vec<pocket_pi_device_ui::WifiNetworkProjection>> {
+    fn scan(&mut self) -> anyhow::Result<Vec<WifiNetworkProjection>> {
         if !self.driver.is_started()? {
             self.driver.start()?;
         }
@@ -565,7 +201,7 @@ impl WifiConnection {
         let mut networks = access_points
             .into_iter()
             .filter(|access_point| !access_point.ssid.is_empty())
-            .map(|access_point| pocket_pi_device_ui::WifiNetworkProjection {
+            .map(|access_point| WifiNetworkProjection {
                 ssid: access_point.ssid.as_str().to_owned(),
                 rssi_dbm: access_point.signal_strength as i16,
                 secured: access_point.auth_method != Some(AuthMethod::None),
@@ -577,13 +213,22 @@ impl WifiConnection {
         Ok(networks)
     }
 
-    fn connect(&mut self, ssid: &str, password: &str) -> anyhow::Result<()> {
+    fn begin_connect(
+        &mut self,
+        ssid: &str,
+        password: &str,
+        persist_on_success: bool,
+    ) -> anyhow::Result<()> {
         validate_wifi_ssid(ssid)?;
         if !password.is_empty() {
             validate_wifi_password(password)?;
         }
-        if self.driver.is_connected()? {
-            self.driver.disconnect()?;
+        if self.driver.is_started()? {
+            // A timed-out ESP-Hosted association may still be in the remote
+            // driver's connecting state even though is_connected() is false.
+            // Clear that state before every explicit attempt or retry.
+            let _ = self.driver.disconnect();
+            std::thread::sleep(Duration::from_millis(50));
         }
         self.driver
             .set_configuration(&Configuration::Client(ClientConfiguration {
@@ -601,21 +246,66 @@ impl WifiConnection {
         if !self.driver.is_started()? {
             self.driver.start()?;
         }
+        esp_result("disable Wi-Fi modem power save", unsafe {
+            esp_idf_svc::sys::esp_wifi_set_ps(esp_idf_svc::sys::wifi_ps_type_t_WIFI_PS_NONE)
+        })?;
         self.driver.connect()?;
-        let deadline = Instant::now() + Duration::from_secs(15);
-        while !self.driver.is_connected()? || !self.sta_netif.is_up()? {
-            if Instant::now() >= deadline {
-                anyhow::bail!("Wi-Fi association or DHCP timed out")
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        let storage = EspDefaultNvs::new(self.nvs.clone(), WIFI_NVS_NAMESPACE, true)?;
-        storage.set_str(WIFI_NVS_SSID_KEY, ssid)?;
-        storage.set_str(WIFI_NVS_PASSWORD_KEY, password)?;
+        self.pending = Some(PendingWifiConnect {
+            ssid: ssid.to_owned(),
+            password: password.to_owned(),
+            started_at: Instant::now(),
+            persist_on_success,
+        });
         Ok(())
     }
 
+    fn poll_connect(&mut self) -> Option<anyhow::Result<()>> {
+        let pending = self.pending.as_ref()?;
+        match (self.driver.is_connected(), self.sta_netif.is_up()) {
+            (Ok(true), Ok(true)) => {
+                let pending = self.pending.take().expect("pending Wi-Fi connect");
+                if pending.persist_on_success {
+                    let result = (|| {
+                        let storage = EspDefaultNvs::new(
+                            self.nvs.clone(),
+                            WIFI_NVS_NAMESPACE,
+                            true,
+                        )?;
+                        storage.set_str(WIFI_NVS_SSID_KEY, &pending.ssid)?;
+                        storage.set_str(WIFI_NVS_PASSWORD_KEY, &pending.password)?;
+                        Ok::<(), anyhow::Error>(())
+                    })();
+                    return Some(result);
+                }
+                Some(Ok(()))
+            }
+            (Err(error), _) => {
+                self.pending = None;
+                Some(Err(error.into()))
+            }
+            (_, Err(error)) => {
+                self.pending = None;
+                Some(Err(error.into()))
+            }
+            _ if pending.started_at.elapsed() >= Duration::from_secs(15) => {
+                let _ = self.driver.disconnect();
+                self.pending = None;
+                Some(Err(anyhow::anyhow!("Wi-Fi association or DHCP timed out")))
+            }
+            _ => None,
+        }
+    }
+
+    fn is_connecting(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    fn is_connected(&self) -> bool {
+        self.driver.is_connected().unwrap_or(false) && self.sta_netif.is_up().unwrap_or(false)
+    }
+
     fn forget(&mut self) -> anyhow::Result<()> {
+        self.pending = None;
         if self.driver.is_connected()? {
             self.driver.disconnect()?;
         }
@@ -625,8 +315,8 @@ impl WifiConnection {
         Ok(())
     }
 
-    fn projection(&self, status: impl Into<String>) -> pocket_pi_device_ui::SettingsProjection {
-        let mut projection = pocket_pi_device_ui::SettingsProjection {
+    fn projection(&self, status: impl Into<String>) -> SettingsProjection {
+        let mut projection = SettingsProjection {
             firmware_version: env!("CARGO_PKG_VERSION").into(),
             workspace_free_bytes: storage::workspace_free_bytes().ok(),
             ..Default::default()
@@ -702,199 +392,20 @@ fn validate_wifi_password(password: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[derive(Debug)]
 struct DisplayProbe {
     panel: esp_idf_svc::sys::esp_lcd_panel_handle_t,
     _io: esp_idf_svc::sys::esp_lcd_panel_io_handle_t,
     touch: esp_idf_svc::sys::esp_lcd_touch_handle_t,
     framebuffers: [*mut u16; 3],
+    render_states: [RenderTargetState; 3],
     next_framebuffer: usize,
-    presented_frames: u32,
-    fps_window_started: Instant,
-}
-
-fn init_display_probe(
-    renderer: &mut Renderer,
-    ui: &Ui,
-    device: &DeviceState,
-    chat: &ChatProjection,
-    screen: &ScreenState,
-) -> anyhow::Result<DisplayProbe> {
-    unsafe {
-        let mut panel = core::ptr::null_mut();
-        let mut io = core::ptr::null_mut();
-        let mut touch = core::ptr::null_mut();
-        let mut framebuffer_0 = core::ptr::null_mut();
-        let mut framebuffer_1 = core::ptr::null_mut();
-        let mut framebuffer_2 = core::ptr::null_mut();
-
-        esp_result(
-            "bsp_display_new",
-            esp_idf_svc::sys::bsp_display_new(core::ptr::null(), &mut panel, &mut io),
-        )?;
-        esp_result(
-            "esp_lcd_dpi_panel_get_frame_buffer",
-            esp_idf_svc::sys::esp_lcd_dpi_panel_get_frame_buffer(
-                panel,
-                3,
-                &mut framebuffer_0,
-                &mut framebuffer_1,
-                &mut framebuffer_2,
-            ),
-        )?;
-        let framebuffers = [framebuffer_0, framebuffer_1, framebuffer_2];
-        if framebuffers.iter().any(|framebuffer| framebuffer.is_null()) {
-            anyhow::bail!("esp_lcd_dpi_panel_get_frame_buffer returned a null buffer")
-        }
-
-        let pixels = core::slice::from_raw_parts_mut(
-            framebuffers[0].cast::<u16>(),
-            PANEL_WIDTH as usize * PANEL_HEIGHT as usize,
-        );
-        let words = screen.draw_list(ui, device, chat);
-        let mut software = SoftwareOnly;
-        let stats = renderer
-            .render(ui, &words, pixels, PANEL_WIDTH, PANEL_HEIGHT, &mut software)
-            .ok_or_else(|| anyhow::anyhow!("PocketJS rejected the panel framebuffer geometry"))?;
-
-        esp_result(
-            "esp_lcd_dpi_panel_set_pattern",
-            esp_idf_svc::sys::esp_lcd_dpi_panel_set_pattern(
-                panel,
-                esp_idf_svc::sys::mipi_dsi_pattern_type_t_MIPI_DSI_PATTERN_NONE,
-            ),
-        )?;
-        esp_result(
-            "esp_lcd_panel_disp_on_off",
-            esp_idf_svc::sys::esp_lcd_panel_disp_on_off(panel, true),
-        )?;
-        esp_result(
-            "esp_lcd_panel_draw_bitmap",
-            esp_idf_svc::sys::esp_lcd_panel_draw_bitmap(
-                panel,
-                0,
-                0,
-                PANEL_WIDTH as i32,
-                PANEL_HEIGHT as i32,
-                framebuffers[0],
-            ),
-        )?;
-        esp_result(
-            "bsp_display_backlight_on",
-            esp_idf_svc::sys::bsp_display_backlight_on(),
-        )?;
-        esp_result(
-            "pi_p4_touch_new",
-            esp_idf_svc::sys::pi_p4_touch_new(&mut touch),
-        )?;
-
-        log::info!(
-            "PocketJS triple-buffer probe: fb0={:p} fb1={:p} fb2={:p} stats={stats:?}",
-            framebuffers[0],
-            framebuffers[1],
-            framebuffers[2]
-        );
-        Ok(DisplayProbe {
-            panel,
-            _io: io,
-            touch,
-            framebuffers: framebuffers.map(|framebuffer| framebuffer.cast()),
-            next_framebuffer: 1,
-            presented_frames: 1,
-            fps_window_started: Instant::now(),
-        })
-    }
 }
 
 impl DisplayProbe {
-    fn render(
-        &mut self,
-        renderer: &mut Renderer,
-        ui: &Ui,
-        device: &DeviceState,
-        chat: &ChatProjection,
-        screen: &ScreenState,
-    ) -> anyhow::Result<()> {
-        let framebuffer = self.framebuffers[self.next_framebuffer];
-        let pixels = unsafe {
-            core::slice::from_raw_parts_mut(
-                framebuffer,
-                PANEL_WIDTH as usize * PANEL_HEIGHT as usize,
-            )
-        };
-        let words = screen.draw_list(ui, device, chat);
-        let mut software = SoftwareOnly;
-        renderer
-            .render(ui, &words, pixels, PANEL_WIDTH, PANEL_HEIGHT, &mut software)
-            .ok_or_else(|| anyhow::anyhow!("PocketJS rejected the status framebuffer geometry"))?;
-
-        esp_result("esp_lcd_panel_draw_bitmap", unsafe {
-            esp_idf_svc::sys::esp_lcd_panel_draw_bitmap(
-                self.panel,
-                0,
-                0,
-                PANEL_WIDTH as i32,
-                PANEL_HEIGHT as i32,
-                framebuffer.cast(),
-            )
-        })?;
-        self.next_framebuffer = (self.next_framebuffer + 1) % self.framebuffers.len();
-        self.presented_frames = self.presented_frames.saturating_add(1);
-        Ok(())
-    }
-
     fn read_touch(&mut self) -> Option<(u16, u16)> {
         let mut x = 0u16;
         let mut y = 0u16;
         unsafe { esp_idf_svc::sys::pi_p4_touch_read(self.touch, &mut x, &mut y).then_some((x, y)) }
-    }
-
-    fn sample_ui_fps_tenths(&mut self) -> u16 {
-        let elapsed = self.fps_window_started.elapsed().as_secs_f32();
-        let fps_tenths = if elapsed > 0.0 {
-            ((self.presented_frames as f32 / elapsed) * 10.0).round() as u16
-        } else {
-            0
-        };
-        self.presented_frames = 0;
-        self.fps_window_started = Instant::now();
-        fps_tenths
-    }
-}
-
-struct SoftwareOnly;
-
-impl PpaOps for SoftwareOnly {
-    fn fill_rgb565(&mut self, _: &mut [u16], _: u32, _: u32, _: Rect, _: u16) -> bool {
-        false
-    }
-
-    fn blend_a8_rgb565(
-        &mut self,
-        _: &mut [u16],
-        _: u32,
-        _: u32,
-        _: &[u8],
-        _: Rect,
-        _: [u8; 3],
-        _: u8,
-    ) -> bool {
-        false
-    }
-
-    fn srm_psm5650_to_rgb565(
-        &mut self,
-        _: &mut [u16],
-        _: u32,
-        _: u32,
-        _: &[u8],
-        _: u32,
-        _: u32,
-        _: Rect,
-        _: Rect,
-        _: SrmTransform,
-    ) -> bool {
-        false
     }
 }
 
@@ -903,46 +414,5 @@ fn esp_result(operation: &str, code: esp_idf_svc::sys::esp_err_t) -> anyhow::Res
         Ok(())
     } else {
         anyhow::bail!("{operation} returned ESP-IDF error 0x{code:x}")
-    }
-}
-
-#[derive(Debug)]
-struct MemorySnapshot {
-    free_heap: u32,
-    psram_total: usize,
-    psram_free: usize,
-}
-
-fn memory_snapshot() -> MemorySnapshot {
-    unsafe {
-        MemorySnapshot {
-            free_heap: esp_idf_svc::sys::esp_get_free_heap_size(),
-            psram_total: esp_idf_svc::sys::heap_caps_get_total_size(
-                esp_idf_svc::sys::MALLOC_CAP_SPIRAM,
-            ),
-            psram_free: esp_idf_svc::sys::heap_caps_get_free_size(
-                esp_idf_svc::sys::MALLOC_CAP_SPIRAM,
-            ),
-        }
-    }
-}
-
-fn system_telemetry(ui_fps_tenths: u16) -> SystemTelemetry {
-    let memory = memory_snapshot();
-    let used = memory.psram_total.saturating_sub(memory.psram_free);
-    let used_percent = if memory.psram_total == 0 {
-        0
-    } else {
-        ((used.saturating_mul(100)) / memory.psram_total).min(100) as u8
-    };
-    let mut cpu = 0u8;
-    let cpu_percent =
-        unsafe { esp_idf_svc::sys::pi_p4_cpu_load_percent(&mut cpu).then_some(cpu.min(100)) };
-    SystemTelemetry {
-        psram_used_percent: used_percent,
-        psram_free_bytes: memory.psram_free,
-        cpu_percent,
-        ui_fps_tenths,
-        lcd_refresh_hz: LCD_REFRESH_HZ,
     }
 }

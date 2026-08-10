@@ -69,6 +69,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
+
+[[package]]
 name = "bindgen"
 version = "0.71.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -644,6 +650,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fallible-iterator"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
+
+[[package]]
+name = "fallible-streaming-iterator"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -769,12 +787,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "grid"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b40ca9252762c466af32d0b1002e91e4e1bc5398f77455e55474deb466355ff5"
+
+[[package]]
 name = "hash32"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47d60b12902ba28e2730cd37e95b8c9223af2808df9e902d4df49588d1470606"
 dependencies = [
  "byteorder",
+]
+
+[[package]]
+name = "hashbrown"
+version = "0.16.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
+dependencies = [
+ "foldhash",
 ]
 
 [[package]]
@@ -786,6 +819,15 @@ dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash",
+]
+
+[[package]]
+name = "hashlink"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32069d97bb81e38fa67eab65e3393bf804bb85969f2bc06bf13f64aef5aba248"
+dependencies = [
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -883,7 +925,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
 dependencies = [
  "equivalent",
- "hashbrown",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -941,6 +983,17 @@ checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
 dependencies = [
  "cfg-if",
  "windows-link",
+]
+
+[[package]]
+name = "libsqlite3-sys"
+version = "0.38.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6c19a05435c21ac299d71b6a9c13db3e3f47c520517d58990a462a1397a61db"
+dependencies = [
+ "cc",
+ "pkg-config",
+ "vcpkg",
 ]
 
 [[package]]
@@ -1063,17 +1116,68 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
-name = "pocket-pi-device-ui"
+name = "pkg-config"
+version = "0.3.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
+
+[[package]]
+name = "pocket-db"
+version = "0.1.0"
+source = "git+https://github.com/siwei-yuan/pocketjs.git?rev=afc8d4e8e877dac7f9b0c01b5c0d667642009fc0#afc8d4e8e877dac7f9b0c01b5c0d667642009fc0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "pocket-mod",
+ "pocketjs-core",
+ "rusqlite",
+ "serde_json",
+]
+
+[[package]]
+name = "pocket-fs"
+version = "0.1.0"
+source = "git+https://github.com/siwei-yuan/pocketjs.git?rev=afc8d4e8e877dac7f9b0c01b5c0d667642009fc0#afc8d4e8e877dac7f9b0c01b5c0d667642009fc0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "pocket-mod",
+ "pocketjs-core",
+ "serde_json",
+]
+
+[[package]]
+name = "pocket-mod"
+version = "0.1.0"
+source = "git+https://github.com/siwei-yuan/pocketjs.git?rev=afc8d4e8e877dac7f9b0c01b5c0d667642009fc0#afc8d4e8e877dac7f9b0c01b5c0d667642009fc0"
+dependencies = [
+ "anyhow",
+ "log",
+ "pocketjs-core",
+ "rquickjs",
+]
+
+[[package]]
+name = "pocket-pi-agentos"
 version = "0.1.0"
 dependencies = [
- "pocket-pi-protocols",
+ "anyhow",
+ "log",
+ "pocket-db",
+ "pocket-fs",
+ "pocket-mod",
+ "pocket-pi-embedded",
+ "pocket-ui-surface",
  "pocketjs-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
 name = "pocket-pi-embedded"
 version = "0.1.0"
 dependencies = [
+ "pocket-mod",
  "rquickjs",
  "serde_json",
 ]
@@ -1087,12 +1191,13 @@ dependencies = [
  "embuild",
  "esp-idf-svc",
  "log",
- "pocket-pi-device-ui",
+ "pocket-pi-agentos",
  "pocket-pi-embedded",
  "pocket-pi-protocols",
  "pocket-pi-tools",
  "pocketjs-core",
  "pocketjs-esp32p4-ppa",
+ "rusqlite",
  "serde_json",
 ]
 
@@ -1116,9 +1221,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pocket-ui-surface"
+version = "0.1.0"
+source = "git+https://github.com/siwei-yuan/pocketjs.git?rev=afc8d4e8e877dac7f9b0c01b5c0d667642009fc0#afc8d4e8e877dac7f9b0c01b5c0d667642009fc0"
+dependencies = [
+ "anyhow",
+ "log",
+ "pocket-mod",
+ "pocketjs-core",
+]
+
+[[package]]
 name = "pocketjs-core"
 version = "0.1.0"
-source = "git+https://github.com/pocket-stack/pocketjs.git?rev=4c5dc9ef1dd26e6f49b036c210931d399f2b52b2#4c5dc9ef1dd26e6f49b036c210931d399f2b52b2"
+source = "git+https://github.com/siwei-yuan/pocketjs.git?rev=afc8d4e8e877dac7f9b0c01b5c0d667642009fc0#afc8d4e8e877dac7f9b0c01b5c0d667642009fc0"
 dependencies = [
  "taffy",
 ]
@@ -1126,7 +1242,7 @@ dependencies = [
 [[package]]
 name = "pocketjs-esp32p4-ppa"
 version = "0.1.0"
-source = "git+https://github.com/pocket-stack/pocketjs.git?rev=4c5dc9ef1dd26e6f49b036c210931d399f2b52b2#4c5dc9ef1dd26e6f49b036c210931d399f2b52b2"
+source = "git+https://github.com/siwei-yuan/pocketjs.git?rev=afc8d4e8e877dac7f9b0c01b5c0d667642009fc0#afc8d4e8e877dac7f9b0c01b5c0d667642009fc0"
 dependencies = [
  "pocketjs-core",
 ]
@@ -1242,7 +1358,7 @@ version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "16e4f499ac5b943d97ee6dbc44f23c2c10426f420f7d2f1793d6318911b6608c"
 dependencies = [
- "hashbrown",
+ "hashbrown 0.17.1",
  "relative-path",
  "rquickjs-sys",
 ]
@@ -1272,6 +1388,31 @@ checksum = "a13ac243b86a74120814ef7e9e30ad5a2c1199b7b9963b1cf7c84e4cdc1cad99"
 dependencies = [
  "bindgen 0.72.1",
  "cc",
+]
+
+[[package]]
+name = "rsqlite-vfs"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c51c9ae4df8a7fba42103df5c621fa3c37eccf3a3c650879e90fc48b11cc192c"
+dependencies = [
+ "hashbrown 0.16.1",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "rusqlite"
+version = "0.40.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11438310b19e3109b6446c33d1ed5e889428cf2e278407bc7896bc4aaea43323"
+dependencies = [
+ "bitflags 2.13.1",
+ "fallible-iterator",
+ "fallible-streaming-iterator",
+ "hashlink",
+ "libsqlite3-sys",
+ "smallvec",
+ "sqlite-wasm-rs",
 ]
 
 [[package]]
@@ -1402,6 +1543,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "smallvec"
+version = "1.15.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+
+[[package]]
+name = "sqlite-wasm-rs"
+version = "0.5.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc3efc0da82635d7e1ced0053bbbfa8c7ab9645d0bf36ceb4f7127bb85315d75"
+dependencies = [
+ "cc",
+ "js-sys",
+ "rsqlite-vfs",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1490,6 +1649,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dfde4e2f8595f222ceaae1fb16b4963952e9b33e358869dc4cd6316b0e0790cd"
 dependencies = [
  "arrayvec",
+ "grid",
  "serde",
  "slotmap",
 ]
@@ -1603,6 +1763,12 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
+
+[[package]]
+name = "vcpkg"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "version_check"

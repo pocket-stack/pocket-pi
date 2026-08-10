@@ -1,0 +1,21 @@
+{
+  "id": "robinhood",
+  "version": "1.0.0",
+  "dataVersion": 4,
+  "tools": [
+    {"name":"robinhood.get_accounts","description":"List Robinhood brokerage accounts. Read-only.","parameters":{"type":"object","properties":{},"additionalProperties":true}},
+    {"name":"robinhood.get_portfolio","description":"Read the latest portfolio for an account and save it to the App database.","parameters":{"type":"object","properties":{"account_number":{"type":"string"}},"additionalProperties":true}},
+    {"name":"robinhood.get_equity_positions","description":"Read equity positions and save them to the App database.","parameters":{"type":"object","properties":{"account_number":{"type":"string"}},"additionalProperties":true}},
+    {"name":"robinhood.get_equity_orders","description":"Read equity orders and save them to the App database.","parameters":{"type":"object","properties":{"account_number":{"type":"string"}},"additionalProperties":true}},
+    {"name":"robinhood.get_equity_historicals","description":"Read equity historicals and save them to the App database.","parameters":{"type":"object","properties":{"account_number":{"type":"string"}},"additionalProperties":true}},
+    {"name":"robinhood.get_realized_pnl","description":"Read realized P&L and save it to the App database.","parameters":{"type":"object","properties":{"account_number":{"type":"string"}},"additionalProperties":true}},
+    {"name":"robinhood.get_pnl_trade_history","description":"Read chronological realized P&L trade history.","parameters":{"type":"object","properties":{"account_number":{"type":"string"}},"additionalProperties":true}},
+    {"name":"robinhood.review_equity_order","description":"Review an equity order without submitting it.","parameters":{"type":"object","additionalProperties":true}},
+    {"name":"robinhood.refresh_portfolio","description":"Refresh accounts, portfolio, positions, orders and P&L into local SQLite.","parameters":{"type":"object","properties":{},"additionalProperties":false}},
+    {"name":"robinhood.storage_status","description":"Inspect this App's local SQLite schema, row counts, and bounded recent row summaries without contacting Robinhood.","parameters":{"type":"object","properties":{},"additionalProperties":false}}
+  ],
+  "tasks": ["refreshPortfolio"],
+  "schedules": [
+    {"id":"portfolio-refresh","everyMinutes":5,"task":"refreshPortfolio","args":{}}
+  ]
+}

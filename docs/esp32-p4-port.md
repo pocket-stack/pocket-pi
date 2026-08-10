@@ -8,12 +8,11 @@ Pocket Pi has two agent profiles and three hosts:
 | `esp32-p4` | bounded `pi-agent-core` | ESP32-P4 |
 | `esp32-p4-sim` | bounded `pi-agent-core` | macOS |
 
-The physical host and simulator use the same
-`pocket-pi-device-ui` crate: one 720x1280 draw list, one set of fonts, and one
-touch hit map. Simulator mouse clicks are converted to physical panel
-coordinates and dispatched through the same `ScreenState::handle_tap` method.
-The shared embedded UI displays Chat, Files and Settings. Settings is not part
-of the normal macOS host.
+The physical host and simulator use the same PocketJS App bundles and
+`pocket-pi-agentos` supervisor at a 720x1280 logical viewport. Simulator mouse
+clicks and physical touch coordinates are both dispatched to the selected App
+View. The Pi Agent Root View displays Chat, Apps, Files and Settings; there is
+no parallel Rust product UI.
 
 The physical host selects `UartBackend` for a Mac Codex/Claude Code bridge or
 `WirelessBackend` for direct OpenAI/OpenRouter/Anthropic HTTPS. These remain
@@ -92,9 +91,9 @@ UART provisioning also seeds the board clock from the Mac for development.
 Standalone operation uses ESP-IDF SNTP after Wi-Fi connects. Both feed the same
 native time and persistent schedule implementation.
 
-## Shared UI boundary
+## App UI boundary
 
-`pocket-pi-device-ui` owns rendering, interaction state and the portable
-workspace browser. Each host supplies a mounted workspace root and its model
-adapter. External applications own their UI adapters, provider clients and
-credentials; Pocket Pi core contains no Robinhood or Exa domain code.
+`apps/pi-agent`, `apps/robinhood`, and `apps/exa` own their PocketJS Views.
+`pocket-pi-agentos` selects the foreground View and keeps the Pi Agent System
+App resident. Each host supplies the mounted workspace, capabilities, model
+adapter, and renderer; product UI and domain logic do not live in Rust firmware.

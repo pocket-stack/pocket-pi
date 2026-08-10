@@ -7,7 +7,7 @@ for compiler in \
     "$firmware_root"/.embuild/espressif/tools/riscv32-esp-elf/*/riscv32-esp-elf/bin/riscv32-esp-elf-gcc
 do
     if [ -x "$compiler" ]; then
-        exec "$compiler" "$@"
+        exec "$compiler" -isystem "$firmware_root/shim" "$@"
     fi
 done
 

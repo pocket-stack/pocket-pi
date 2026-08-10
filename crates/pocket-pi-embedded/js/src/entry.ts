@@ -19,7 +19,27 @@ type ModelResult = {
   toolCall?: { id?: string; name: string; arguments?: Record<string, unknown> };
 };
 
+type HostEvent =
+  | { type: "model_delta"; id: number; delta: string }
+  | { type: "model_done"; id: number; result: string }
+  | { type: "model_error"; id: number; error: string }
+  | { type: "tool_done"; id: number; result: string };
+
+type PendingModel = {
+  stream: AssistantMessageEventStream;
+  model: any;
+  partial: any;
+  started: boolean;
+  textStarted: boolean;
+  text: string;
+};
+
 const events: unknown[] = [];
+const pendingModels = new Map<number, PendingModel>();
+const pendingTools = new Map<
+  number,
+  { resolve: (value: any) => void; reject: (error: Error) => void }
+>();
 let agent: Agent | null = null;
 
 const emptyUsage = () => ({
@@ -49,59 +69,101 @@ function modelFor(config: Config): any {
 
 function hostStream(model: any, context: any): AssistantMessageEventStream {
   const stream = new AssistantMessageEventStream();
-  queueMicrotask(() => {
-    try {
-      const result = JSON.parse(globalThis.host?.modelComplete(JSON.stringify({ model, context })) || "{}") as ModelResult;
-      const partial: any = {
-        role: "assistant",
-        content: [],
-        api: model.api,
-        provider: model.provider,
-        model: model.id,
-        usage: emptyUsage(),
-        stopReason: result.stopReason || "stop",
-        timestamp: Date.now(),
-      };
-      stream.push({ type: "start", partial });
-      if (result.toolCall) {
-        const toolCall = {
-          type: "toolCall" as const,
-          id: result.toolCall.id || `tool_${Date.now()}`,
-          name: result.toolCall.name,
-          arguments: result.toolCall.arguments || {},
-        };
-        partial.content = [toolCall];
-        partial.stopReason = "toolUse";
-        stream.push({ type: "toolcall_start", contentIndex: 0, partial: { ...partial } });
-        stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: { ...partial } });
-        stream.push({ type: "done", reason: "toolUse", message: { ...partial } });
-      } else {
-        const text = String(result.text || "");
-        partial.content = [{ type: "text", text }];
-        stream.push({ type: "text_start", contentIndex: 0, partial: { ...partial } });
-        stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: { ...partial } });
-        stream.push({ type: "text_end", contentIndex: 0, content: text, partial: { ...partial } });
-        stream.push({ type: "done", reason: partial.stopReason, message: { ...partial } });
-      }
-    } catch (error) {
-      stream.push({
-        type: "error",
-        reason: "error",
-        error: {
-          role: "assistant",
-          content: [],
-          api: model.api,
-          provider: model.provider,
-          model: model.id,
-          usage: emptyUsage(),
-          stopReason: "error",
-          errorMessage: String(error),
-          timestamp: Date.now(),
-        },
-      });
-    }
-  });
+  const partial: any = {
+    role: "assistant",
+    content: [],
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    usage: emptyUsage(),
+    stopReason: "stop",
+    timestamp: Date.now(),
+  };
+  try {
+    if (!globalThis.host) throw new Error("Pocket Pi Agent host is unavailable");
+    const id = globalThis.host.startModel(JSON.stringify({ model, context }));
+    pendingModels.set(id, {
+      stream,
+      model,
+      partial,
+      started: false,
+      textStarted: false,
+      text: "",
+    });
+  } catch (error) {
+    pushModelError(stream, model, String(error));
+  }
   return stream;
+}
+
+function ensureModelStarted(pending: PendingModel): void {
+  if (pending.started) return;
+  pending.started = true;
+  pending.stream.push({ type: "start", partial: { ...pending.partial } });
+}
+
+function pushModelDelta(pending: PendingModel, delta: string): void {
+  ensureModelStarted(pending);
+  if (!pending.textStarted) {
+    pending.textStarted = true;
+    pending.stream.push({ type: "text_start", contentIndex: 0, partial: { ...pending.partial } });
+  }
+  pending.text += delta;
+  pending.partial.content = [{ type: "text", text: pending.text }];
+  pending.stream.push({
+    type: "text_delta",
+    contentIndex: 0,
+    delta,
+    partial: { ...pending.partial },
+  });
+}
+
+function finishModel(pending: PendingModel, result: ModelResult): void {
+  ensureModelStarted(pending);
+  pending.partial.stopReason = result.stopReason || "stop";
+  if (result.toolCall) {
+    const toolCall = {
+      type: "toolCall" as const,
+      id: result.toolCall.id || `tool_${Date.now()}`,
+      name: result.toolCall.name,
+      arguments: result.toolCall.arguments || {},
+    };
+    pending.partial.content = [toolCall];
+    pending.partial.stopReason = "toolUse";
+    pending.stream.push({ type: "toolcall_start", contentIndex: 0, partial: { ...pending.partial } });
+    pending.stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: { ...pending.partial } });
+    pending.stream.push({ type: "done", reason: "toolUse", message: { ...pending.partial } });
+    return;
+  }
+
+  const finalText = String(result.text || pending.text);
+  if (!pending.textStarted || finalText !== pending.text) {
+    const delta = finalText.startsWith(pending.text) ? finalText.slice(pending.text.length) : finalText;
+    if (delta) pushModelDelta(pending, delta);
+  }
+  if (!pending.textStarted) pushModelDelta(pending, "");
+  pending.text = finalText;
+  pending.partial.content = [{ type: "text", text: finalText }];
+  pending.stream.push({ type: "text_end", contentIndex: 0, content: finalText, partial: { ...pending.partial } });
+  pending.stream.push({ type: "done", reason: pending.partial.stopReason, message: { ...pending.partial } });
+}
+
+function pushModelError(stream: AssistantMessageEventStream, model: any, message: string): void {
+  stream.push({
+    type: "error",
+    reason: "error",
+    error: {
+      role: "assistant",
+      content: [],
+      api: model.api,
+      provider: model.provider,
+      model: model.id,
+      usage: emptyUsage(),
+      stopReason: "error",
+      errorMessage: message,
+      timestamp: Date.now(),
+    },
+  });
 }
 
 function boot(configJson: string): void {
@@ -113,18 +175,16 @@ function boot(configJson: string): void {
     description: tool.description || "",
     parameters: tool.parameters || { type: "object", properties: {} },
     executionMode: "sequential" as const,
-    execute: async (id: string, args: unknown) => {
-      const result = JSON.parse(
-        globalThis.host?.tool(id, tool.name, JSON.stringify(args || {})) ||
-          JSON.stringify({ text: `tool unavailable: ${tool.name}`, isError: true }),
-      );
-      if (result.isError) throw new Error(String(result.text || `tool failed: ${tool.name}`));
-      return {
-        content: [{ type: "text" as const, text: String(result.text || "") }],
-        details: result.details,
-        terminate: Boolean(result.terminate),
-      };
-    },
+    execute: (id: string, args: unknown) =>
+      new Promise<any>((resolve, reject) => {
+        try {
+          if (!globalThis.host) throw new Error("Pocket Pi Agent host is unavailable");
+          const requestId = globalThis.host.startTool(id, tool.name, JSON.stringify(args || {}));
+          pendingTools.set(requestId, { resolve, reject });
+        } catch (error) {
+          reject(error instanceof Error ? error : new Error(String(error)));
+        }
+      }),
   }));
 
   agent = new Agent({
@@ -164,6 +224,45 @@ function abort(): void {
   agent?.abort();
 }
 
+function tick(): void {
+  const batch = JSON.parse(globalThis.host?.poll() || "[]") as HostEvent[];
+  for (const event of batch) {
+    if (event.type === "model_delta") {
+      const pending = pendingModels.get(event.id);
+      if (pending) pushModelDelta(pending, String(event.delta || ""));
+    } else if (event.type === "model_done") {
+      const pending = pendingModels.get(event.id);
+      if (!pending) continue;
+      pendingModels.delete(event.id);
+      try {
+        finishModel(pending, JSON.parse(event.result || "{}") as ModelResult);
+      } catch (error) {
+        pushModelError(pending.stream, pending.model, String(error));
+      }
+    } else if (event.type === "model_error") {
+      const pending = pendingModels.get(event.id);
+      if (!pending) continue;
+      pendingModels.delete(event.id);
+      pushModelError(pending.stream, pending.model, event.error);
+    } else if (event.type === "tool_done") {
+      const pending = pendingTools.get(event.id);
+      if (!pending) continue;
+      pendingTools.delete(event.id);
+      try {
+        const result = JSON.parse(event.result || "{}");
+        if (result.isError) throw new Error(String(result.text || "App tool failed"));
+        pending.resolve({
+          content: [{ type: "text" as const, text: String(result.text || "") }],
+          details: result.details,
+          terminate: Boolean(result.terminate),
+        });
+      } catch (error) {
+        pending.reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+  }
+}
+
 function drain(): string {
   return JSON.stringify({
     phase: agent?.state.isStreaming ? "thinking" : agent ? "ready" : "idle",
@@ -172,4 +271,4 @@ function drain(): string {
   });
 }
 
-globalThis.PocketPiEmbedded = { boot, prompt, abort, drain };
+globalThis.PocketPiEmbedded = { boot, prompt, abort, tick, drain };

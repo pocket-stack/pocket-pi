@@ -46,7 +46,7 @@ impl ModelBackend for WirelessBackend {
     fn complete(
         &self,
         request_json: &str,
-        on_delta: &mut dyn FnMut(&str),
+        _on_delta: &mut dyn FnMut(&str),
     ) -> Result<String, String> {
         let (endpoint, body) = self.request(request_json)?;
         if body.len() > MAX_REQUEST_BYTES {
@@ -116,7 +116,7 @@ impl ModelBackend for WirelessBackend {
             }
             pending.extend_from_slice(&chunk[..count]);
             if (200..300).contains(&status) {
-                drain_sse_lines(&mut pending, &mut decoder, on_delta)?;
+                drain_sse_lines(&mut pending, &mut decoder)?;
             }
         }
         if !(200..300).contains(&status) {
@@ -131,7 +131,7 @@ impl ModelBackend for WirelessBackend {
         }
         if !pending.is_empty() {
             pending.push(b'\n');
-            drain_sse_lines(&mut pending, &mut decoder, on_delta)?;
+            drain_sse_lines(&mut pending, &mut decoder)?;
         }
         decoder.finish()
     }
@@ -140,7 +140,6 @@ impl ModelBackend for WirelessBackend {
 fn drain_sse_lines(
     pending: &mut Vec<u8>,
     decoder: &mut ProviderStream,
-    on_delta: &mut dyn FnMut(&str),
 ) -> Result<(), String> {
     while let Some(end) = pending.iter().position(|byte| *byte == b'\n') {
         let mut line = pending.drain(..=end).collect::<Vec<_>>();
@@ -154,9 +153,7 @@ fn drain_sse_lines(
         };
         let data = data.trim_start();
         if !data.is_empty() && data != "[DONE]" {
-            if let Some(delta) = decoder.push(data)? {
-                on_delta(&delta);
-            }
+            let _ = decoder.push(data)?;
         }
     }
     Ok(())

@@ -153,6 +153,6 @@ direct_dependencies:
 - idf
 - joltwallet/littlefs
 - waveshare/esp_lcd_hx8394
-manifest_hash: a4c3032b83ef98ef2fd7e20dcd6f9fe17a1ade1defcb0e8bfa0184245cbf83f1
+manifest_hash: f580ce29f698ad36eb00e6342d57a6c0aa991afcd88977548bbc0fa306c9b088
 target: esp32p4
 version: 2.0.0

@@ -1,0 +1,1068 @@
+# Pocket Pi AgentOS 架构设计
+
+状态：架构基线 + v1 实现记录（以“常驻 Pi Agent System App”为当前实现）。
+
+截至 2026-08-08，当前分支已经实现可运行的第一版：Pi Agent Root App、App
+Supervisor、App Tool Catalog/Router、`AppTask` Schedule、`data.fs`、
+`data.sqlite`、后台 Data Action、revision-coalesced projection cache，以及
+Robinhood 和 Exa 两个 App。
+Simulator contract tests 已通过；常驻 System App refactor 已在 ESP32-P4 实机
+完成冷启动、LittleFS App 加载、Root View、MIPI-DSI/Touch 初始化、Agent Tool
+Registry 启动和一次完整 UART model turn。运行中切换普通 App 的生命周期 contract
+已有自动测试；实机触摸切换仍保留为发布前人工体验验收。
+
+本文件同时保留最终架构约束。标为“待补齐”的部分不能因为 v1 已经能启动而
+被误认为已经完成。
+
+## 1. 一句话结论
+
+Pocket Pi 是一套面向 Agent 的本地 App Runtime：Rust 固件提供稳定的硬件和
+能力层；Pi Agent 拥有顶层 `/workspace`；每个 App 是一个预编译 PocketJS
+Bundle，里面包含暴露给 Agent 的 Tools、内部 Tasks、Schedules、SQLite
+数据和绑定这些数据的固定 View。
+
+最短的理解方式是：
+
+```text
+Firmware = 稳定机制
+Pi Agent = /workspace 的 owner + 特殊 System App
+App      = Public Tools + Data Actions + SQLite State + Cached Fixed View
+```
+
+这套设计要实现的 core goal 是：**Agent 不是固件外挂的聊天进程，而是 runtime
+中拥有长期身份、顶层 workspace 和跨 App 能力的第一等 System App。** 用户切换
+View 或操作其他 App 时，Agent 的 turn、context 和 Tool execution 仍继续；切回
+Pi Agent 时看到的是同一个 session，而不是重新启动的 UI shell。
+
+## 2. 设计目标
+
+1. 完整保留当前 Pocket Pi 的 Agent、模型、workspace、schedule、设备和
+   Settings 能力。
+2. Robinhood、Exa 等产品逻辑和 UI 不再进入通用 Rust 固件。
+3. App 可以给 Pi Agent 暴露 Tools，但不需要暴露内部表结构、凭据、网络协议
+   和 UI 实现。
+4. App 可以在本地按时运行任务，不需要每五分钟都唤醒模型。
+5. SQLite 是 App 数据的唯一持久化真相；成功写入后，正在显示的 View 自动
+   更新，但不能每帧轮询数据库。
+6. 普通 App 彼此隔离；Pi Agent 始终拥有整个 `/workspace`。
+7. 同一套 App 源码和 Module contract 可以在 macOS、模拟器、ESP32-P4 和
+   后续硬件上复用。
+8. Agent 工作与前台 View 导航解耦：模型/Tool 在运行时，触摸、键盘、切换
+   Robinhood/Exa 和返回 Agent 都不能中断或重建 Agent。
+
+## 3. 第一版明确不做什么
+
+- 不做应用市场和远程分发协议。
+- ESP32 不修改 App/Root View 源码，不编译 PocketJS Bundle。
+- 不做 Agent 动态创建 Tools 或 workflow interpreter。
+- Tool 变化后可以 reload Agent session，不要求 live hot-plug。
+- ESP32 不提供通用 POSIX shell、进程、多用户或桌面式多任务。
+- 凭据永远不直接暴露给 App 或模型。
+- 不自动把上游 MCP `tools/list` 的所有 Tool 暴露给模型。
+
+合法 Bundle 怎么进入 `/workspace/apps/` 不属于本架构。第一版可以预装，也
+可以通过 Mac 开发/部署路径复制。这里定义“如何加载和运行”，不定义“如何
+分发”。
+
+## 4. 核心概念
+
+### 4.1 Firmware / Runtime
+
+受信任的 Rust 代码，负责：
+
+- 硬件驱动；
+- QuickJS 生命周期；
+- PocketJS UI core 和渲染；
+- SQLite 和文件系统挂载；
+- 模型、网络、MCP、凭据；
+- Scheduler；
+- App 加载、隔离和路由；
+- 资源限制与恢复。
+
+Firmware 只提供机制，不包含 Robinhood、Exa、Weather 等产品逻辑。
+
+### 4.2 Pi Agent Root Runtime
+
+Pi Agent 不在 `/workspace/apps/` 下。它的 home 和文件权限根就是
+`/workspace`。
+
+它同时也是一个特殊 System App：选择它时，板子显示它的 PocketJS Root
+View；打开其他 App 后，它可以继续在后台等待模型、Tool 或 Agent Schedule。
+
+它不是两个拼接起来的 runtime。`pi-agent-core` Agent Loop、context、Tool
+Registry 与 Root View 必须挂载在**同一个 PocketJS Guest**，共同构成一个
+`pi-agent` App instance。App Supervisor 在启动时创建一次这个 instance，并
+保持到系统关机或明确的 System App restart。
+
+`foreground App` 只是“当前哪个 View 产生 DrawList、接收触摸”的选择，不是
+Agent 的生命周期开关。打开普通 App 不得 drop、reload 或 reset Pi Agent
+Guest，也不得清空 conversation、pending model request 或 pending Tool call。
+
+### 4.3 App
+
+一个 App 是一个独立版本单元：
+
+```text
+Public Tools   Agent 能看到的名称、描述和 JSON Schema
+Data Actions   Tool、Schedule、UI refresh 共用的后台数据入口
+SQLite State   App 自己的唯一持久化业务真相
+Fixed View     SQLite bounded projection 的内存 cache + PocketJS UI
+```
+
+“Fixed View”只表示当前 release 内固定，不表示写死在 Rust 固件里。
+
+### 4.4 Native Module
+
+Native Module 用固定 spec 把一个受限 Rust 能力挂载给 QuickJS Guest。
+
+PocketJS 已经定义了 `ui`、`data.sqlite`、`data.fs` 的 Module 形状。
+Pocket Pi 再补充 model、net、MCP、schedule、shell、device Settings 和 App
+lifecycle。
+
+### 4.5 Runtime instance
+
+Pi Agent System App 的 Agent Loop 和 Root View 共用一个常驻 QuickJS Guest。
+普通 App 则可以有两个互不等待的 execution context：一个 foreground View Guest，
+以及一个按需创建的 headless Data Action Guest。schema 变化时，Supervisor 先依据
+App descriptor 的 `dataVersion` 删除该 App 的旧 SQLite file；View 可以立即打开空库，
+version guard 不执行任何业务 query。第一次 Tool/Schedule 再在后台初始化新 schema，
+不阻塞 UI。二者共享同一个 App-owned
+`DbModule` owner、同一个 SQLite 文件和同一个内存 revision counter，但不共享
+网络调用栈或 View reactive state。
+
+慢模型、HTTP/MCP 和 Data Action 不在 UI tick 或 touch callback 内执行。Native
+只拥有 transport、credential 和 SQLite primitive；App 的 provider mapping、
+完整 response-body 解析和 transaction 仍由 JS/TS Data Action 拥有。View Guest
+从不拿网络 response，也不写业务表。
+
+## 5. High-level 架构
+
+```mermaid
+flowchart TB
+    HW["硬件<br/>Display · Touch · Wi-Fi · Flash · Clock"]
+
+    subgraph FW["Firmware / Pocket AgentOS Runtime"]
+        DRIVERS["Platform Drivers"]
+        HOST["App Supervisor<br/>System App lifetime + foreground selection"]
+        TOOLCAT["Tool Catalog + Router"]
+        SCHED["Native Scheduler"]
+        DATA["App Data Action Runner<br/>headless JS/TS"]
+        REV["Per-App revision<br/>frame-boundary coalescing"]
+        CONTEXT["Context Assembler"]
+        QJS["Runtime Manager<br/>多个隔离 Runtime instance"]
+        RENDER["PocketJS UI Core + Renderer"]
+
+        subgraph MODS["Native Modules"]
+            UI["ui"]
+            DB["data.sqlite"]
+            FS["data.fs"]
+            NET["net.http"]
+            MCP["mcp.client"]
+            MODEL["model.stream"]
+            SHELL["shell.bounded"]
+            DEVICE["device.settings"]
+        end
+    end
+
+    subgraph ROOT["/workspace — Pi Agent 拥有"]
+        AGENT["常驻 Pi Agent System App<br/>同一个 Guest: Agent Loop + Root View"]
+        AGENTDB["data/agent.sqlite"]
+        ROOTFILES["AGENTS.md · strategy.md · memory/"]
+    end
+
+    subgraph APPS["/workspace/apps/"]
+        APP1["Robinhood Bundle<br/>Tools · Data Actions · Schedules · View"]
+        CACHE1["View projection cache<br/>Solid signals"]
+        APP1DB["robinhood/data/robinhood.sqlite"]
+        APP2["Other App Bundle"]
+        APP2DB["other/data/app.sqlite"]
+    end
+
+    HW --> DRIVERS
+    DRIVERS --> HOST
+    HOST --> QJS
+    HOST --> RENDER
+    HOST --> TOOLCAT
+    HOST --> SCHED
+    HOST --> DATA
+
+    QJS -->|"一个 QuickJS Guest"| AGENT
+    QJS -->|"一个 QuickJS Guest"| APP1
+    QJS -->|"一个 QuickJS Guest"| APP2
+    MODS --> AGENT
+    MODS --> APP1
+    MODS --> APP2
+
+    ROOTFILES --> CONTEXT
+    CONTEXT --> AGENT
+    AGENT --> AGENTDB
+    APP1 --> APP1DB
+    DATA --> APP1DB
+    DATA --> REV
+    REV -->|"foreground + stale"| CACHE1
+    CACHE1 --> APP1
+    APP2 --> APP2DB
+
+    AGENT --> TOOLCAT
+    TOOLCAT --> HOST
+    SCHED --> HOST
+    AGENT -->|"Root 被选中时"| RENDER
+    APP1 -->|"被选中时"| RENDER
+    RENDER --> HW
+```
+
+## 6. 必须一直成立的规则
+
+1. `/workspace` 的 owner 是 Pi Agent，不是某个普通 App。
+2. 普通 App 只能访问 Host 为它挂载的 data root。
+3. Pi Agent 的 Agent Loop 和 Root View 只有一个常驻 Guest；普通 App 的 View
+   与 headless Data Action 可以是两个 Guest，但必须属于同一个 App runtime。
+4. 同一个 App 只有一个 SQLite owner；View 与 Data Action 的 DB ops 经该 owner
+   串行化，不能各自创建会竞争同一 LittleFS 文件的 connection。
+5. 只有 `AgentWake` Schedule 才会启动模型；普通 AppTask 不启动模型。
+6. App Tool、App Schedule、UI refresh 可以共用同一个 Data Action。
+7. 每次成功 SQLite transaction 立即递增一次 App revision；revision 通知在前台
+   frame boundary 合并，render tick 不轮询 SQLite。
+8. 凭据留在 native 层，不进入 App data、Agent context 或 Tool 参数。
+9. Bundle 只能调用 Host 实际挂载的 capabilities。
+10. 所有硬件差异都留在 Host 和 Native Modules 后面。
+11. Pi Agent System App 在 Supervisor 生命周期内只创建一次；切换普通 App
+    只能改变 foreground View，不能替换它。
+12. 一个 host tick、View `tick()` 或 touch callback 不能等待模型、HTTP/MCP
+    或 Data Action；View 只操作内存 cache，后台 Data Action 在完整 body 返回后
+    才写 SQLite。
+13. 普通 frame 只能比较内存 revision；revision 未变化、App 在后台或该
+    projection cache 已是最新时，SQLite query 数量必须为零。
+14. 产品 UI 不展示 CPU、PSRAM、FPS 或 LCD refresh telemetry；这些指标没有稳定、
+    低开销且可跨硬件复用的语义。底层性能诊断只走 UART/log instrumentation。
+
+## 7. Workspace 布局
+
+```text
+/workspace/
+  AGENTS.md
+  strategy.md
+
+  memory/
+    INDEX.md
+    <notes>.md
+
+  .pi-agent/
+    schedule.json               Pi Agent 自己创建的 AgentWake 状态
+  .system/
+    app-catalog.json            可选的 App Catalog 缓存
+
+  data/
+    agent.sqlite                Pi Agent 数据
+    view/
+      current                   当前 Root View release id
+      releases/
+        <release-id>/
+          pocket.json
+          plan.json
+          agent-app.json
+          app.js
+          agent.js                  Pi Agent Loop bundle，仅 System App
+          app.pak
+
+  apps/
+    robinhood/
+      current
+      releases/
+        <release-id>/
+          pocket.json
+          plan.json
+          agent-app.json
+          app.js
+          data-action.js            可选；headless 数据入口，不挂载 UI
+          app.pak
+          migrations.json
+      data/
+        robinhood.sqlite
+        .system/
+          schedules.json        Robinhood AppTask 的运行游标和最近结果
+        <其他 App 文件>
+      tmp/
+
+    <other-app>/
+      ...
+```
+
+Pi Agent 的挂载：
+
+```text
+data.fs      root = /workspace
+data.sqlite  root = /workspace/data
+```
+
+普通 App 的挂载：
+
+```text
+data.fs      root = /workspace/apps/<app-id>/data
+data.sqlite  root = /workspace/apps/<app-id>/data
+```
+
+`current` 是保存 active release id 的小文件，不依赖 symlink。它只能在新
+release 完成校验后通过 `data.fs` atomic replace 切换。运行中的 Runtime 绝
+不能 eval 一个只写了一半的 Bundle。
+
+## 8. App contract
+
+概念上，一个 App 可以这样定义：
+
+```ts
+export default defineApp({
+  id: "robinhood",
+  tools: {
+    get_portfolio: { parameters: accountSchema, action: "getPortfolio" },
+    refresh_portfolio: { parameters: {}, action: "refreshPortfolio" },
+  },
+  actions: { getPortfolio, refreshPortfolio },
+  schedules: [{ id: "portfolio-refresh", everyMinutes: 5,
+                action: "refreshPortfolio", args: {} }],
+  view: RobinhoodView,
+});
+```
+
+当前 artifact 对应为：
+
+```text
+agent-app.json   Public Tools、Schedules、capability metadata
+data-action.js   后台网络、完整 body decode、normalize、SQLite transaction
+app.js + app.pak 前台 projection cache 和固定 View
+```
+
+构建后产生两种不同性质的 metadata：
+
+1. PocketJS `plan.json`：PocketJS resolver 生成的 target-specific build IR，
+   保存 target、HostOps ABI、viewport、resolved capabilities 和 plan hash。
+2. Pocket Pi `agent-app.json`：从 `defineApp()` 静态提取的 runtime descriptor，
+   保存 Public Tool schemas、Task/Schedule names、App data schema version 和
+   artifact hashes。
+
+不能把这两个文件混为一谈。`plan.json` 继续遵守 PocketJS platform contract；
+App Supervisor 读取 `agent-app.json` 建立不需要启动 Guest 的 Tool/Schedule
+catalog。
+
+一个 release 的 metadata 合起来至少包含：
+
+- App id 和版本；
+- Public Tool schemas；
+- Schedule declarations；
+- capability requirements；
+- viewport contract；
+- artifact hashes。
+
+Supervisor 不需要启动所有 App，就能从 descriptor 建立 Agent Tool Catalog。
+
+### App 内部依赖方向
+
+```text
+Agent Tool ─────┐
+App Schedule ───┼──> Data Action ──> Native transport ──> SQLite transaction
+UI refresh ─────┘                                             │
+                                                              ▼ commit
+                                                       App revision++
+                                                              │
+                                              foreground frame coalesces
+                                                              │
+                                                              ▼
+                                             bounded query -> memory cache -> View
+```
+
+这是一条所有 App 都必须遵守的依赖方向，不是 Robinhood 特例。View 不调用网络、
+不写业务表、也不把 response 直接 render；Data Action 不持有 View state。Agent
+不需要知道 App 的 SQLite 表名。
+
+## 9. App Supervisor
+
+App Supervisor 是受信任 Host 代码，负责：
+
+- 扫描本地 App releases；
+- 校验 PocketJS plan、Agent App descriptor、hash、viewport 和 capabilities；
+- 选择 active release；
+- 创建和销毁 App Runtime；
+- 挂载正确的 data root 和 Modules；
+- 切换前台 App；
+- 路由 App Tool 和 AppTask；
+- 保证一个 App 只有一个 execution lease；
+- 注册和更新 App Schedules；
+- 记录启动、完成、错误和超时；
+- Bundle 启动失败时回退到上一个合法 release 或 recovery UI。
+
+### 常驻 System App 与前台 View
+
+Supervisor 持有两种不同的引用：
+
+```text
+system:     PiAgentSystemRuntime                // 启动一次，始终存在
+runtimes:   Map<AppId, OrdinaryAppRuntime>      // 固定 catalog 在启动时全部 preload
+active_app: Option<AppId>                       // None 表示显示 Root View
+```
+
+每个 host tick 都推进常驻 `system`；普通 App 的 `tick()` 只允许执行常量时间的
+View bookkeeping，不能 poll network、写 SQLite 或重建 projection。只有被选中的
+Runtime 执行 surface render；普通 App 不接管或复制 Agent Loop。由此保证：
+
+1. Agent turn 跨 App navigation 保持同一 identity/context；
+2. 后台 model completion 和 Tool completion 继续进入 System App；
+3. Root projection 即使暂时不可见也可更新，返回时直接显示当前状态；
+4. foreground App 出错或被卸载不会连带终止 Agent。
+
+### 前台与 headless 执行
+
+如果 App 正在打开，View Runtime 只处理触摸和缓存 render。Agent Tool、Schedule
+或 UI refresh 都进入同一个 bounded Data Action queue；runner 按需加载该 App 的
+`data-action.js`，在独立 headless Guest 中顺序执行。schema DDL 只在
+`PRAGMA user_version` 不匹配时执行；正常启动不重复执行 `CREATE TABLE IF NOT EXISTS`。
+
+如果 App 不在前台，已 preload 的 View Guest 不运行 projection reload。Data
+Action 仍可更新该 App SQLite 并递增 revision；下次选择这个 View 时，前台 frame
+只读取一次当前 bounded projection。preload 解决的是 bundle/QuickJS cold load，
+不把后台 App 变成 SQLite polling loop。
+
+同一个 App 可以同时有一个 cached View Guest 和一个 headless Data Action Guest，
+但只能有一个 Data Action 在执行，且两者共享同一个 SQLite owner。这不是两份 App
+实例，而是同一个 App runtime 的 data plane 与 view plane。
+
+## 10. Scheduler
+
+Scheduler 是 Rust 持有的时钟和持久 wake store。它支持两种 target：
+
+```rust
+enum ScheduleTarget {
+    AgentWake { prompt: String },
+    AppTask {
+        app_id: String,
+        task: String,
+        args_json: String,
+    },
+}
+```
+
+### 10.1 AgentWake
+
+启动一个 Agent turn，保留当前 `schedule.set/list/cancel/clear` 和自动唤醒
+能力。只有需要模型判断的任务才用它。
+
+### 10.2 AppTask
+
+直接调用 App 声明的 Task，不调用模型。Robinhood 每五分钟刷新就是
+`AppTask`。
+
+### 10.3 生命周期
+
+1. Supervisor 校验 Schedule 指向的 Task 确实存在。
+2. 激活 release 时，按 `(app_id, schedule_id)` reconcile Schedule。
+3. Rust Scheduler 把 `next_run_at`、cadence、target、enabled 和 last result
+   写入该 App 私有的 `data/.system/schedules.json`。App bundle 中的
+   `agent-app.json` 是声明源；运行状态不再集中混放在 workspace 根目录。
+4. 到期后原子 claim wake。
+5. Supervisor 把 AppTask enqueue 到该 App 的 Data Action runner，并立即推进下次
+   时间；不会在 scheduler tick 内等待网络。
+6. Data Action 自己把 running/succeeded/failed 等 domain 结果写入 App SQLite；
+   Scheduler 的运行游标不复制这份业务状态。
+
+ESP32 默认策略：
+
+- 同一 App 不并发执行；
+- 重启后错过多个周期只合并补跑一次；
+- idempotency key 为 `<app-id>:<schedule-id>:<scheduled-at>`；
+- 执行时间和返回值大小有上限；
+- 连续失败不会自动唤醒 Agent；
+- App 可以从自己的 SQLite 显示 stale/error 状态。
+
+## 11. Tool Catalog 和 Tool Router
+
+第一版 Pi Agent 看到两类 Tools：
+
+```text
+Native Tools
+  read · write · edit · find · grep · ls
+  bash · device.status · time.now
+  workspace.context
+  schedule.set · schedule.list · schedule.cancel · schedule.clear
+
+App Tools
+  robinhood.get_portfolio
+  robinhood.refresh_portfolio
+  research.search
+```
+
+Workspace 动态自定义 Tools 不属于 v1。
+
+### 11.1 注册
+
+1. Native modules 提供自己的 Tool definitions。
+2. Supervisor 从 active `agent-app.json` 读取 namespaced App Tool schemas。
+3. Tool Catalog 检查重名和 capability availability。
+4. 合并后的 definitions 注册进 Pi Agent session。
+5. v1 中启用、停用或更改 App Tools 后 reload Agent session；不要求 live
+   hot-plug。
+
+### 11.2 调用
+
+```text
+Model 产生 Tool call
+  -> Pi Agent Tool adapter
+  -> Tool Router
+       Native name -> CoreToolHost / Native Module
+       App name    -> App Supervisor.enqueue_data_action(app, tool, args)
+                      -> data-action.js -> native transport -> SQLite COMMIT
+  -> normalized ToolResult
+  -> Model
+```
+
+Tool Router 负责 JSON 参数校验和结果大小限制。App Tool 名称必须带 App
+namespace，避免冲突。会改变数据或调用 provider 的 App Tool 不在 View Guest
+执行；纯只读的诊断 Tool（例如 `storage_status`）可以直接读取 bounded SQLite
+projection。
+
+## 12. Robinhood MCP 如何接入
+
+MCP 是 Robinhood App 使用的上游协议，不是 Pi Agent 看到的 App 边界。
+
+### 12.1 Native `mcp.client`
+
+Firmware 负责：
+
+- HTTPS/TLS；
+- OAuth credential reference；
+- MCP initialize 和 session id；
+- JSON-RPC/SSE framing；
+- retry 和 connection reset；
+- response size limit；
+- secret isolation。
+
+### 12.2 Robinhood Bundle
+
+App 负责：
+
+- 选择安全的 upstream operation 子集；
+- 定义 Agent-facing Tool 名称和 schema；
+- 把本地 Tool/Task 映射到 MCP call；
+- normalize provider response；
+- 写 Robinhood SQLite；
+- 定义 freshness、error 和 history；
+- 渲染 View。
+
+```ts
+function refreshPortfolio(args) {       // 只在 headless Data Action Guest
+  const snapshot = services.call("mcp.client", "callTool", args);
+  db.exec("BEGIN IMMEDIATE");
+  savePortfolio(snapshot);              // 完整 body 已返回并 normalize
+  db.exec("COMMIT");
+  app.commit();                         // 只 bump revision，不触碰 View
+}
+```
+
+上游 `tools/list` 不会自动变成模型权限。App release 明确选择哪些 Tool 可见。
+认证、session 和不可逆操作留在 native 或单独的批准边界里。
+
+### 12.3 Exa 如何接入
+
+Exa 使用同一套边界，但走受限的 native `net.http` connection，而不是把 API
+key 或任意 URL 交给 Bundle：
+
+```text
+research.search / research.fetch
+  -> Exa private task
+  -> net.http(connection="exa", path="/search" | "/contents")
+  -> normalize response
+  -> transaction 写 searches / search_results / documents
+  -> app.commit() 递增 Exa revision
+  -> 前台下一 rendered frame 最多重查一次搜索历史 projection
+```
+
+Firmware 注入 credential、绑定 host/path、执行 TLS 和 response limit；Exa
+Bundle 拥有请求字段、结果归一化、SQLite schema 和搜索历史 View。这样 Exa
+不是 Rust 固件里的特例。
+
+Native transport 在进入 ESP HTTP/MCP 之前必须读取一个无锁 connection-ready
+状态；未完成 association/DHCP 时立即向 Data Action 返回 error，不能让断网请求
+进入 ESP-Hosted。Data Action 再按本 App 语义写 terminal failure row，View 仍只在
+commit 后重读 SQLite。
+
+`connection-ready` 只代表 association + DHCP，不伪装成互联网健康检查。ESP32-P4
+hardware adapter 必须在 link 被动断开/恢复时同步更新这个状态和 Settings projection。
+当前 ESP-Hosted 实机测量表明默认 `WIFI_PS_MIN_MODEM` 会把独立 TLS/HTTP 平均耗时
+放大到约 8 秒；该 adapter 因此在 station start 后使用 `WIFI_PS_NONE`。这是板级
+transport policy，不进入 App Bundle 或 PocketJS portable module contract。TCP/TLS
+瞬时失败只重试 transport；只有 provider 明确返回 stale-session 语义时才清空 MCP
+session id。
+
+## 13. SQLite 和 View 更新
+
+SQLite 是持久数据，不是每帧 reactive engine。每个 App v1 只有一个无锁内存
+`revision: AtomicU32`，不是持久表、不是 Boolean，也不是 SQLite watch。
+
+```text
+Data Action                    View Runtime
+───────────                    ────────────
+network / complete body
+normalize
+BEGIN
+write App tables
+COMMIT
+app.commit(): revision++  ──►  foreground frame 读取一次 revision
+                               revision == loadedRevision -> 0 SQLite query
+                               revision != loadedRevision -> bounded query
+                                                            更新内存 cache
+                                                            render cache
+```
+
+### 13.1 Debounce / coalescing 的准确位置
+
+每次成功 transaction 都必须立即 `revision++`，不能 debounce COMMIT，也不能用
+一个容易丢事件的 dirty Boolean。debounce 发生在 **notification delivery / cache
+reload**：foreground View 每个 rendered frame 最多采样一次最新 revision；两个
+frame 之间发生 1 次或 20 次 COMMIT，都只执行一次 projection reload，并把
+`loadedRevision` 直接推进到最新值。
+
+Data Action 不在网络前写 durable `running` row。UI 发起的 Action 可以用内存状态
+显示正在执行；网络完整返回后，业务表和 terminal run result 在同一 transaction
+落库并只递增一次 revision。这样失败或中断不会留下永久 `running` projection。
+
+### 13.2 Projection cache
+
+每个 View projection 在内存中保存：
+
+```ts
+type ProjectionCache<T> = {
+  key: string;              // 例如 account + time span
+  loadedRevision: number;
+  value: T;
+};
+```
+
+第一版 runtime 使用一个 App revision，View 可以有多个 cache，例如 Robinhood
+的 accounts、selected portfolio、activity、positions 和 chart。切换已经加载且
+`loadedRevision` 相同的 account/span 只切内存 signal；未加载或 stale 时只查该
+bounded projection，不能重读整个数据库。
+
+只有在实测证明单一 revision 导致明显无关 reload 后，才增加 topic/table revision。
+不要一开始为每张表维护 Boolean：它会引入丢更新、跨表 transaction 一致性和大量
+订阅 bookkeeping。App-level monotonic revision 是最小正确 primitive。
+
+### 13.3 何时允许读 SQLite
+
+- View 首次激活；
+- foreground View 发现 App revision 变新；
+- 用户切换到尚未加载或已经 stale 的 bounded projection。
+
+除此之外不读。普通 frame、动画、scroll、已经缓存的 account/span 切换，以及
+后台 App 都是零 SQLite query。View 从不因为打开页面而发起网络请求。
+
+### Query 规则
+
+- 列表 query 必须有 `LIMIT`、分页或聚合；
+- 大型时间序列先聚合成 View 大小的窗口；
+- Robinhood 1D/1W chart 固定为 20 个 time buckets；一次 indexed SQLite query
+  恰好返回 20 行，View 只绘制这些 bucket 的 point projection；
+- migrations 必须创建必要索引；
+- provider 的模型 stream 只在 transport/decoder 内部消费；Pi Agent 等完整结果
+  后只向 Root View 发一次文本更新，不能让每个 token 触发 JS event、layout 或
+  flash write；
+- schema version 和 migrations 由 App 管理。
+
+### 13.4 App 数据库保存业务事实，不保存原始 Tool payload
+
+Tool、Schedule 和 UI refresh 共享 Data Action implementation。每个 provider body
+完整返回后，Data Action 在内存中 normalize，再明确更新对应的 domain tables。
+View 不读取原始 provider JSON，也不在前台推断上游字段结构。通用的 append-only
+`tool_events`、`results_json` 和 `document_json` 不属于产品 read model。
+
+Robinhood v1 schema：
+
+- `accounts`：账户 identity 和当前状态；
+- `portfolio_current`：cash、buying power、day/week P&L 等当前字段，不含 total value；
+- `total_value`：按 `account_number + observed_at` 保存折线图所需的 value history；
+- `positions`：每个账户的当前持仓 rows；
+- `activities`：每个账户最近的 order/activity rows；
+- `refresh_runs`：只保存 terminal succeeded/partial/failed result；
+- `equity_historicals`、`pnl_trades`、`order_reviews`：分别由对应公开 Tool 更新。
+
+Exa v1 schema：
+
+- `searches`：一次 search 的 query、时间、terminal status 和 result count；
+- `search_results`：最多 8 条结构化 result rows；
+- `documents`：`research.fetch` 得到的 bounded document text 和 metadata。
+
+开发阶段 schema 变化由 App descriptor 的 `dataVersion` 显式触发：Supervisor 在打开
+SQLite 前只删除该 App 的 `<app_id>.sqlite`，写入 App-local version marker，然后由
+该 App 的 Data Action 创建新 schema；不维护 migration/backward compatibility。
+不得删除其他 App、该 App 的其他 files、顶层 workspace、NVS Wi-Fi 或 credentials。
+
+## 14. Pi Agent Root Runtime
+
+Pi Agent 是拥有更宽 filesystem mount 的特殊 System App，负责：
+
+- Agent/model loop；
+- Chat 和 Tool run 展示；
+- `/workspace` coding Tools；
+- memory 和 strategy；
+- bounded context assembly；
+- AgentWake Schedules；
+- 发现和调用已安装 App Tools；
+- Files、Runs/Schedules、Device Settings View；
+- `agent.sqlite` 中的 conversation、message、run、Tool call。
+
+Agent Loop 由 System App release 中的 JavaScript `agent.js`（`pi-agent-core`）
+提供，并与 `app.js` Root View eval 到同一个 PocketJS Guest。Rust 只提供
+模型 transport、Native/App Tool 路由、调度和生命周期；它不拥有第二套 Agent
+state machine。Root View 与 Agent Loop 同属 `pi-agent` release/runtime，这使
+Agent 能在未来通过更新自己的 release 一起演进 context、Tools adapter 和 UI。
+
+第一版不要求 Pi Agent 修改 App code、构建 Bundle 或动态增加 Tool definitions。
+
+### 14.1 ESP32 支持的自我管理
+
+- 读写 Agent workspace files；
+- 维护 `AGENTS.md`、strategy、memory；
+- 组装 bounded context；
+- 创建 AgentWake Schedules；
+- 使用 Native Tools 和已安装 App Tools。
+
+### 14.2 ESP32 不支持
+
+- 作为产品能力编辑 PocketJS 源码；
+- 编译 TSX、styles、fonts 或 `.pak`；
+- 修改 firmware/Rust modules；
+- v1 动态加载 Tool source。
+
+### 14.3 macOS 开发能力
+
+macOS Host 可以额外提供显式 developer capability，用来编辑源码和构建
+Root/App Bundles。它不属于 ESP32 portable contract。
+
+## 15. Context Assembler
+
+Context Assembler 把选定 workspace files 组装成有严格上限的 Agent context，
+不是把整个文件系统全部塞进 prompt。
+
+第一版输入：
+
+```text
+固定 system identity
+/workspace/AGENTS.md
+/workspace/strategy.md
+/workspace/memory/INDEX.md
+最新或被选中的 memory notes
+紧凑的 device state
+```
+
+规则：
+
+- 单文件和总 context 都有 byte ceiling；
+- 非 UTF-8 和不支持的文件不进入 prompt；
+- App 业务表不会自动进入 context；
+- App Tool schemas 进入 Tool list，不重复进 system prompt；
+- credentials 不进入 context；
+- Agent 需要 App 数据时调用 App Tools。
+
+## 16. Native Module 归属
+
+| Module | Rust/native 负责 | Bundle 负责 |
+| --- | --- | --- |
+| `ui` | retained tree、layout、text、animation、DrawList | JSX View 和 reactive state |
+| `data.sqlite` | SQLite、handles、limits、storage binding | schema、migrations、queries、transactions |
+| `data.fs` | confinement、quota、atomic replace | App files 和 config |
+| `net.http` | TLS、connection、limits、transport | endpoint 和 domain decoding |
+| `mcp.client` | auth、session、framing、limits | safe operation mapping 和 domain semantics |
+| `model.stream` | provider transport、内部 stream decode 和完整 result | Agent policy；ESP32 presentation 每次 request 只接收一次完整文本更新 |
+| `schedule.wake` | clock、persistence、claiming | AgentWake 或 AppTask declaration |
+| `shell.bounded` | allowlisted device/workspace operations | Agent 决定何时调用 |
+| `device.settings` | Wi-Fi、NVS、restart | Settings View |
+| `app.lifecycle` | catalog、activation、Data Action queue、per-App revision 和 frame-boundary coalescing | descriptor、`app.commit()` 和 projection caches |
+| `app.data` | 后台 Guest 生命周期、bounded queue、共享 DB owner | provider mapping、完整 body decode、transaction |
+
+Native 层拥有稀缺资源、硬件和 secrets；Bundle 拥有产品行为。
+
+## 17. 板子上呈现的 UI
+
+任意时刻只呈现一个 Runtime 的 foreground DrawList。
+
+### 17.1 Root/Home
+
+Pi Agent Root View 提供 Chat、Apps、Files、Runs/Schedules 和 Settings。它会
+替代当前产品 UI 的 Rust `ScreenState`。产品 UI 不保留 legacy Rust 实现或
+双轨 fallback；固件只负责渲染 PocketJS DrawList 和必要的底层硬件错误日志。
+
+### 17.2 App foreground
+
+打开 Robinhood 后，显示 Robinhood View。常驻 Pi Agent System App 继续在原
+Guest 中运行，但 Root View 暂不产生前台 DrawList。用户仍可操作 Robinhood，
+再切回时 Agent session 不变。
+
+### 17.3 Background update
+
+- Robinhood 关闭时，五分钟 AppTask 只运行 headless Data Action；完整网络 body
+  返回后写 SQLite 并递增 revision，不加载或查询 View；
+- Robinhood 打开时，Data Action 与 View 仍分离。成功 COMMIT 后，下一次
+  foreground rendered frame 发现 revision 变化，只更新 stale bounded cache。
+
+## 18. 当前 Pocket Pi 能力映射
+
+最终架构不主动删除任何现有能力；当前 v1 的保留程度见第 22 节。
+
+| 当前能力 | 新架构归属 |
+| --- | --- |
+| model request 和 streaming | `model.stream` + Pi Agent Runtime |
+| OpenAI/OpenRouter/Anthropic/UART adapters | Host/provider adapters |
+| workspace read/write/edit/find/grep/ls | Root Agent workspace Tools |
+| bounded bash | `shell.bounded` |
+| `device.status` 和 `time.now` | native device/time Tools |
+| `workspace.context` | Context Assembler |
+| Agent `schedule.*` 和 autonomous wake | Scheduler `AgentWake` |
+| Chat、Files、keyboard、message reader | Root PocketJS View |
+| Wi-Fi scan/connect/forget、restart | `device.settings` + Root View |
+| simulator/physical contract parity | shared runtime/module contracts |
+| macOS full Pi sessions/extensions | macOS Agent profile |
+
+新增而不是现有的能力包括：App Supervisor、App Catalog、App Tools、AppTask
+Schedules、revision-coalesced projection cache 和 Bundle-based Views。
+
+## 19. Host profiles 与跨硬件
+
+Pocket Pi 继续保留不同 Agent profile：
+
+| Host | Agent profile | 额外能力 |
+| --- | --- | --- |
+| macOS | full `pi-coding-agent` | sessions、extensions、可选 Bundle 开发/构建 |
+| ESP32 simulator | embedded `pi-agent-core` | 用 macOS adapter 实现相同 embedded contracts |
+| ESP32-P4 | embedded `pi-agent-core` | LittleFS、touch/LCD、Wi-Fi/NVS 和嵌入式 limits |
+
+### 19.1 “一次适配，不同硬件跑”的准确含义
+
+它不表示同一个 firmware binary 或同一份 byte-identical App artifact 在所有
+硬件上运行。
+
+它表示：
+
+1. 新硬件只需要实现一次 Host 和它承诺支持的 Native Modules。
+2. Hardware target 发布真实的 capability 和 viewport profile。
+3. 任何 requirements 被满足的 App 都不需要写 App-specific Rust/hardware code。
+4. 同一份 App 源码和业务逻辑根据 ABI、viewport、raster density 和 assets
+   生成 target-specific `app.js`/`app.pak`。
+
+以 Robinhood 为例，Tool mapping、SQLite schema、refresh Task 和 View source
+保持相同；ESP32 与 macOS 只是在同一 specs 后面提供不同 display、filesystem、
+network 和 credential 实现。
+
+### 19.2 能做到跨硬件的条件
+
+- App 不直接调用 ESP-IDF、wgpu、macOS 或 raw device API；
+- capability ids 和 module specs 稳定且 append-only；
+- `requires` 是硬条件，可选能力使用 `enhances`；
+- UI 声明支持的 viewport policy 或 target variant；
+- simulator 验证 contract，physical hardware 做最终验收；
+- resource ceiling 是公开 contract，不是隐藏设备事实。
+
+一个新 board 完成并通过这些 modules 的 contract tests 后，兼容 App 不需要再
+做 board-specific port。
+
+## 20. 这是不是 AgentOS
+
+从产品和 runtime 的意义上，它符合 AgentOS：
+
+1. Agent 是系统一级 actor，不是某个 App 里的聊天框。
+2. Agent 拥有持久 workspace 和 context。
+3. App 原生暴露语义化 Tools 给 Agent。
+4. App 同时提供人类可见的 View。
+5. 本地 Schedule 让系统能自主工作，不需要模型参与每个循环。
+6. Host 统一管理 capabilities、credentials、lifecycle 和 hardware。
+7. Tools、Tasks、State 和 View 可以作为 App 单元演进，不改 firmware。
+8. Agent 的执行生命周期独立于当前前台 View，用户和 Agent 可以并行操作同一
+   套 App platform。
+
+但它不是传统通用 OS：它不提供任意进程、多用户安全、POSIX 兼容或通用
+desktop。准确说法应当是：
+
+> Pocket Pi 是一套 embedded AgentOS runtime：Agent 拥有 workspace；本地
+> App 通过 Agent Tools、durable state、autonomous Tasks 和 human View 同时
+> 服务 Agent 与用户。
+
+这比“Agent UI”更准确，也比“替代传统操作系统”更克制。
+
+## 21. 我对这套架构的理解
+
+这套架构最重要的不是“ESP32 能运行 JavaScript”，而是 Agent 和用户用两种
+接口操作同一个本地软件：
+
+- Pi Agent 通过 App Tools 看见 App；
+- 用户通过 App View 看见 App；
+- 两条路径最终汇合到同一批 Data Actions 和 SQLite State。
+
+Robinhood 是最直观的例子。Rust Schedule 每五分钟触发一次，或者模型调用
+`robinhood.refresh_portfolio`，两者最终都调用同一个 `refreshPortfolio`
+Data Action。它使用 native MCP/network transport，等完整 body 返回后向
+Robinhood SQLite commit 一份 snapshot，然后结束。
+
+如果 View 正在打开，revision 只使 cache 失效，并在 frame boundary 合并更新；
+如果 View 关闭，不发生任何 UI 查询，下次打开直接读取最新 bounded projection。
+
+所以 Rust 层应该“小但强”：它拥有 clock、secret、hardware、resource limit、
+isolation 和 lifecycle。App Bundle 拥有名称、schema、provider mapping、业务
+规则、数据库形状和 UI。Pi Agent 拥有 workspace，并决定什么时候使用这些
+能力，但普通 App 的后台任务不需要模型 turn。
+
+正是这个分离，让 Pocket Pi 可以从一个 Agent demo 发展成 App platform，也
+可以从一块板扩展到多种硬件，而不需要把每个新产品重新写进 firmware。
+
+## 22. 当前实现状态
+
+### 22.1 已实现
+
+1. PocketJS 固定在 `feat/fs-surface` revision
+   `afc8d4e8e877dac7f9b0c01b5c0d667642009fc0`；Simulator 和 ESP32-P4 共用
+   `pocket-fs`、`pocket-db`、`pocket-mod` 和 `pocket-ui-surface` contracts。
+2. Pi Agent 位于顶层 `/workspace`；Root View release 位于
+   `/workspace/data/view`，其中 `app.js` 和 `agent.js` 是同一个 System App
+   release；普通 App 位于 `/workspace/apps/<id>`。
+3. App Supervisor 会 seed/校验 built-in release，并在启动时创建一次常驻的
+   Pi Agent System App；当前固定 catalog 中的普通 App View Runtime 也全部在启动
+   阶段 preload。普通 View Guest 被限制在自己的 `data/` 和 `tmp/`，切换它们不会
+   替换 System App；前台导航只选择已经存在的 surface。这里没有 Marketplace、
+   LRU、pinning 或 residency policy。
+4. Tool Catalog/Router 合并 Native Tools 与 namespaced App Tools；Agent Loop
+   和 Root View 已挂载在同一个 PocketJS Guest。模型与 Native Tool 的慢 I/O 在
+   worker 完成，再以 event batch 回到这个 Guest，因此这些路径不阻塞 UI tick。
+5. AgentWake store 持久化在 `.pi-agent/schedule.json`；Robinhood 的五分钟
+   AppTask store 持久化在 `apps/robinhood/data/.system/schedules.json`；
+   refresh 是 `AppTask`，只 enqueue Data Action，不启动模型。
+6. 每个有后台数据能力的 App release 包含可选 `data-action.js`。一个 bounded
+   `AppDataRunner` 顺序执行 Tool/Schedule/UI refresh；Robinhood 和 Exa View
+   bundles 已删除网络调用和业务表写入。
+7. 每个 App 有一个共享 `DbModule` owner。View Guest 与 Data Action Guest 使用
+   同一 connection owner，避免 ESP32 `unix-none` VFS 上两个 connection 竞争同一
+   LittleFS 文件；network wait 不持有 DB mutex。
+8. 每次成功 transaction 调用 `app.commit()`，递增该 App 的 `AtomicU32`
+   revision。只有 foreground rendered frame 会比较 revision；连续多个 commit
+   合并成一次 `dataChanged`。普通 frame 与后台 App 不读 SQLite。
+9. Robinhood Data Action 拥有 curated Agent Tools、MCP operation mapping、完整
+   response decode 和单次 refresh transaction；每个 operation 更新明确的 domain
+   table，不保存原始 Tool payload。View 只拥有 accounts/portfolio/positions/
+   activity/chart 的 bounded projection 和 cache。chart 的 1D/1W 窗口固定为 20 个
+   time buckets，SQLite query 最多返回 20 行，render 不读取 DB。
+10. Exa Data Action 拥有 `research.search`、`research.fetch`、HTTP mapping 与
+    SQLite transaction；View 从 `searches + search_results` 只读取最近 8 次搜索。
+11. Root View 已提供 Chat、App 入口、Files、Runs/Schedules、Settings 摘要和
+   屏幕键盘；Agent policy/loop 在 JS，workspace/App Tools 的受限底层实现和
+   AgentWake 由 Rust host 提供。Pocket Pi 的小型 shared Design System inventory
+   单独记录在 `docs/pocket-pi-design-system.md`；它只包含 PocketJS 上的基础
+   typography/tokens/components，不包含 App-specific View 或 native UI logic。
+12. ESP32-P4 使用 4 KiB PSRAM launcher，待 ESP-IDF entry task 退出后创建 64
+    KiB internal AgentOS runtime stack；App bundle 构建后会 minify 以降低固件
+    footprint，但不会把 minify 当作 stack isolation。
+13. Simulator tests 已证明：Agent turn 进行中打开 Robinhood，仍能收到完整回复
+    和 `agent_end`；前后台切换前后 System App Guest identity 不变；Exa 在前台
+    时 Agent 仍能路由 Robinhood App Tool、写 SQLite 并完成 turn。新增 contract
+    test 证明 3 次 commit 在下一前台 frame 只 reload 一次，5 个普通 frame 不
+    reload，后台 2 次 commit 在重新打开时只 reload 一次。
+14. Simulator Data Action tests 已证明：Exa search 用一次 transaction 写入
+    `searches` 和 `search_results`；Robinhood 完整 fixture refresh 用一次
+    transaction 写入各业务表与 terminal `refresh_runs`，并成功显示；provider
+    failure 只写 failed refresh run、保留上一次业务 projection，而且可以再次
+    enqueue。
+15. `legacy_main()`、Rust `ScreenState` product UI 和其专属 display path 已删除，
+    固件没有保留旧 UI 或死代码。
+16. 删除全部 legacy Rust UI 后的基线固件已刷入 ESP32-P4；实机从 System App
+    release 的 `agent.js` 在 Root Guest 中启动 Agent，并经 UART Codex backend
+    完成 prompt 和 `agent_end`。当前 embedded presentation contract 已进一步改为：
+    provider 可以在 host/transport 内部 stream，但一次 model request 只给 Root View
+    一个完整文本更新。实机长回复测试在 bridge 内部合并 409 个 provider chunks、
+    615 个字符后只发送一个 UART result；完成后继续观察 30 秒没有 task watchdog。
+17. ESP32-P4 的 PocketJS View 已接入真实 PPA backend，矩形填充、A8 字形混合和
+    SRM 图像转换不再走全屏 CPU software fallback；每个 triple-buffer framebuffer
+    保留独立 incremental render state。实机启动日志已确认
+    `RGB565 backend ready: FILL + A8 BLEND + SRM`。
+18. ESP32 UI owner 在运行期不再调用 `heap_caps_get_info`；此前该 API 在 TLS 使用
+    后扫描碎片化 PSRAM 会长期持有全局 heap lock，使 UI 卡住并产生蓝屏式 watchdog
+    dump。产品 UI 已删除全部 CPU、内存、FPS 和 LCD 状态展示，相关问题只通过
+    UART/log diagnostics 观察。
+19. Host 不再无条件以 60Hz 重建所有 PocketJS View。只有当前 foreground View
+    dirty 时才执行 UI `frame()`、更新 retained DrawList 和提交 panel render。
+    ESP32 owner 是原生 FreeRTOS task，主循环必须用
+    `vTaskDelay` 明确让出 CPU，不能用 pthread 语义的 `std::thread::sleep` 代替；
+    否则即使总 CPU/内存数字不高，CPU0 idle task 仍可能无法喂 watchdog。
+20. 当前代码已通过 `pocket-pi-agentos` 7 个 tests、ESP32-P4 Simulator 5 个 tests，
+    通过 ESP32-P4 release cross-build 并刷入实体板。稳态冷启动测得 Root、Exa、
+    Robinhood View preload 分别约 2.0、2.8、3.3 秒，约 20.5 秒进入完整 UI；没有
+    watchdog 或蓝屏。`dataVersion` reset 只发生一次，正常启动不重复 DDL。
+21. 实机断网 Tool 验证已证明：Agent 调用 `research.search` 后，Data Action 在
+    native connection-ready gate 处 fail-fast，写一条 terminal error search，随后
+    删除不安全的 30 秒 ESP-Hosted 自动 reconnect 后，连续观察 120 秒没有 assertion
+    或重启；用户仍可从 Settings 明确发起重连。`research.storage_status` 实际返回
+    `searches=1`、`search_results=0`、`documents=0`；
+    `robinhood.storage_status` 返回 9 张新 domain tables，其中 `refresh_runs=1`、
+    其余业务表为 0。旧 `tool_events/search_history/raw JSON` 表均不存在。
+
+### 22.2 待补齐，不能视为已实现
+
+- Root Files 已有只读文件阅读器；conversation/message/run/tool call 还没有落入
+  `data/agent.sqlite`。
+- release 已有 descriptor/`pocket.json` 校验和 atomic `current` 写入，但由
+  PocketJS resolver 生成并校验真实 `plan.json`、完整 artifact hash、migration
+  transaction、上一版本回退和独立 recovery UI 还没有完成。
+- macOS full Agent Host 尚未迁到同一个 App Supervisor；当前跨硬件实证是
+  ESP32 simulator + physical ESP32-P4，不代表 macOS parity 已完成。
+- 固定 catalog 的普通 App View 现在全部在 Supervisor 启动时 preload；真实
+  ESP32-P4 启动时长已量测，但持续切换仍需人工验收。后续如果 catalog
+  扩大，再依据实测在 PocketJS runtime 层设计加载策略，不能先引入 Marketplace、
+  LRU/residency policy，也不能把 App UI/数据逻辑写回 Rust。
+- Robinhood OAuth grant 与 Exa key 都由 Mac Keychain 复用，并只在本次 UART
+  boot config 中以内存态注入；credential 不进入 App DB、workspace 或 View。
+  上一个 schema 的物理板验证曾证明 Exa/Robinhood provider -> SQLite -> View
+  链路可达；本节定义的新 normalized schema 已在实体板创建，并验证断网 terminal
+  rows 与 storage projection，但尚未取得一次新 schema 下的 provider success。
+  `agent.robinhood.com` 从当前 AP 建连仍有波动，失败轮次会写 error batch，但不会
+  覆盖最后一次成功的 portfolio projection。
+- 实机已验证后台 Agent turn，但“turn 运行中连续触摸切换 Robinhood/Exa 再返回”
+  仍需人工操作验收；自动 lifecycle/tool-routing test 已覆盖同一状态机路径。
+- 通用 Data Action runner 已在当前实机验证 FreeRTOS pthread stack、断网
+  failure transaction、SQLite dump 与 network fail-fast；真实 provider success、
+  持续触摸切换和成功/失败交替 retry 仍待验证。
+- 当前修改型 App Tool 返回的是 queued run receipt，Data Action completion 记录在
+  App SQLite 和日志。若 Agent 需要同步获得 provider 的最终 ToolResult，应在后续
+  增加一个 bounded completion delivery contract；不能为此把网络调用搬回 View
+  或 host tick。
+- v1 是一个 App-level revision。Robinhood 已将 DB read 限制在 initial/
+  `dataChanged` 和 account/span 的 bounded cache miss，但所有 projection cache 的
+  `loadedRevision` 仍需继续显式化，随后再用板上 query 计数确认交互路径为零重读。
+
+明确延后：Marketplace/distribution、ESP32 source editing、Agent-authored Tools、
+通用 live Tool hot-plug，以及不经编译的 declarative View schema。当前固定 catalog
+直接 preload 全部普通 App View，不预先实现未来的 residency policy。
+
+## 23. 验收标准
+
+1. 当前 Agent workspace、model、Settings、Agent Schedule 全部继续工作。
+2. Robinhood Tool definitions 能进入 Pi Agent，但不编译进通用 Pocket Pi core。
+3. Agent Tool 和五分钟 App Schedule 调用同一个 refresh Task。
+4. App Schedule path 不发起模型请求。
+5. 每次成功 transaction 都递增 revision；同一 frame 间隔内的多次递增只让打开
+   的 View reload 一次，revision 不变的普通 frame 是零 SQLite query。
+6. 后台 App 不执行 View query；重新选择时只在 revision stale 时读取一次 bounded
+   projection，并立即显示当前数据。
+7. 普通 App 无法读取另一个 App 的 data root。
+8. Pi Agent 可以读取和管理顶层 `/workspace`。
+9. 重启后 App 数据保留，错过的 recurring run 按规则合并一次。
+10. Tool schema 非法、capability 缺失、Bundle 损坏、migration 失败时 fail
+    closed，并进入 recovery 或保留上一个合法 release。
+11. 同一份 Robinhood source 通过 simulator contract tests，并用对应 target
+    artifacts 在真实 ESP32-P4 上运行。
+12. Agent turn 进行中可以操作键盘、打开 Robinhood/Exa、在 App 内触摸交互并
+    返回 Root；Agent 不重启，pending turn 正常完成，conversation/context 保留。
+13. 切换 foreground 前后 `pi-agent` Guest identity 和 boot count 不变；普通
+    App failure 不得终止 System App。
+14. 网络失败、超时或 malformed body 只能更新 App 的失败状态，不能阻塞 View、
+    触发 View 网络重试或让 revision delivery 进入无限 retry loop。
+
+## References
+
+- [PocketJS core concepts](https://pocketjs.dev/docs/concepts/)
+- [PocketJS platform contracts](https://pocketjs.dev/docs/platform-contracts/)
+- [PocketJS DB module PR #231](https://github.com/pocket-stack/pocketjs/pull/231)
+- [PocketJS FS module PR #238](https://github.com/pocket-stack/pocketjs/pull/238)
+- [`ARCHITECTURE.md`](../ARCHITECTURE.md)：当前已实现的 Pocket Pi profiles 和
+  Host ownership

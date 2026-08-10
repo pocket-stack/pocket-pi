@@ -1,8 +1,9 @@
 declare global {
   var host:
     | {
-        modelComplete(request: string): string;
-        tool(callId: string, name: string, args: string): string;
+        startModel(request: string): number;
+        startTool(callId: string, name: string, args: string): number;
+        poll(): string;
       }
     | undefined;
   var PocketPiEmbedded:
@@ -10,6 +11,7 @@ declare global {
         boot(config: string): void;
         prompt(text: string): void;
         abort(): void;
+        tick(): void;
         drain(): string;
       }
     | undefined;

@@ -10,13 +10,13 @@ publish = false
 anyhow.workspace = true
 env_logger = "0.11"
 log.workspace = true
-pocket-pi-device-ui = { path = "../../crates/pocket-pi-device-ui" }
+pocket-pi-agentos = { path = "../../crates/pocket-pi-agentos" }
 pocket-pi-embedded = { path = "../../crates/pocket-pi-embedded" }
 pocket-pi-protocols = { path = "../../crates/pocket-pi-protocols" }
 pocket-pi-tools = { path = "../../crates/pocket-pi-tools" }
-pocketjs-core = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "4c5dc9ef1dd26e6f49b036c210931d399f2b52b2" }
-pocket-ui-wgpu = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "4c5dc9ef1dd26e6f49b036c210931d399f2b52b2" }
-pocket3d = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "4c5dc9ef1dd26e6f49b036c210931d399f2b52b2", default-features = false }
+pocketjs-core.workspace = true
+pocket-ui-wgpu = { git = "https://github.com/siwei-yuan/pocketjs.git", rev = "afc8d4e8e877dac7f9b0c01b5c0d667642009fc0" }
+pocket3d = { git = "https://github.com/siwei-yuan/pocketjs.git", rev = "afc8d4e8e877dac7f9b0c01b5c0d667642009fc0", default-features = false }
 serde_json.workspace = true
 tempfile = "3"
 ureq = { version = "2.12", features = ["json"] }

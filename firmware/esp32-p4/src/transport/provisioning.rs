@@ -15,7 +15,10 @@ pub struct RuntimeConfig {
     pub wifi_password: Option<String>,
     pub model: ModelSettings,
     pub model_api_key: Option<String>,
+    pub exa_api_key: Option<String>,
+    pub robinhood_access_token: Option<String>,
     pub initial_prompt: Option<String>,
+    pub initial_prompt_delay_seconds: u64,
     pub unix_time_seconds: Option<u64>,
 }
 
@@ -70,7 +73,14 @@ pub fn request_runtime_config(
         wifi_password: secret(&value, "wifiPassword", 63)?,
         model,
         model_api_key,
+        exa_api_key: secret(&value, "exaApiKey", 512)?,
+        robinhood_access_token: secret(&value, "robinhoodAccessToken", 4096)?,
         initial_prompt: text(&value, "initialPrompt", 4_000)?,
+        initial_prompt_delay_seconds: value
+            .get("initialPromptDelaySeconds")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+            .min(120),
         unix_time_seconds: value
             .get("unixTimeSeconds")
             .and_then(serde_json::Value::as_u64),

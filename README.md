@@ -120,6 +120,7 @@ cargo xtask build esp32-p4
 
 DEVICE_PORT=/dev/cu.usbmodem...
 espflash flash --baud 921600 --port "$DEVICE_PORT" \
+  --partition-table firmware/esp32-p4/partitions.csv \
   firmware/esp32-p4/target/riscv32imafc-esp-espidf/release/pocket-pi-p4
 ```
 
@@ -196,7 +197,7 @@ The shared PocketJS device UI includes:
 - Chat with streamed replies, recent-turn history and a full-message reader;
 - Files with workspace metadata, file viewing and scrolling;
 - Settings with Wi-Fi scanning, selection and password entry;
-- touch keyboard, system telemetry and next-schedule status.
+- touch keyboard and next-schedule status.
 
 Settings is an embedded-device feature and is not linked into native macOS
 Pocket Pi. This repository does not include Robinhood or Exa UI, clients,
@@ -235,7 +236,7 @@ crates/pocket-pi/             full desktop pi-coding-agent runtime
 crates/pocket-pi-embedded/    embedded pi-agent-core guest and host traits
 crates/pocket-pi-tools/       portable workspace, shell, time and schedule tools
 crates/pocket-pi-protocols/   model request, response and streaming codecs
-crates/pocket-pi-device-ui/   shared PocketJS device UI and interaction state
+crates/pocket-pi-agentos/     App Supervisor, System App lifecycle and App contracts
 hosts/macos/                  native desktop composition root
 hosts/esp32-p4-sim/           macOS adapters for the embedded product
 firmware/esp32-p4/            ESP-IDF hardware composition root and adapters

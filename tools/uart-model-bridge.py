@@ -22,6 +22,67 @@ READY = "PPI-RPC-READY"
 WAITING = "PPI-RPC-WAITING"
 REQUEST = "PPI-RPC-REQUEST:"
 STREAM = "PPI-RPC-STREAM:"
+ROBINHOOD_KEYCHAIN_SERVICE = "Codex MCP Credentials"
+ROBINHOOD_KEYCHAIN_ACCOUNT = "robinhood-trading|5cbe81c78ff5ae58"
+EXA_KEYCHAIN_SERVICE = "Pocket Pi Credentials"
+EXA_KEYCHAIN_ACCOUNT = "exa-api-key"
+WIFI_KEYCHAIN_SERVICE = "Pocket Pi Wi-Fi"
+WIFI_KEYCHAIN_ACCOUNT = "TUF WIFI6"
+
+
+def keychain_secret(service: str, account: str) -> str | None:
+    """Read one generic-password value without ever printing it."""
+    try:
+        result = subprocess.run(
+            ["security", "find-generic-password", "-s", service, "-a", account, "-w"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return None
+    value = result.stdout.strip()
+    return value if result.returncode == 0 and value else None
+
+
+def robinhood_access_token() -> str | None:
+    """Reuse a completed Codex MCP OAuth grant without exposing it to disk."""
+    try:
+        result = subprocess.run(
+            [
+                "security",
+                "find-generic-password",
+                "-s",
+                ROBINHOOD_KEYCHAIN_SERVICE,
+                "-a",
+                ROBINHOOD_KEYCHAIN_ACCOUNT,
+                "-w",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        credential = json.loads(result.stdout)
+        token = credential.get("token_response", {}).get("access_token")
+        return token if isinstance(token, str) and token else None
+    except (json.JSONDecodeError, AttributeError):
+        return None
+
+
+def exa_api_key() -> str | None:
+    """Load the user-provided Exa key from macOS Keychain."""
+    return keychain_secret(EXA_KEYCHAIN_SERVICE, EXA_KEYCHAIN_ACCOUNT)
+
+
+def saved_wifi() -> tuple[str, str] | None:
+    """Load the development board Wi-Fi without exposing it to source or logs."""
+    password = keychain_secret(WIFI_KEYCHAIN_SERVICE, WIFI_KEYCHAIN_ACCOUNT)
+    return (WIFI_KEYCHAIN_ACCOUNT, password) if password else None
 
 
 def write_line(fd: int, line: str) -> None:
@@ -35,6 +96,29 @@ def write_line(fd: int, line: str) -> None:
         payload = payload[count:]
 
 
+def log_tool_failure(request: dict[str, object]) -> None:
+    """Print only failed ESP tool text, never successful account payloads."""
+    context = request.get("context")
+    if not isinstance(context, dict):
+        return
+    messages = context.get("messages")
+    if not isinstance(messages, list):
+        return
+    for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("role") != "toolResult":
+            continue
+        if message.get("isError") is not True:
+            return
+        content = message.get("content")
+        if not isinstance(content, list):
+            return
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                failure = str(item.get("text", "App tool failed"))[:400]
+                print(f"[bridge] ESP tool failure: {failure}", flush=True)
+                return
+
+
 def config(args: argparse.Namespace) -> dict[str, object]:
     provider = args.provider or ("codex" if args.backend == "uart" else "openai")
     value: dict[str, object] = {
@@ -44,13 +128,40 @@ def config(args: argparse.Namespace) -> dict[str, object]:
     }
     if args.model:
         value["model"] = args.model
-    if args.provision_wifi:
+    wifi = saved_wifi()
+    if wifi:
+        value["wifiSsid"], value["wifiPassword"] = wifi
+        print(f"Wi-Fi: provisioning {wifi[0]} from Keychain", flush=True)
+    elif args.provision_wifi:
         value["wifiSsid"] = input("Wi-Fi SSID: ").strip()
         value["wifiPassword"] = getpass.getpass("Wi-Fi password: ")
     if args.backend == "wireless":
         value["modelApiKey"] = getpass.getpass(f"{provider} API key: ")
+    if args.provision_exa:
+        key = exa_api_key()
+        if key:
+            value["exaApiKey"] = key
+            print("Exa: reusing Keychain API key (RAM only on device)", flush=True)
+        else:
+            key = getpass.getpass("Exa API key: ")
+            if key:
+                value["exaApiKey"] = key
+    if args.provision_robinhood:
+        token = robinhood_access_token()
+        if token:
+            value["robinhoodAccessToken"] = token
+            print(
+                "Robinhood: reusing existing authorized Codex MCP session (RAM only)",
+                flush=True,
+            )
+        else:
+            token = getpass.getpass("Robinhood OAuth access token: ")
+            if token:
+                value["robinhoodAccessToken"] = token
     if args.prompt:
         value["initialPrompt"] = args.prompt
+        if args.prompt_delay_seconds:
+            value["initialPromptDelaySeconds"] = args.prompt_delay_seconds
     return value
 
 
@@ -64,7 +175,17 @@ def main() -> int:
     )
     parser.add_argument("--model")
     parser.add_argument("--prompt", help="submit one prompt after the board agent is ready")
+    parser.add_argument(
+        "--prompt-delay-seconds",
+        type=int,
+        choices=range(0, 121),
+        default=0,
+        metavar="0..120",
+        help="delay the repeatable boot prompt while device services settle",
+    )
     parser.add_argument("--provision-wifi", action="store_true")
+    parser.add_argument("--provision-exa", action="store_true")
+    parser.add_argument("--provision-robinhood", action="store_true")
     args = parser.parse_args()
     provider = args.provider or ("codex" if args.backend == "uart" else "openai")
     if args.backend == "uart" and provider not in ("codex", "claude-code"):
@@ -119,21 +240,15 @@ def main() -> int:
                         if model_backend is None:
                             raise RuntimeError("wireless mode does not provide a UART model backend")
                         stream_stats = [0, 0]
+                        request_payload = json.loads(line[len(REQUEST) :])
+                        log_tool_failure(request_payload)
 
                         def emit_delta(delta: str) -> None:
                             stream_stats[0] += 1
                             stream_stats[1] += len(delta)
-                            write_line(
-                                fd,
-                                STREAM
-                                + json.dumps(
-                                    {"type": "text_delta", "text": delta},
-                                    separators=(",", ":"),
-                                ),
-                            )
 
                         result = model_backend.complete(
-                            json.loads(line[len(REQUEST) :]),
+                            request_payload,
                             emit_delta,
                         )
                         call = result.get("toolCall")
@@ -146,7 +261,8 @@ def main() -> int:
                         elif isinstance(result.get("text"), str):
                             print(f"[bridge] Pi reply: {result['text']}", flush=True)
                             print(
-                                f"[bridge] streamed {stream_stats[0]} chunks / {stream_stats[1]} chars",
+                                f"[bridge] coalesced {stream_stats[0]} provider chunks / "
+                                f"{stream_stats[1]} chars into one UART result",
                                 flush=True,
                             )
                         write_line(
