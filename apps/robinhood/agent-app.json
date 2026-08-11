@@ -61,7 +61,7 @@
   "tools": [
     {
       "name": "robinhood.search_tools",
-      "description": "Search Pocket Pi's checked-in Robinhood Trading MCP catalog. Use this before robinhood.call whenever the exact upstream Tool and arguments are not already present in the conversation. Returns the official description, exact JSON Schema, Pocket Pi persistence behavior, and whether the Tool is a real account or real-money action. This performs no Robinhood request and writes no SQLite data.",
+      "description": "Search Pocket Pi's checked-in Robinhood Trading MCP catalog. Use this before robinhood.call whenever the exact upstream Tool and arguments are not already present in the conversation. Returns the checked-in description, exact upstream JSON Schema, Pocket Pi persistence behavior, and whether the Tool is a real account or real-money action. This performs no Robinhood request and writes no SQLite data.",
       "parameters": {
         "type": "object",
         "properties": {

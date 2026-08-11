@@ -60,7 +60,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Currency-pair UUIDs to add (e.g. the object_id from get_watchlist_items where object_type=currency_pair, or the id from get_currency_pairs). Mutually exclusive with symbols and index_ids."
+            "description": "Currency-pair UUIDs to add, available as object_id from get_watchlist_items entries where object_type=currency_pair. Mutually exclusive with symbols and index_ids."
           },
           "index_ids": {
             "type": [
@@ -389,7 +389,7 @@
     {
       "name": "get_equity_historicals",
       "namespace": "equity_market_data",
-      "description": "Get OHLCV bars for one or more equity symbols across an explicit time range. Use this for charting, \"recent activity\" questions, and backtesting. The server auto-selects an interval when one is not provided. If the bar's interpolated field is true, bar was synthesized to fill a gap and carry no new information.\n\nParameter rules:\n- interval is optional; when omitted, the server auto-selects an interval that targets ~2,500 bars across the requested range. Provide an explicit interval only when you need a specific granularity.\n- interval values are fixed; the server does NOT aggregate intermediate bars. For a custom interval (e.g. 3-minute), request the next-finer fixed interval and aggregate client-side.\n- bounds defaults to 'regular' (RTH only). Use 'extended' or '24_5' only when the user explicitly asks about extended-hours activity.\n- adjustment_type defaults to 'split' (split-adjusted, the right default for backtesting). Use 'none' for raw prices, 'all' for split + dividend adjustment.\n- If the range would produce more bars than the upstream allows at the explicitly requested interval, narrow the range or coarsen the interval — the call is rejected before reaching upstream. The cap does not apply when interval is auto-selected. Pocket Pi returns this result directly to the Agent and does not persist it, because the current fixed View does not consume this data.",
+      "description": "Get OHLCV bars for one or more equity symbols across an explicit time range. Use this for charting, \"recent activity\" questions, and backtesting. The server auto-selects an interval when one is not provided. If the bar's interpolated field is true, bar was synthesized to fill a gap and carry no new information.\n\nParameter rules:\n- interval is optional; when omitted, the server auto-selects an interval that targets ~2,500 bars across the requested range. Provide an explicit interval only when you need a specific granularity.\n- interval values are fixed; the server does NOT aggregate intermediate bars. For a custom interval (e.g. 3-minute), request the next-finer fixed interval and aggregate client-side.\n- bounds defaults to 'regular' (RTH only); use 'extended' for pre-market through post-market data or '24_5' for overnight data.\n- adjustment_type defaults to 'split' (split-adjusted, the right default for backtesting). Use 'none' for raw prices, 'all' for split + dividend adjustment.\n- If the range would produce more bars than the upstream allows at the explicitly requested interval, narrow the range or coarsen the interval — the call is rejected before reaching upstream. The cap does not apply when interval is auto-selected. Pocket Pi returns this result directly to the Agent and does not persist it, because the current fixed View does not consume this data.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -434,7 +434,7 @@
     {
       "name": "get_equity_orders",
       "namespace": "equity_trading",
-      "description": "Fetch equity orders for an account — list mode (newest first; open and closed, including fills, cancellations, rejections) or single-order mode by passing order_id. When the user asks for \"orders\" without specifying an asset class, call get_equity_orders, get_option_orders, and get_advanced_orders (OCO / multi-leg contingency orders) in parallel.\n\nFiltering tips:\n- Prefer narrow queries: combine state, symbol, and/or created_at_gte for specific questions (e.g. \"my filled AAPL orders this week\") — the per-page cap is fixed.\n- created_at_gte: interpret relative times in the user's timezone, convert to UTC before sending.\n- symbol forces a symbol→instrument lookup; omit it if you don't need it. Pocket Pi normalizes the View fields from this response into robinhood.sqlite and publishes one App revision after commit.",
+      "description": "Fetch equity orders for an account — list mode (newest first; open and closed, including fills, cancellations, rejections) or single-order mode by passing order_id. When the user asks for \"orders\" without specifying an asset class, call get_equity_orders and get_option_orders in parallel.\n\nFiltering tips:\n- Prefer narrow queries: combine state, symbol, and/or created_at_gte for specific questions (e.g. \"my filled AAPL orders this week\") — the per-page cap is fixed.\n- created_at_gte: interpret relative times in the user's timezone, convert to UTC before sending.\n- symbol forces a symbol→instrument lookup; omit it if you don't need it. Pocket Pi normalizes the View fields from this response into robinhood.sqlite and publishes one App revision after commit.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -843,7 +843,7 @@
     {
       "name": "get_option_historicals",
       "namespace": "option_market_data",
-      "description": "Get OHLC price bars for one or more option contracts (by instrument UUID) across an explicit time range. Use this for charting an option's price history and \"recent activity\" questions. The server auto-selects an interval when one is not provided. If the bar's interpolated field is true, bar was synthesized to fill a gap and carry no new information.\n\nParameter rules:\n- instrument_ids are option contract UUIDs from get_option_instruments. Resolve underlying -> get_option_chains -> get_option_instruments first; this tool does not accept ticker symbols.\n- interval is optional; when omitted the server auto-selects an interval that targets a bounded bar count across the range. Provide an explicit interval only when you need a specific granularity.\n- bounds defaults to 'regular' (regular hours). Use '24_5'/'24_7' only when the user explicitly asks about extended-hours or overnight option activity.\n- If an explicitly requested interval would produce more bars than the upstream allows for the range, the call is rejected — narrow the range or coarsen the interval. The cap does not apply when interval is auto-selected. Pocket Pi returns this result directly to the Agent and does not persist it, because the current fixed View does not consume this data.",
+      "description": "Get OHLC price bars for one or more option contracts (by instrument UUID) across an explicit time range. Use this for charting an option's price history and \"recent activity\" questions. The server auto-selects an interval when one is not provided. If the bar's interpolated field is true, bar was synthesized to fill a gap and carry no new information.\n\nParameter rules:\n- instrument_ids are option contract UUIDs from get_option_instruments. Resolve underlying -> get_option_chains -> get_option_instruments first; this tool does not accept ticker symbols.\n- interval is optional; when omitted the server auto-selects an interval that targets a bounded bar count across the range. Provide an explicit interval only when you need a specific granularity.\n- bounds defaults to 'regular' (regular hours); use '24_5' or '24_7' for contracts and sessions that expose overnight data.\n- If an explicitly requested interval would produce more bars than the upstream allows for the range, the call is rejected — narrow the range or coarsen the interval. The cap does not apply when interval is auto-selected. Pocket Pi returns this result directly to the Agent and does not persist it, because the current fixed View does not consume this data.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -871,7 +871,7 @@
           },
           "bounds": {
             "type": "string",
-            "description": "Session bounds. One of 'regular' (regular hours, default), '24_5', or '24_7'. Use '24_5'/'24_7' only when the user explicitly asks about extended-hours or overnight option activity (index options, and certain equity options)."
+            "description": "Session bounds. One of 'regular' (regular hours, default), '24_5', or '24_7'. Overnight data is available only for supported index and equity option contracts."
           }
         },
         "required": [
@@ -931,7 +931,7 @@
     {
       "name": "get_option_level_upgrade_info",
       "namespace": "account_portfolio",
-      "description": "Get the upgrade URL to apply for options access on an account. Call when option_level is null. option_level_2 enables long calls/puts, covered calls, and cash-secured puts; option_level_3 adds spreads and complex strategies, though multi-leg orders are not yet supported here. Pocket Pi returns this result directly to the Agent and does not persist it, because the current fixed View does not consume this data.",
+      "description": "Get the upgrade URL to apply for options access on an account. Call when option_level is null. option_level_2 enables long calls/puts, covered calls, and cash-secured puts; option_level_3 adds spreads and complex strategies. Pocket Pi returns this result directly to the Agent and does not persist it, because the current fixed View does not consume this data.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1205,7 +1205,7 @@
     {
       "name": "get_watchlist_items",
       "namespace": "watchlists",
-      "description": "List the items in a watchlist. Items may be stocks/ETFs, crypto pairs, futures, indexes — distinguished by object_type. For the options watchlist, use get_option_watchlist instead — this tool returns a generic shape that drops the strategy-specific fields and the upstream rejects it with 400 anyway. Does not return live prices; call get_quotes with the symbol(s) for that. Pocket Pi returns this result directly to the Agent and does not persist it, because the current fixed View does not consume this data.",
+      "description": "List the items in a watchlist. Items may be stocks/ETFs, crypto pairs, futures, indexes — distinguished by object_type. For the options watchlist, use get_option_watchlist instead — this tool returns a generic shape that drops the strategy-specific fields and the upstream rejects it with 400 anyway. This does not return live prices; use get_equity_quotes for stocks/ETFs or get_index_quotes for indexes. Pocket Pi does not currently expose a crypto quote Tool. Pocket Pi returns this result directly to the Agent and does not persist it, because the current fixed View does not consume this data.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1670,7 +1670,7 @@
     {
       "name": "search",
       "namespace": "equity_market_data",
-      "description": "Resolve a natural-language query to Robinhood instruments (stocks/ETFs), crypto pairs, or market indexes. Use when the user names an asset by name (or partial name) instead of a ticker/pair/index symbol, or when you need an instrument_id / currency-pair UUID / market-index id for a downstream tool. Defaults to instrument search; pass asset_type=\"currency_pair\" for crypto or asset_type=\"market_index\" for indexes (SPX, NDX, DJI, etc.). Instrument results carry symbol + instrument_id (use with get_equity_quotes / get_equity_tradability / place_equity_order or any instrument_id-based tool). Crypto results carry hyphenated symbol (e.g. BTC-USD) + id — the symbol routes to crypto quote/order tools, the id routes to watchlist tools as currency_pair_ids. Market-index results carry symbol + id — pass id to index quote tools for current values, or in the index_ids array of watchlist tools. Pocket Pi returns this result directly to the Agent and does not persist it, because the current fixed View does not consume this data.",
+      "description": "Resolve a natural-language query to Robinhood instruments (stocks/ETFs), crypto pairs, or market indexes. Use when the user names an asset by name (or partial name) instead of a ticker/pair/index symbol, or when you need an instrument_id / currency-pair UUID / market-index id for a downstream tool. Defaults to instrument search; pass asset_type=\"currency_pair\" for crypto or asset_type=\"market_index\" for indexes (SPX, NDX, DJI, etc.). Instrument results carry symbol + instrument_id for equity market-data and trading tools. Crypto results carry a hyphenated symbol (e.g. BTC-USD) plus an id usable as currency_pair_ids in watchlist tools; Pocket Pi does not currently expose crypto quote or order Tools. Market-index results carry symbol + id — pass id to get_index_quotes/get_index_historicals or in the index_ids array of watchlist tools. Pocket Pi returns this result directly to the Agent and does not persist it, because the current fixed View does not consume this data.",
       "inputSchema": {
         "type": "object",
         "properties": {
