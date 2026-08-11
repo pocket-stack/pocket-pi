@@ -4,7 +4,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use embedded_svc::http::{client::Client as HttpClient, Method};
+use embedded_svc::http::{
+    client::{Client as HttpClient, Request, Response},
+    Method,
+};
 use embedded_svc::io::Write as _;
 use esp_idf_svc::http::client::{Configuration, EspHttpConnection};
 use esp_idf_svc::io::EspIOError;
@@ -340,7 +343,7 @@ impl AppServiceHost for EspAppServices {
     }
 }
 
-fn client(timeout: Duration) -> Result<HttpClient<EspHttpConnection>, String> {
+fn connection(timeout: Duration) -> Result<EspHttpConnection, String> {
     EspHttpConnection::new(&Configuration {
         buffer_size: Some(8 * 1024),
         buffer_size_tx: Some(4 * 1024),
@@ -348,8 +351,11 @@ fn client(timeout: Duration) -> Result<HttpClient<EspHttpConnection>, String> {
         crt_bundle_attach: Some(esp_idf_svc::sys::esp_crt_bundle_attach),
         ..Default::default()
     })
-    .map(HttpClient::wrap)
     .map_err(|error| format!("initialize HTTPS client: {error}"))
+}
+
+fn client(timeout: Duration) -> Result<HttpClient<EspHttpConnection>, String> {
+    connection(timeout).map(HttpClient::wrap)
 }
 
 fn stale_mcp_session(error: &str) -> bool {
@@ -423,6 +429,80 @@ fn net_failure(message: String) -> NetFailure {
     NetFailure::new(code, message)
 }
 
+fn mcp_request_is_read_only(body: &Value) -> bool {
+    let method = body.get("method").and_then(Value::as_str);
+    if matches!(method, Some("initialize" | "notifications/initialized")) {
+        return true;
+    }
+    body.get("params")
+        .and_then(|params| params.get("name"))
+        .and_then(Value::as_str)
+        .is_some_and(|name| {
+            name.starts_with("get_")
+                || name.starts_with("review_")
+                || matches!(name, "search" | "run_scan")
+        })
+}
+
+fn submit_mcp(
+    token: &str,
+    session: Option<&str>,
+    payload: &str,
+    request_label: &str,
+    retryable: bool,
+) -> Result<Response<EspHttpConnection>, String> {
+    let length = payload.len().to_string();
+    let authorization = format!("Bearer {token}");
+    for attempt in 0..2 {
+        let mut headers = vec![
+            ("accept", "application/json, text/event-stream"),
+            ("content-type", "application/json"),
+            ("content-length", length.as_str()),
+            ("authorization", authorization.as_str()),
+            ("user-agent", "pocket-pi-agentos/0.1"),
+        ];
+        if let Some(session) = session {
+            headers.push(("mcp-session-id", session));
+        }
+        let mut connection = connection(Duration::from_secs(12))?;
+        connection
+            .initiate_request(Method::Post, ROBINHOOD_MCP_URL, &headers)
+            .map_err(|error| format!("create Robinhood MCP request: {error:?}"))?;
+        let mut request = Request::wrap(connection);
+        request
+            .write_all(payload.as_bytes())
+            .map_err(|error| format!("write Robinhood MCP request: {error:?}"))?;
+        request
+            .flush()
+            .map_err(|error| format!("flush Robinhood MCP request: {error:?}"))?;
+        let started = Instant::now();
+        match request.submit() {
+            Ok(response) => {
+                log::info!(
+                    "Robinhood MCP HTTP {request_label} headers status={} in {}ms",
+                    response.status(),
+                    started.elapsed().as_millis()
+                );
+                return Ok(response);
+            }
+            Err(error)
+                if attempt == 0
+                    && retryable
+                    && error.0.code() == -esp_idf_svc::sys::ESP_ERR_HTTP_EAGAIN =>
+            {
+                log::warn!(
+                    "Robinhood MCP {request_label} received no response headers in {}ms; reconnecting once",
+                    started.elapsed().as_millis()
+                );
+            }
+            Err(error) => {
+                return Err(format!("send Robinhood MCP request: {error:?}"));
+            }
+        }
+    }
+    unreachable!()
+}
+
 fn post_mcp(
     token: &str,
     session: Option<&str>,
@@ -435,37 +515,14 @@ fn post_mcp(
         .or_else(|| body.get("method").and_then(Value::as_str))
         .unwrap_or("unknown");
     let payload = body.to_string();
-    let length = payload.len().to_string();
-    let authorization = format!("Bearer {token}");
-    let mut headers = vec![
-        ("accept", "application/json, text/event-stream"),
-        ("content-type", "application/json"),
-        ("content-length", length.as_str()),
-        ("authorization", authorization.as_str()),
-        ("user-agent", "pocket-pi-agentos/0.1"),
-    ];
-    if let Some(session) = session {
-        headers.push(("mcp-session-id", session));
-    }
-    let mut client = client(Duration::from_secs(12))?;
-    let mut request = client
-        .request(Method::Post, ROBINHOOD_MCP_URL, &headers)
-        .map_err(|error| format!("create Robinhood MCP request: {error}"))?;
-    request
-        .write_all(payload.as_bytes())
-        .map_err(|error| format!("write Robinhood MCP request: {error}"))?;
-    request
-        .flush()
-        .map_err(|error| format!("flush Robinhood MCP request: {error}"))?;
-    let submit_started = Instant::now();
-    let mut response = request
-        .submit()
-        .map_err(|error| format!("send Robinhood MCP request: {error}"))?;
+    let mut response = submit_mcp(
+        token,
+        session,
+        &payload,
+        request_label,
+        mcp_request_is_read_only(body),
+    )?;
     let status = response.status();
-    log::info!(
-        "Robinhood MCP HTTP {request_label} headers status={status} in {}ms",
-        submit_started.elapsed().as_millis()
-    );
     let returned_session = response.header("Mcp-Session-Id").map(str::to_owned);
     let is_event_stream = response
         .header("content-type")
@@ -507,37 +564,9 @@ fn post_mcp_batch(
 ) -> Result<(Vec<Value>, Option<String>), String> {
     let payload = serde_json::to_string(bodies)
         .map_err(|error| format!("encode Robinhood MCP batch: {error}"))?;
-    let length = payload.len().to_string();
-    let authorization = format!("Bearer {token}");
-    let mut headers = vec![
-        ("accept", "application/json, text/event-stream"),
-        ("content-type", "application/json"),
-        ("content-length", length.as_str()),
-        ("authorization", authorization.as_str()),
-        ("user-agent", "pocket-pi-agentos/0.1"),
-    ];
-    if let Some(session) = session {
-        headers.push(("mcp-session-id", session));
-    }
-    let mut client = client(Duration::from_secs(12))?;
-    let mut request = client
-        .request(Method::Post, ROBINHOOD_MCP_URL, &headers)
-        .map_err(|error| format!("create Robinhood MCP batch request: {error}"))?;
-    request
-        .write_all(payload.as_bytes())
-        .map_err(|error| format!("write Robinhood MCP batch request: {error}"))?;
-    request
-        .flush()
-        .map_err(|error| format!("flush Robinhood MCP batch request: {error}"))?;
-    let submit_started = Instant::now();
-    let mut response = request
-        .submit()
-        .map_err(|error| format!("send Robinhood MCP batch request: {error}"))?;
+    let retryable = bodies.iter().all(mcp_request_is_read_only);
+    let mut response = submit_mcp(token, session, &payload, "batch", retryable)?;
     let status = response.status();
-    log::info!(
-        "Robinhood MCP HTTP batch headers status={status} in {}ms",
-        submit_started.elapsed().as_millis()
-    );
     let returned_session = response.header("Mcp-Session-Id").map(str::to_owned);
     if !(200..300).contains(&status) {
         let bytes = read_bounded(&mut response, MAX_MCP_RESPONSE, None)?;
