@@ -1187,6 +1187,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pocket-pi-app-pack"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "pocket-pi-agentos",
+ "serde_json",
+]
+
+[[package]]
 name = "pocket-pi-embedded"
 version = "0.1.0"
 dependencies = [
@@ -1206,6 +1215,7 @@ dependencies = [
  "esp-idf-svc",
  "log",
  "pocket-pi-agentos",
+ "pocket-pi-app-pack",
  "pocket-pi-embedded",
  "pocket-pi-protocols",
  "pocket-pi-tools",

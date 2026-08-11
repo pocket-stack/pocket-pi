@@ -138,17 +138,18 @@ def config(args: argparse.Namespace) -> dict[str, object]:
             print("DeepSeek: reusing Keychain API key (RAM only on device)", flush=True)
         else:
             value["modelApiKey"] = getpass.getpass(f"{provider} API key: ")
+    app_credentials: dict[str, str] = {}
     key = exa_api_key()
     if key:
-        value["exaApiKey"] = key
+        app_credentials["exa.api-key"] = key
         print("Exa: reusing Keychain API key (RAM only on device)", flush=True)
     elif args.provision_exa:
         key = getpass.getpass("Exa API key: ")
         if key:
-            value["exaApiKey"] = key
+            app_credentials["exa.api-key"] = key
     token = robinhood_access_token()
     if token:
-        value["robinhoodAccessToken"] = token
+        app_credentials["robinhood.oauth-access-token"] = token
         print(
             "Robinhood: reusing existing authorized Codex MCP session (RAM only)",
             flush=True,
@@ -156,7 +157,9 @@ def config(args: argparse.Namespace) -> dict[str, object]:
     elif args.provision_robinhood:
         token = getpass.getpass("Robinhood OAuth access token: ")
         if token:
-            value["robinhoodAccessToken"] = token
+            app_credentials["robinhood.oauth-access-token"] = token
+    if app_credentials:
+        value["appCredentials"] = app_credentials
     if args.prompt:
         value["initialPrompt"] = args.prompt
         if args.prompt_delay_seconds:

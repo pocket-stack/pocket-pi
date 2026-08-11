@@ -1,5 +1,5 @@
 use core::time::Duration;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -12,11 +12,11 @@ use embedded_svc::io::Write as _;
 use esp_idf_svc::http::client::{Configuration, EspHttpConnection};
 use esp_idf_svc::io::EspIOError;
 use pocket_pi_agentos::{
-    AppCatalog, AppServiceHost, HttpRequest, NetFailure, TransportCompletion, ROBINHOOD_APP_ID,
+    AppCatalog, AppServiceHost, CredentialBinding, HttpRequest, McpServicePolicy, NetFailure,
+    TransportCompletion,
 };
 use serde_json::{json, Value};
 
-const ROBINHOOD_MCP_URL: &str = "https://agent.robinhood.com/mcp/trading";
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MAX_MCP_RESPONSE: usize = 160 * 1024;
 
@@ -26,10 +26,9 @@ pub struct EspAppServices {
 
 struct EspAppServicesInner {
     network_ready: Arc<AtomicBool>,
-    exa_api_key: Option<String>,
-    robinhood_access_token: Option<String>,
-    robinhood_operations: BTreeSet<String>,
-    robinhood: Mutex<McpState>,
+    catalog: AppCatalog,
+    credentials: BTreeMap<String, String>,
+    mcp: Mutex<BTreeMap<(String, String), McpState>>,
 }
 
 #[derive(Default)]
@@ -41,104 +40,93 @@ struct McpState {
 impl EspAppServices {
     pub fn new(
         network_ready: Arc<AtomicBool>,
-        exa_api_key: Option<String>,
-        robinhood_access_token: Option<String>,
+        catalog: AppCatalog,
+        mut credentials: BTreeMap<String, String>,
     ) -> Self {
-        let robinhood_operations = AppCatalog::builtin()
-            .expect("built-in App catalog")
-            .provider_operations(ROBINHOOD_APP_ID);
+        let required = catalog.credential_ids();
+        credentials.retain(|id, _| required.contains(id));
         let inner = Arc::new(EspAppServicesInner {
             network_ready,
-            exa_api_key,
-            robinhood_access_token,
-            robinhood_operations,
-            robinhood: Mutex::new(McpState {
-                session_id: None,
-                next_id: 1,
-            }),
+            catalog,
+            credentials,
+            mcp: Mutex::new(BTreeMap::new()),
         });
         Self { inner }
     }
 }
 
 impl EspAppServicesInner {
-    fn robinhood_operation_allowed(&self, operation: &str) -> bool {
-        self.robinhood_operations.contains(operation)
-    }
-
-    fn exa_http(
+    fn http(
         &self,
+        app_id: &str,
         request: HttpRequest,
     ) -> std::result::Result<TransportCompletion, NetFailure> {
-        if request.method != "POST"
-            || !matches!(
-                request.url.as_str(),
-                "https://api.exa.ai/search" | "https://api.exa.ai/contents"
-            )
-        {
+        let policy = self
+            .catalog
+            .http_policy(app_id, &request.method, &request.url)
+            .ok_or_else(|| NetFailure::new("invalid_request", "HTTP request is not allowed"))?;
+        if request.headers.keys().any(|name| {
+            !policy
+                .allowed_request_headers
+                .iter()
+                .any(|item| item == name)
+        }) {
             return Err(NetFailure::new(
                 "invalid_request",
-                "Exa NET capability permits only POST /search and /contents",
+                "App supplied a forbidden HTTP header",
             ));
         }
-        if request
-            .headers
-            .keys()
-            .any(|name| !matches!(name.as_str(), "accept" | "content-type"))
-        {
-            return Err(NetFailure::new(
-                "invalid_request",
-                "Exa App supplied a forbidden HTTP header",
-            ));
-        }
-        let body: Value = serde_json::from_slice(&request.body)
-            .map_err(|error| NetFailure::new("invalid_request", error.to_string()))?;
-        if !body.is_object() {
-            return Err(NetFailure::new(
-                "invalid_request",
-                "Exa request body must be a JSON object",
-            ));
-        }
-        let api_key = self
-            .exa_api_key
-            .as_deref()
-            .ok_or_else(|| NetFailure::new("unavailable", "Exa API key was not provisioned"))?;
-        execute_exa_http(request, api_key)
+        execute_http(request, policy.credential.as_ref(), &self.credentials)
     }
 
-    fn robinhood_call(&self, args: &Value) -> Result<Value, String> {
-        if args.get("connection").and_then(Value::as_str) != Some("robinhood") {
-            return Err("Robinhood App requested an unknown MCP connection".to_owned());
-        }
+    fn mcp_call(&self, app_id: &str, args: &Value) -> Result<Value, String> {
+        let connection = args
+            .get("connection")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "mcp.client requires connection".to_owned())?;
+        let policy = self
+            .catalog
+            .mcp_policy(app_id, connection)
+            .cloned()
+            .ok_or_else(|| "App requested an unknown MCP connection".to_owned())?;
         let operation = args
             .get("name")
             .and_then(Value::as_str)
             .ok_or_else(|| "mcp.client callTool requires name".to_owned())?;
         let arguments = args.get("arguments").unwrap_or(&Value::Null);
-        if !self.robinhood_operation_allowed(operation) {
-            return Err(format!(
-                "Robinhood operation is not allowlisted: {operation}"
-            ));
+        if !self
+            .catalog
+            .provider_operation_allowed(app_id, operation)
+        {
+            return Err(format!("MCP operation is not allowlisted: {operation}"));
         }
-        let token = self
-            .robinhood_access_token
-            .as_deref()
-            .ok_or_else(|| "Robinhood OAuth token was not provisioned for this boot".to_owned())?;
+        let credential = self.credential(&policy.credential)?;
+        let retryable = args
+            .get("retryable")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let mut state = self
-            .robinhood
+            .mcp
             .lock()
-            .map_err(|_| "Robinhood MCP state lock was poisoned".to_owned())?;
+            .map_err(|_| "MCP state lock was poisoned".to_owned())?;
+        let state = state
+            .entry((app_id.to_owned(), connection.to_owned()))
+            .or_insert_with(|| McpState {
+                session_id: None,
+                next_id: 1,
+            });
         for attempt in 0..2 {
-            let result = self.robinhood_once(token, &mut state, operation, arguments);
+            let result =
+                self.mcp_once(&policy, &credential, state, operation, arguments, retryable);
             match result {
                 Ok(value) => return Ok(value),
                 Err(error) if attempt == 0 && stale_mcp_session(&error) => {
-                    log::warn!("Robinhood MCP reconnecting after: {error}");
+                    log::warn!("MCP reconnecting after: {error}");
                     state.session_id = None;
                     std::thread::sleep(Duration::from_millis(250));
                 }
-                Err(error) if attempt == 0 && transient_mcp_connect(&error) => {
-                    log::warn!("Robinhood MCP transport retry after: {error}");
+                Err(error) if attempt == 0 && retryable && transient_mcp_connect(&error) => {
+                    log::warn!("MCP transport retry after: {error}");
                     std::thread::sleep(Duration::from_millis(250));
                 }
                 Err(error) => return Err(error),
@@ -147,10 +135,16 @@ impl EspAppServicesInner {
         unreachable!()
     }
 
-    fn robinhood_calls(&self, args: &Value) -> Result<Value, String> {
-        if args.get("connection").and_then(Value::as_str) != Some("robinhood") {
-            return Err("Robinhood App requested an unknown MCP connection".to_owned());
-        }
+    fn mcp_calls(&self, app_id: &str, args: &Value) -> Result<Value, String> {
+        let connection = args
+            .get("connection")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "mcp.client requires connection".to_owned())?;
+        let policy = self
+            .catalog
+            .mcp_policy(app_id, connection)
+            .cloned()
+            .ok_or_else(|| "App requested an unknown MCP connection".to_owned())?;
         let calls = args
             .get("calls")
             .and_then(Value::as_array)
@@ -161,29 +155,36 @@ impl EspAppServicesInner {
                 .get("name")
                 .and_then(Value::as_str)
                 .ok_or_else(|| "mcp.client callTools requires a name for every call".to_owned())?;
-            if !self.robinhood_operation_allowed(name) {
-                return Err(format!("Robinhood operation is not allowlisted: {name}"));
+            if !self.catalog.provider_operation_allowed(app_id, name) {
+                return Err(format!("MCP operation is not allowlisted: {name}"));
             }
         }
-        let token = self
-            .robinhood_access_token
-            .as_deref()
-            .ok_or_else(|| "Robinhood OAuth token was not provisioned for this boot".to_owned())?;
+        let credential = self.credential(&policy.credential)?;
+        let retryable = args
+            .get("retryable")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let mut state = self
-            .robinhood
+            .mcp
             .lock()
-            .map_err(|_| "Robinhood MCP state lock was poisoned".to_owned())?;
+            .map_err(|_| "MCP state lock was poisoned".to_owned())?;
+        let state = state
+            .entry((app_id.to_owned(), connection.to_owned()))
+            .or_insert_with(|| McpState {
+                session_id: None,
+                next_id: 1,
+            });
         for attempt in 0..2 {
-            let result = self.robinhood_batch_once(token, &mut state, calls);
+            let result = self.mcp_batch_once(&policy, &credential, state, calls, retryable);
             match result {
                 Ok(value) => return Ok(value),
                 Err(error) if attempt == 0 && stale_mcp_session(&error) => {
-                    log::warn!("Robinhood MCP batch reconnecting after: {error}");
+                    log::warn!("MCP batch reconnecting after: {error}");
                     state.session_id = None;
                     std::thread::sleep(Duration::from_millis(250));
                 }
-                Err(error) if attempt == 0 && transient_mcp_connect(&error) => {
-                    log::warn!("Robinhood MCP batch transport retry after: {error}");
+                Err(error) if attempt == 0 && retryable && transient_mcp_connect(&error) => {
+                    log::warn!("MCP batch transport retry after: {error}");
                     std::thread::sleep(Duration::from_millis(250));
                 }
                 Err(error) => return Err(error),
@@ -192,13 +193,22 @@ impl EspAppServicesInner {
         unreachable!()
     }
 
-    fn robinhood_batch_once(
+    fn credential(&self, binding: &CredentialBinding) -> Result<String, String> {
+        self.credentials
+            .get(&binding.id)
+            .map(|secret| format!("{}{}", binding.prefix, secret))
+            .ok_or_else(|| format!("credential {} was not provisioned", binding.id))
+    }
+
+    fn mcp_batch_once(
         &self,
-        token: &str,
+        policy: &McpServicePolicy,
+        credential: &str,
         state: &mut McpState,
         calls: &[Value],
+        retryable: bool,
     ) -> Result<Value, String> {
-        self.ensure_robinhood_session(token, state)?;
+        self.ensure_mcp_session(policy, credential, state)?;
         let mut requests = Vec::with_capacity(calls.len());
         let mut request_ids = Vec::with_capacity(calls.len());
         for call in calls {
@@ -217,10 +227,12 @@ impl EspAppServicesInner {
         }
         let started = Instant::now();
         let (responses, returned_session) = post_mcp_batch(
-            token,
+            policy,
+            credential,
             state.session_id.as_deref(),
             &requests,
             request_ids.len(),
+            retryable,
         )?;
         if returned_session.is_some() {
             state.session_id = returned_session;
@@ -236,23 +248,24 @@ impl EspAppServicesInner {
             let name = call.get("name").and_then(Value::as_str).unwrap_or_default();
             let response = by_id
                 .remove(&request_ids[index])
-                .ok_or_else(|| format!("Robinhood MCP batch omitted response for {name}"))?;
+                .ok_or_else(|| format!("MCP batch omitted response for {name}"))?;
             match normalize_mcp_result(&response) {
                 Ok(value) => results.push(json!({"name":name,"ok":true,"value":value})),
                 Err(error) => results.push(json!({"name":name,"ok":false,"error":error})),
             }
         }
         log::info!(
-            "Robinhood MCP batch calls={} completed in {}ms",
+            "MCP batch calls={} completed in {}ms",
             calls.len(),
             started.elapsed().as_millis()
         );
         Ok(json!({"results":results}))
     }
 
-    fn ensure_robinhood_session(
+    fn ensure_mcp_session(
         &self,
-        token: &str,
+        policy: &McpServicePolicy,
+        credential: &str,
         state: &mut McpState,
     ) -> Result<(), String> {
         if state.session_id.is_some() {
@@ -265,28 +278,30 @@ impl EspAppServicesInner {
             "params":{"protocolVersion":MCP_PROTOCOL_VERSION,"capabilities":{},"clientInfo":{"name":"pocket-pi-agentos","version":"0.1.0"}}
         });
         state.next_id = state.next_id.saturating_add(1);
-        let (body, session) = post_mcp(token, None, &request)?;
+        let (body, session) = post_mcp(policy, credential, None, &request, true)?;
         if let Some(error) = body.get("error") {
-            return Err(format!("Robinhood MCP initialize failed: {error}"));
+            return Err(format!("MCP initialize failed: {error}"));
         }
-        let session = session.ok_or_else(|| "Robinhood MCP omitted session id".to_owned())?;
+        let session = session.ok_or_else(|| "MCP omitted session id".to_owned())?;
         let notification = json!({"jsonrpc":"2.0","method":"notifications/initialized"});
-        let _ = post_mcp(token, Some(&session), &notification)?;
+        let _ = post_mcp(policy, credential, Some(&session), &notification, true)?;
         state.session_id = Some(session);
-        log::info!("Robinhood MCP session initialized");
+        log::info!("MCP session initialized");
         Ok(())
     }
 
-    fn robinhood_once(
+    fn mcp_once(
         &self,
-        token: &str,
+        policy: &McpServicePolicy,
+        credential: &str,
         state: &mut McpState,
         operation: &str,
         args: &Value,
+        retryable: bool,
     ) -> Result<Value, String> {
         let operation_started = Instant::now();
-        log::info!("Robinhood MCP {operation} started");
-        self.ensure_robinhood_session(token, state)?;
+        log::info!("MCP {operation} started");
+        self.ensure_mcp_session(policy, credential, state)?;
         let request = json!({
             "jsonrpc":"2.0",
             "id":state.next_id,
@@ -294,13 +309,19 @@ impl EspAppServicesInner {
             "params":{"name":operation,"arguments":args}
         });
         state.next_id = state.next_id.saturating_add(1);
-        let (body, returned_session) = post_mcp(token, state.session_id.as_deref(), &request)?;
+        let (body, returned_session) = post_mcp(
+            policy,
+            credential,
+            state.session_id.as_deref(),
+            &request,
+            retryable,
+        )?;
         if returned_session.is_some() {
             state.session_id = returned_session;
         }
         let value = normalize_mcp_result(&body)?;
         log::info!(
-            "Robinhood MCP {operation} completed in {}ms",
+            "MCP {operation} completed in {}ms",
             operation_started.elapsed().as_millis()
         );
         Ok(value)
@@ -318,9 +339,9 @@ impl AppServiceHost for EspAppServices {
         if !self.inner.network_ready.load(Ordering::Acquire) {
             return Err("Network is not connected; App data was not changed".to_owned());
         }
-        match (app_id, service, operation) {
-            ("robinhood", "mcp.client", "callTool") => self.inner.robinhood_call(args),
-            ("robinhood", "mcp.client", "callTools") => self.inner.robinhood_calls(args),
+        match (service, operation) {
+            ("mcp.client", "callTool") => self.inner.mcp_call(app_id, args),
+            ("mcp.client", "callTools") => self.inner.mcp_calls(app_id, args),
             _ => Err(format!("App {app_id} cannot access service {service}")),
         }
     }
@@ -333,13 +354,7 @@ impl AppServiceHost for EspAppServices {
         if !self.inner.network_ready.load(Ordering::Acquire) {
             return Err(NetFailure::new("unavailable", "network is not connected"));
         }
-        if app_id != "exa" {
-            return Err(NetFailure::new(
-                "invalid_request",
-                format!("App {app_id} has no NET capability"),
-            ));
-        }
-        self.inner.exa_http(request)
+        self.inner.http(app_id, request)
     }
 }
 
@@ -367,23 +382,36 @@ fn transient_mcp_connect(error: &str) -> bool {
     error.contains("ESP_ERR_HTTP_CONNECT")
 }
 
-fn execute_exa_http(
+fn execute_http(
     meta: HttpRequest,
-    api_key: &str,
+    credential: Option<&CredentialBinding>,
+    credentials: &BTreeMap<String, String>,
 ) -> std::result::Result<TransportCompletion, NetFailure> {
     let length = meta.body.len().to_string();
-    let headers = [
-        ("accept", "application/json"),
-        ("content-type", "application/json"),
-        ("content-length", length.as_str()),
-        ("connection", "close"),
-        ("user-agent", "pocket-pi-agentos/0.1"),
-        ("x-api-key", api_key),
-    ];
+    let mut values = meta.headers;
+    values.insert("content-length".into(), length);
+    values.insert("connection".into(), "close".into());
+    values.insert("user-agent".into(), "pocket-pi-agentos/0.1".into());
+    if let Some(binding) = credential {
+        let secret = credentials.get(&binding.id).ok_or_else(|| {
+            NetFailure::new(
+                "unavailable",
+                format!("credential {} was not provisioned", binding.id),
+            )
+        })?;
+        values.insert(
+            binding.header.clone(),
+            format!("{}{}", binding.prefix, secret),
+        );
+    }
+    let headers = values
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
     let mut client =
         client(Duration::from_millis(u64::from(meta.timeout_ms))).map_err(net_failure)?;
     let mut request = client
-        .request(Method::Post, &meta.url, &headers)
+        .request(http_method(&meta.method)?, &meta.url, &headers)
         .map_err(|error| net_failure(format!("create HTTPS request: {error}")))?;
     request
         .write_all(&meta.body)
@@ -413,6 +441,20 @@ fn execute_exa_http(
     })
 }
 
+fn http_method(method: &str) -> std::result::Result<Method, NetFailure> {
+    match method {
+        "GET" => Ok(Method::Get),
+        "POST" => Ok(Method::Post),
+        "PUT" => Ok(Method::Put),
+        "DELETE" => Ok(Method::Delete),
+        "PATCH" => Ok(Method::Patch),
+        _ => Err(NetFailure::new(
+            "invalid_request",
+            format!("unsupported HTTP method {method}"),
+        )),
+    }
+}
+
 fn net_failure(message: String) -> NetFailure {
     let lower = message.to_ascii_lowercase();
     let code = if lower.contains("exceeded") {
@@ -429,36 +471,21 @@ fn net_failure(message: String) -> NetFailure {
     NetFailure::new(code, message)
 }
 
-fn mcp_request_is_read_only(body: &Value) -> bool {
-    let method = body.get("method").and_then(Value::as_str);
-    if matches!(method, Some("initialize" | "notifications/initialized")) {
-        return true;
-    }
-    body.get("params")
-        .and_then(|params| params.get("name"))
-        .and_then(Value::as_str)
-        .is_some_and(|name| {
-            name.starts_with("get_")
-                || name.starts_with("review_")
-                || matches!(name, "search" | "run_scan")
-        })
-}
-
 fn submit_mcp(
-    token: &str,
+    policy: &McpServicePolicy,
+    credential: &str,
     session: Option<&str>,
     payload: &str,
     request_label: &str,
     retryable: bool,
 ) -> Result<Response<EspHttpConnection>, String> {
     let length = payload.len().to_string();
-    let authorization = format!("Bearer {token}");
     for attempt in 0..2 {
         let mut headers = vec![
             ("accept", "application/json, text/event-stream"),
             ("content-type", "application/json"),
             ("content-length", length.as_str()),
-            ("authorization", authorization.as_str()),
+            (policy.credential.header.as_str(), credential),
             ("user-agent", "pocket-pi-agentos/0.1"),
         ];
         if let Some(session) = session {
@@ -466,20 +493,20 @@ fn submit_mcp(
         }
         let mut connection = connection(Duration::from_secs(12))?;
         connection
-            .initiate_request(Method::Post, ROBINHOOD_MCP_URL, &headers)
-            .map_err(|error| format!("create Robinhood MCP request: {error:?}"))?;
+            .initiate_request(Method::Post, &policy.url, &headers)
+            .map_err(|error| format!("create MCP request: {error:?}"))?;
         let mut request = Request::wrap(connection);
         request
             .write_all(payload.as_bytes())
-            .map_err(|error| format!("write Robinhood MCP request: {error:?}"))?;
+            .map_err(|error| format!("write MCP request: {error:?}"))?;
         request
             .flush()
-            .map_err(|error| format!("flush Robinhood MCP request: {error:?}"))?;
+            .map_err(|error| format!("flush MCP request: {error:?}"))?;
         let started = Instant::now();
         match request.submit() {
             Ok(response) => {
                 log::info!(
-                    "Robinhood MCP HTTP {request_label} headers status={} in {}ms",
+                    "MCP HTTP {request_label} headers status={} in {}ms",
                     response.status(),
                     started.elapsed().as_millis()
                 );
@@ -491,12 +518,12 @@ fn submit_mcp(
                     && error.0.code() == -esp_idf_svc::sys::ESP_ERR_HTTP_EAGAIN =>
             {
                 log::warn!(
-                    "Robinhood MCP {request_label} received no response headers in {}ms; reconnecting once",
+                    "MCP {request_label} received no response headers in {}ms; reconnecting once",
                     started.elapsed().as_millis()
                 );
             }
             Err(error) => {
-                return Err(format!("send Robinhood MCP request: {error:?}"));
+                return Err(format!("send MCP request: {error:?}"));
             }
         }
     }
@@ -504,9 +531,11 @@ fn submit_mcp(
 }
 
 fn post_mcp(
-    token: &str,
+    policy: &McpServicePolicy,
+    credential: &str,
     session: Option<&str>,
     body: &Value,
+    retryable: bool,
 ) -> Result<(Value, Option<String>), String> {
     let request_label = body
         .get("params")
@@ -516,11 +545,12 @@ fn post_mcp(
         .unwrap_or("unknown");
     let payload = body.to_string();
     let mut response = submit_mcp(
-        token,
+        policy,
+        credential,
         session,
         &payload,
         request_label,
-        mcp_request_is_read_only(body),
+        retryable,
     )?;
     let status = response.status();
     let returned_session = response.header("Mcp-Session-Id").map(str::to_owned);
@@ -542,13 +572,13 @@ fn post_mcp(
         read_bounded(&mut response, MAX_MCP_RESPONSE, expected_length)?
     };
     log::info!(
-        "Robinhood MCP HTTP {request_label} body bytes={} in {}ms",
+        "MCP HTTP {request_label} body bytes={} in {}ms",
         bytes.len(),
         body_started.elapsed().as_millis()
     );
     if !(200..300).contains(&status) {
         return Err(format!(
-            "Robinhood MCP HTTP {status}: {}",
+            "MCP HTTP {status}: {}",
             String::from_utf8_lossy(&bytes)
         ));
     }
@@ -557,28 +587,29 @@ fn post_mcp(
 }
 
 fn post_mcp_batch(
-    token: &str,
+    policy: &McpServicePolicy,
+    credential: &str,
     session: Option<&str>,
     bodies: &[Value],
     expected_responses: usize,
+    retryable: bool,
 ) -> Result<(Vec<Value>, Option<String>), String> {
-    let payload = serde_json::to_string(bodies)
-        .map_err(|error| format!("encode Robinhood MCP batch: {error}"))?;
-    let retryable = bodies.iter().all(mcp_request_is_read_only);
-    let mut response = submit_mcp(token, session, &payload, "batch", retryable)?;
+    let payload =
+        serde_json::to_string(bodies).map_err(|error| format!("encode MCP batch: {error}"))?;
+    let mut response = submit_mcp(policy, credential, session, &payload, "batch", retryable)?;
     let status = response.status();
     let returned_session = response.header("Mcp-Session-Id").map(str::to_owned);
     if !(200..300).contains(&status) {
         let bytes = read_bounded(&mut response, MAX_MCP_RESPONSE, None)?;
         return Err(format!(
-            "Robinhood MCP batch HTTP {status}: {}",
+            "MCP batch HTTP {status}: {}",
             String::from_utf8_lossy(&bytes)
         ));
     }
     let body_started = Instant::now();
     let responses = read_sse_values(&mut response, MAX_MCP_RESPONSE, expected_responses)?;
     log::info!(
-        "Robinhood MCP HTTP batch responses={} in {}ms",
+        "MCP HTTP batch responses={} in {}ms",
         responses.len(),
         body_started.elapsed().as_millis()
     );
@@ -650,11 +681,7 @@ fn read_sse_event(
     Ok(out)
 }
 
-fn read_sse_values<R>(
-    reader: &mut R,
-    limit: usize,
-    expected: usize,
-) -> Result<Vec<Value>, String>
+fn read_sse_values<R>(reader: &mut R, limit: usize, expected: usize) -> Result<Vec<Value>, String>
 where
     R: embedded_svc::io::Read<Error = EspIOError>,
 {
@@ -671,14 +698,14 @@ where
                     && Instant::now() < deadline =>
             {
                 log::info!(
-                    "Robinhood MCP batch waiting for SSE responses ({}/{expected})",
+                    "MCP batch waiting for SSE responses ({}/{expected})",
                     values.len()
                 );
                 continue;
             }
             Err(error) if error.0.code() == -esp_idf_svc::sys::ESP_ERR_HTTP_EAGAIN => {
                 return Err(format!(
-                    "Robinhood MCP batch timed out after receiving {} of {expected} responses",
+                    "MCP batch timed out after receiving {} of {expected} responses",
                     values.len()
                 ));
             }
@@ -707,7 +734,7 @@ where
     }
     if values.len() != expected {
         return Err(format!(
-            "Robinhood MCP batch returned {} of {expected} responses",
+            "MCP batch returned {} of {expected} responses",
             values.len()
         ));
     }
@@ -715,7 +742,7 @@ where
 }
 
 fn sse_event_end(bytes: &[u8]) -> Option<usize> {
-    // Robinhood sends one complete JSON value on a `data:` line but may keep
+    // Some MCP servers send one complete JSON value on a `data:` line but keep
     // the chunked stream open without promptly sending the optional blank
     // event separator. A terminated data line is already a complete response.
     for start in 0..bytes.len() {
@@ -758,11 +785,11 @@ fn parse_json_or_sse(bytes: &[u8]) -> Result<Value, String> {
 
 fn normalize_mcp_result(body: &Value) -> Result<Value, String> {
     if let Some(error) = body.get("error") {
-        return Err(format!("Robinhood MCP error: {error}"));
+        return Err(format!("MCP error: {error}"));
     }
     let result = body
         .get("result")
-        .ok_or_else(|| "Robinhood MCP response omitted result".to_owned())?;
+        .ok_or_else(|| "MCP response omitted result".to_owned())?;
     let text = result
         .get("content")
         .and_then(Value::as_array)
@@ -771,7 +798,7 @@ fn normalize_mcp_result(body: &Value) -> Result<Value, String> {
         .find(|item| item.get("type").and_then(Value::as_str) == Some("text"))
         .and_then(|item| item.get("text"))
         .and_then(Value::as_str)
-        .ok_or_else(|| "Robinhood MCP tool returned no text".to_owned())?;
+        .ok_or_else(|| "MCP tool returned no text".to_owned())?;
     if result.get("isError").and_then(Value::as_bool) == Some(true) {
         return Err(text.to_owned());
     }

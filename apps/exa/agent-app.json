@@ -1,7 +1,25 @@
 {
   "id": "exa",
+  "description": "Web research and local search history",
   "version": "1.1.0",
   "dataVersion": 5,
+  "toolNamespace": "research",
+  "nativeServices": {
+    "http": [
+      {
+        "method": "POST",
+        "urls": [
+          "https://api.exa.ai/search",
+          "https://api.exa.ai/contents"
+        ],
+        "allowedRequestHeaders": ["accept", "content-type"],
+        "credential": {
+          "id": "exa.api-key",
+          "header": "x-api-key"
+        }
+      }
+    ]
+  },
   "tools": [
     {
       "name": "research.search",

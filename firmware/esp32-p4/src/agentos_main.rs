@@ -4,8 +4,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use pocket_pi_agentos::{
-    AppServiceHost, AppSupervisor, RoutedToolHost, DATA_ACTION_STACK_BYTES,
+    AppCatalog, AppServiceHost, AppSupervisor, RoutedToolHost, DATA_ACTION_STACK_BYTES,
 };
+use pocket_pi_app_pack::catalog;
 use pocket_pi_embedded::{AgentEvent, ModelBackend, ToolHost, MODEL_WORKER_STACK_BYTES};
 use pocket_pi_protocols::model::ModelBackendSettings;
 use pocket_pi_tools::CoreToolHost;
@@ -121,13 +122,14 @@ pub fn run() -> anyhow::Result<()> {
     let network_ready = Arc::new(AtomicBool::new(
         wifi.as_ref().is_some_and(|wifi| wifi.is_connected()),
     ));
+    let catalog = catalog()?;
     let services: Arc<dyn AppServiceHost> = Arc::new(EspAppServices::new(
         network_ready.clone(),
-        runtime_config.exa_api_key,
-        runtime_config.robinhood_access_token,
+        catalog.clone(),
+        runtime_config.app_credentials,
     ));
     let mut supervisor = with_psram_pthread_config(DATA_ACTION_STACK_BYTES, || {
-        AppSupervisor::new(storage::WORKSPACE_ROOT, services)
+        AppSupervisor::new(storage::WORKSPACE_ROOT, catalog, services)
     })?;
     supervisor.frame()?;
 
@@ -156,7 +158,7 @@ pub fn run() -> anyhow::Result<()> {
         "provider":provider,
         "model":resolved_model,
         "thinkingLevel":model_settings.thinking_level.id(),
-        "systemPrompt":"You are Pi Agent, the first-class system App in Pocket Pi AgentOS on an ESP32-P4. You can manage the top-level /workspace and use installed App tools. Use /workspace for durable memory, notes, plans, and artifacts; read and update relevant files when continuity matters. Be concise. Robinhood data is owned by the Robinhood App; Exa research history is owned by the Exa App."
+        "systemPrompt":"You are Pi Agent, the first-class system App in Pocket Pi AgentOS on an ESP32-P4. You can manage the top-level /workspace and use installed App tools. Use /workspace for durable memory, notes, plans, and artifacts; read and update relevant files when continuity matters. Installed Apps own their tools, state, tasks, and views. Be concise."
     });
     with_psram_pthread_config(MODEL_WORKER_STACK_BYTES, || {
         supervisor
@@ -166,7 +168,7 @@ pub fn run() -> anyhow::Result<()> {
 
     let mut messages = vec![Message {
         role: "assistant",
-        text: "Pocket Pi AgentOS is starting. Robinhood and Exa are installed Apps.".into(),
+        text: "Pocket Pi AgentOS is starting.".into(),
     }];
     let mut agent_status = "STARTING";
     let mut busy = false;
@@ -384,6 +386,7 @@ pub fn run() -> anyhow::Result<()> {
                 &resolved_model,
                 &settings,
                 native_tools.as_ref(),
+                supervisor.catalog(),
             );
             supervisor.update_root(&projection)?;
             projection_dirty = false;
@@ -567,6 +570,7 @@ fn root_projection(
     model: &str,
     settings: &SettingsProjection,
     tools: &CoreToolHost,
+    catalog: &AppCatalog,
 ) -> Value {
     let schedule = tools.schedule_projection();
     let schedule_text = match schedule.next_in_seconds {
@@ -586,6 +590,12 @@ fn root_projection(
             "next":schedule_text,
             "everyMinutes":schedule.every_minutes,
         },
+        "apps":catalog.descriptors().filter(|app| app.id != pocket_pi_agentos::ROOT_APP_ID).map(|app| json!({
+            "id":app.id,
+            "title":app.title,
+            "description":app.description,
+            "scheduleEveryMinutes":app.schedules.first().map(|schedule| schedule.every_minutes),
+        })).collect::<Vec<_>>(),
         "settings":{
             "wifi":{
                 "connectedSsid":settings.wifi.connected_ssid,

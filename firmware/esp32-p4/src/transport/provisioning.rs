@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use pocket_pi_protocols::model::{
@@ -15,8 +16,7 @@ pub struct RuntimeConfig {
     pub wifi_password: Option<String>,
     pub model: ModelSettings,
     pub model_api_key: Option<String>,
-    pub exa_api_key: Option<String>,
-    pub robinhood_access_token: Option<String>,
+    pub app_credentials: BTreeMap<String, String>,
     pub initial_prompt: Option<String>,
     pub initial_prompt_delay_seconds: u64,
     pub unix_time_seconds: Option<u64>,
@@ -60,7 +60,9 @@ pub fn request_runtime_config(
         }
         ("uart", _) => return Err("UART provider must be codex or claude-code".into()),
         ("wireless", _) => {
-            return Err("wireless provider must be openai, openrouter, anthropic or deepseek".into())
+            return Err(
+                "wireless provider must be openai, openrouter, anthropic or deepseek".into(),
+            )
         }
         _ => return Err("model backend must be uart or wireless".into()),
     };
@@ -79,8 +81,7 @@ pub fn request_runtime_config(
         wifi_password: secret(&value, "wifiPassword", 63)?,
         model,
         model_api_key,
-        exa_api_key: secret(&value, "exaApiKey", 512)?,
-        robinhood_access_token: secret(&value, "robinhoodAccessToken", 4096)?,
+        app_credentials: app_credentials(&value)?,
         initial_prompt: string(&value, "initialPrompt")?.map(str::to_owned),
         initial_prompt_delay_seconds: value
             .get("initialPromptDelaySeconds")
@@ -91,6 +92,31 @@ pub fn request_runtime_config(
             .get("unixTimeSeconds")
             .and_then(serde_json::Value::as_u64),
     })
+}
+
+fn app_credentials(value: &serde_json::Value) -> Result<BTreeMap<String, String>, String> {
+    let Some(credentials) = value.get("appCredentials") else {
+        return Ok(BTreeMap::new());
+    };
+    let credentials = credentials
+        .as_object()
+        .ok_or_else(|| "appCredentials must be an object".to_owned())?;
+    if credentials.len() > 16 {
+        return Err("appCredentials has too many entries".into());
+    }
+    credentials
+        .iter()
+        .map(|(id, value)| {
+            if id.is_empty() || id.len() > 128 || !id.is_ascii() {
+                return Err("appCredentials contains an invalid id".into());
+            }
+            let secret = value
+                .as_str()
+                .filter(|secret| !secret.is_empty() && secret.len() <= 4096 && secret.is_ascii())
+                .ok_or_else(|| format!("appCredentials.{id} is invalid"))?;
+            Ok((id.clone(), secret.to_owned()))
+        })
+        .collect()
 }
 
 fn text(

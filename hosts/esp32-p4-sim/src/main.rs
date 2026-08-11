@@ -8,8 +8,9 @@ use anyhow::{anyhow, Result};
 use pocket3d::gpu::{Gpu, OffscreenTarget};
 use pocket_pi_agentos::{
     AppServiceHost, AppSupervisor, AppToolRequest, HttpRequest, NetFailure, RoutedToolHost,
-    TransportCompletion, EXA_APP_ID, ROOT_APP_ID,
+    TransportCompletion, ROOT_APP_ID,
 };
+use pocket_pi_app_pack::catalog;
 use pocket_pi_embedded::{AgentEvent, ToolHost};
 use pocket_pi_tools::{CoreToolHost, PlatformTools};
 use pocket_ui_wgpu::UiRenderer;
@@ -96,9 +97,7 @@ fn parse_args() -> Result<Args> {
                         root_tap = Some((350, 1110));
                         ROOT_APP_ID.to_owned()
                     }
-                    "robinhood" => "robinhood".to_owned(),
-                    "exa" => EXA_APP_ID.to_owned(),
-                    value => return Err(anyhow!("unknown App: {value}")),
+                    value => value.to_owned(),
                 }
             }
             "--backend" => backend = next(&mut args, "--backend")?,
@@ -269,7 +268,7 @@ impl AppServiceHost for SimAppServices {
         app_id: &str,
         request: HttpRequest,
     ) -> std::result::Result<TransportCompletion, NetFailure> {
-        if app_id != EXA_APP_ID || request.method != "POST" {
+        if app_id != "exa" || request.method != "POST" {
             return Err(NetFailure::new(
                 "invalid_request",
                 "simulator denied HTTP request",
@@ -344,7 +343,7 @@ impl Product {
             }
         };
         let services: Arc<dyn AppServiceHost> = Arc::new(SimAppServices);
-        let mut supervisor = AppSupervisor::new(workspace.clone(), services)?;
+        let mut supervisor = AppSupervisor::new(workspace.clone(), catalog()?, services)?;
         supervisor.open(app)?;
 
         let native_tools = Arc::new(CoreToolHost::new(workspace.clone(), Arc::new(SimPlatform)));
@@ -358,7 +357,7 @@ impl Product {
         Ok(Self {
             messages: vec![Message {
                 role: "assistant",
-                text: "Pocket Pi AgentOS is ready. Robinhood and Exa are installed Apps.".into(),
+                text: "Pocket Pi AgentOS is ready.".into(),
             }],
             agent_status: "IDLE",
             model_label,
@@ -541,6 +540,12 @@ impl Product {
                 "next":schedule_next,
                 "everyMinutes":schedule.every_minutes,
             },
+            "apps":self.supervisor.catalog().descriptors().filter(|app| app.id != ROOT_APP_ID).map(|app| json!({
+                "id":app.id,
+                "title":app.title,
+                "description":app.description,
+                "scheduleEveryMinutes":app.schedules.first().map(|schedule| schedule.every_minutes),
+            })).collect::<Vec<_>>(),
             "settings":{
                 "wifi":{
                     "connectedSsid":self.wifi_connected,
@@ -850,7 +855,8 @@ mod tests {
     fn exa_tool_writes_app_owned_sqlite() {
         init_logs();
         let temp = tempfile::tempdir().unwrap();
-        let mut supervisor = AppSupervisor::new(temp.path(), Arc::new(SimAppServices)).unwrap();
+        let mut supervisor =
+            AppSupervisor::new(temp.path(), catalog().unwrap(), Arc::new(SimAppServices)).unwrap();
         let result = supervisor.invoke_tool(
             "research.search",
             r#"{"query":"NVIDIA FY2026 annual report 10-K revenue data center guidance","numResults":5,"includeDomains":["investor.nvidia.com","sec.gov"]}"#,
@@ -878,7 +884,8 @@ mod tests {
     fn exa_write_removes_rows_older_than_seven_days() {
         init_logs();
         let temp = tempfile::tempdir().unwrap();
-        let mut supervisor = AppSupervisor::new(temp.path(), Arc::new(SimAppServices)).unwrap();
+        let mut supervisor =
+            AppSupervisor::new(temp.path(), catalog().unwrap(), Arc::new(SimAppServices)).unwrap();
         let first = supervisor.invoke_tool("research.search", r#"{"query":"expired search"}"#);
         assert!(!first.is_error, "{}", first.text);
         wait_for(|| {
@@ -916,7 +923,9 @@ mod tests {
     fn robinhood_refresh_failure_records_no_view_data() {
         init_logs();
         let temp = tempfile::tempdir().unwrap();
-        let mut supervisor = AppSupervisor::new(temp.path(), Arc::new(FailingRobinhood)).unwrap();
+        let mut supervisor =
+            AppSupervisor::new(temp.path(), catalog().unwrap(), Arc::new(FailingRobinhood))
+                .unwrap();
         supervisor.open("robinhood").unwrap();
 
         let failed = supervisor.invoke_active_task("refreshPortfolio", &Value::Null);
@@ -946,7 +955,8 @@ mod tests {
     fn robinhood_refresh_writes_the_fixed_view_projection() {
         init_logs();
         let temp = tempfile::tempdir().unwrap();
-        let mut supervisor = AppSupervisor::new(temp.path(), Arc::new(SimAppServices)).unwrap();
+        let mut supervisor =
+            AppSupervisor::new(temp.path(), catalog().unwrap(), Arc::new(SimAppServices)).unwrap();
         supervisor.open("robinhood").unwrap();
         let refreshed = supervisor.invoke_tool("robinhood.refresh_portfolio", "{}");
         assert!(!refreshed.is_error, "{}", refreshed.text);

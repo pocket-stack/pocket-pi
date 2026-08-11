@@ -1,0 +1,17 @@
+[package]
+name = "pocket-pi-app-pack"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+build = "build.rs"
+
+[dependencies]
+anyhow.workspace = true
+pocket-pi-agentos = { path = "../pocket-pi-agentos" }
+serde_json.workspace = true
+
+[dev-dependencies]
+pocket-pi-embedded = { path = "../pocket-pi-embedded" }
+tempfile = "3"

@@ -26,6 +26,7 @@ anyhow = "1"
 log = "0.4"
 serde_json = "1"
 pocket-pi-agentos = { path = "../../crates/pocket-pi-agentos" }
+pocket-pi-app-pack = { path = "../../crates/pocket-pi-app-pack" }
 pocket-pi-embedded = { path = "../../crates/pocket-pi-embedded" }
 pocket-pi-protocols = { path = "../../crates/pocket-pi-protocols" }
 pocket-pi-tools = { path = "../../crates/pocket-pi-tools" }

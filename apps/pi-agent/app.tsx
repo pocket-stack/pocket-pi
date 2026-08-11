@@ -13,11 +13,13 @@ const READER_PAGE_LINES = 39;
 
 type Message = { role: string; text: string };
 type Network = { ssid: string; rssiDbm: number; secured: boolean };
+type InstalledApp = { id: string; title: string; description: string; scheduleEveryMinutes?: number | null };
 type Projection = {
   agent?: string;
   model?: string;
   messages?: Message[];
   schedule?: { name?: string | null; prompt?: string; next?: string; everyMinutes?: number | null };
+  apps?: InstalledApp[];
   settings?: {
     wifi?: {
       connectedSsid?: string | null;
@@ -233,25 +235,25 @@ function FilesScreen() {
 }
 
 function AppsScreen() {
+  const apps = () => projection().apps ?? [];
   return (
     <View class="flex-col w-full h-full bg-slate-50">
       <Header title="APPS" />
       <View class="h-[1060] px-6 pt-7 flex-col gap-4">
-        <Text class="text-base text-slate-500 font-bold">2 INSTALLED APPS</Text>
-        <View class="w-[672] h-[150] px-6 flex-row items-center justify-between bg-white">
-          <View class="flex-row items-center gap-5">
-            <View class="w-[68] h-[68] items-center justify-center bg-emerald-100"><Text class="text-xl text-emerald-700 font-bold">R</Text></View>
-            <View class="flex-col gap-2"><Text class="text-xl text-slate-900 font-bold">Robinhood</Text><Text class="text-lg text-slate-600">Portfolio and positions</Text><Text class="text-base text-slate-500">UPDATES EVERY 5 MINUTES</Text></View>
-          </View>
-          <Text class="text-2xl text-orange-600">›</Text>
-        </View>
-        <View class="w-[672] h-[150] px-6 flex-row items-center justify-between bg-white">
-          <View class="flex-row items-center gap-5">
-            <View class="w-[68] h-[68] items-center justify-center bg-indigo-100"><Text class="text-xl text-indigo-700 font-bold">E</Text></View>
-            <View class="flex-col gap-2"><Text class="text-xl text-slate-900 font-bold">Exa Research</Text><Text class="text-lg text-slate-600">Agent search history</Text><Text class="text-base text-slate-500">STORED LOCALLY IN SQLITE</Text></View>
-          </View>
-          <Text class="text-2xl text-orange-600">›</Text>
-        </View>
+        <Text class="text-base text-slate-500 font-bold">{String(apps().length) + " INSTALLED APPS"}</Text>
+        <Show when={apps().length > 0} fallback={
+          <View class="h-[214] px-7 items-center justify-center bg-slate-100"><Text class="text-lg text-slate-500 font-bold">NO OPTIONAL APPS INSTALLED</Text></View>
+        }>
+          <For each={apps()}>{(app) => (
+            <View class="w-[672] h-[150] px-6 flex-row items-center justify-between bg-white">
+              <View class="flex-row items-center gap-5">
+                <View class="w-[68] h-[68] items-center justify-center bg-orange-100"><Text class="text-xl text-orange-700 font-bold">{app.title.slice(0, 1).toUpperCase()}</Text></View>
+                <View class="w-[500] flex-col gap-2"><Text class="text-xl text-slate-900 font-bold">{app.title}</Text><Text class="text-lg text-slate-600">{app.description}</Text><Show when={app.scheduleEveryMinutes}><Text class="text-base text-slate-500">{"UPDATES EVERY " + String(app.scheduleEveryMinutes) + " MINUTES"}</Text></Show></View>
+              </View>
+              <Text class="text-2xl text-orange-600">›</Text>
+            </View>
+          )}</For>
+        </Show>
         <View class="mt-4 h-[112] px-6 justify-center bg-slate-100">
           <Text class="text-base text-slate-600">{"APP DATA STAYS ISOLATED.\nPI AGENT CAN USE EACH APP'S TOOLS."}</Text>
         </View>
@@ -580,12 +582,8 @@ queueMicrotask(() => refreshFiles("", true));
       return "";
     }
     if (screen() === "apps") {
-      if (y >= 162 && y < 324) {
-        return JSON.stringify({ type: "navigate", app: "robinhood" });
-      }
-      if (y >= 324 && y < 490) {
-        return JSON.stringify({ type: "navigate", app: "exa" });
-      }
+      const app = (projection().apps ?? [])[Math.floor((y - 162) / 166)];
+      if (y >= 162 && app) return JSON.stringify({ type: "navigate", app: app.id });
       return "";
     }
     if (screen() === "settings") {

@@ -57,6 +57,16 @@ cargo xtask build esp32-p4-sim
 cargo xtask build esp32-p4
 ```
 
+Pi Agent is always included. Select ordinary Apps at build time with one flag;
+omitting it keeps the default Robinhood + Exa image:
+
+```sh
+cargo xtask build esp32-p4 --apps robinhood,exa
+cargo xtask build esp32-p4 --apps robinhood
+cargo xtask build esp32-p4 --apps exa
+cargo xtask build esp32-p4 --apps none
+```
+
 ### 1. ESP32 Pocket Pi simulator on macOS
 
 The simulator defaults to the Mac's existing Codex Coding Plan login:
@@ -190,8 +200,8 @@ The shared PocketJS device UI includes:
 - Settings with Wi-Fi scanning, selection and password entry;
 - touch keyboard and next-schedule status.
 
-The embedded AgentOS ships Pi Agent as its resident System App and Robinhood and
-Exa as ordinary Apps. Each ordinary App owns its Tool catalog, Data Action,
+The embedded AgentOS ships Pi Agent as its resident System App and can include
+Robinhood and Exa as build-selected ordinary Apps. Each ordinary App owns its Tool catalog, Data Action,
 SQLite projection and fixed PocketJS View; hosts provide only scoped
 credentials, transport and hardware adapters.
 
@@ -202,6 +212,7 @@ crates/pocket-pi-embedded/    embedded pi-agent-core guest and host traits
 crates/pocket-pi-tools/       portable workspace, shell, time and schedule tools
 crates/pocket-pi-protocols/   model request, response and streaming codecs
 crates/pocket-pi-agentos/     App Supervisor, System App lifecycle and App contracts
+crates/pocket-pi-app-pack/    build-selected embedded App composition
 hosts/esp32-p4-sim/           macOS adapters for the embedded product
 firmware/esp32-p4/            ESP-IDF hardware composition root and adapters
 tools/uart_bridge/            Mac Codex and Claude Code streaming adapters
@@ -218,9 +229,9 @@ and [docs/esp32-p4-port.md](docs/esp32-p4-port.md) for board-specific details.
 
 ## Current validation
 
-On **2026-08-11**, the embedded-only workspace completed 27 tests with no
+On **2026-08-11**, the embedded-only workspace completed 28 tests with no
 failures, passed workspace Clippy with warnings denied, and built the ESP32-P4
-simulator after rebuilding the Pi Agent, Robinhood and Exa bundles.
+simulator with none, Exa-only, Robinhood-only and combined App catalogs.
 
 Physical firmware, boot, Wi-Fi/DHCP, provider calls and unattended memory
 pressure remain separate evidence tiers. A successful simulator build is not a

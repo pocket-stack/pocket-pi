@@ -22,8 +22,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 pub const ROOT_APP_ID: &str = "pi-agent";
-pub const ROBINHOOD_APP_ID: &str = "robinhood";
-pub const EXA_APP_ID: &str = "exa";
 const BUILTIN_RELEASE: &str = "builtin-v1";
 const VIEWPORT: (f32, f32) = (720.0, 1280.0);
 
@@ -31,104 +29,155 @@ const VIEWPORT: (f32, f32) = (720.0, 1280.0);
 // Tool Router handoff and local read-only diagnostics; remote work itself runs
 // in the Data Action runner and never holds the App/UI owner.
 const TOOL_TIMEOUT: Duration = Duration::from_secs(45);
-const ROOT_JS: &str = include_str!("../../../apps/pi-agent/dist/app.js");
-const ROOT_AGENT_JS: &str = include_str!("../../../apps/pi-agent/dist/agent.js");
-const ROOT_PAK: &[u8] = include_bytes!("../../../apps/pi-agent/dist/app.pak");
-const ROOT_DESCRIPTOR: &str = include_str!("../../../apps/pi-agent/agent-app.json");
-const ROOT_POCKET: &str = include_str!("../../../apps/pi-agent/pocket.json");
-const ROBINHOOD_JS: &str = include_str!("../../../apps/robinhood/dist/app.js");
-const ROBINHOOD_DATA_JS: &str = include_str!("../../../apps/robinhood/dist/data-action.js");
-const ROBINHOOD_PAK: &[u8] = include_bytes!("../../../apps/robinhood/dist/app.pak");
-const ROBINHOOD_DESCRIPTOR: &str = include_str!("../../../apps/robinhood/agent-app.json");
-#[cfg(test)]
-const ROBINHOOD_TOOL_CATALOG: &str = include_str!("../../../apps/robinhood/tool-catalog.json");
-const ROBINHOOD_POCKET: &str = include_str!("../../../apps/robinhood/pocket.json");
-const EXA_JS: &str = include_str!("../../../apps/exa/dist/app.js");
-const EXA_DATA_JS: &str = include_str!("../../../apps/exa/dist/data-action.js");
-const EXA_PAK: &[u8] = include_bytes!("../../../apps/exa/dist/app.pak");
-const EXA_DESCRIPTOR: &str = include_str!("../../../apps/exa/agent-app.json");
-const EXA_POCKET: &str = include_str!("../../../apps/exa/pocket.json");
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct AppDescriptor {
-    id: String,
-    version: String,
+pub struct AppDescriptor {
+    pub id: String,
+    #[serde(skip)]
+    pub title: String,
+    pub description: String,
+    pub version: String,
     #[serde(default)]
-    data_version: u32,
+    pub data_version: u32,
     #[serde(default)]
-    tools: Vec<Value>,
+    pub tool_namespace: String,
     #[serde(default)]
-    provider_operations: Vec<String>,
+    pub tools: Vec<Value>,
     #[serde(default)]
-    tasks: Vec<String>,
+    pub provider_operations: Vec<String>,
     #[serde(default)]
-    schedules: Vec<AppSchedule>,
+    pub tasks: Vec<String>,
+    #[serde(default)]
+    pub schedules: Vec<AppSchedule>,
+    #[serde(default)]
+    pub native_services: NativeServices,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct AppSchedule {
-    id: String,
-    every_minutes: u64,
-    task: String,
+pub struct AppSchedule {
+    pub id: String,
+    pub every_minutes: u64,
+    pub task: String,
     #[serde(default)]
-    args: Value,
+    pub args: Value,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeServices {
+    #[serde(default)]
+    pub http: Vec<HttpServicePolicy>,
+    #[serde(default)]
+    pub mcp: Vec<McpServicePolicy>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialBinding {
+    pub id: String,
+    pub header: String,
+    #[serde(default)]
+    pub prefix: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpServicePolicy {
+    pub method: String,
+    pub urls: Vec<String>,
+    #[serde(default)]
+    pub allowed_request_headers: Vec<String>,
+    pub credential: Option<CredentialBinding>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServicePolicy {
+    pub connection: String,
+    pub url: String,
+    pub credential: CredentialBinding,
+}
+
+#[derive(Clone, Copy)]
+pub struct EmbeddedApp {
+    pub descriptor_json: &'static str,
+    pub pocket_json: &'static str,
+    pub js: &'static str,
+    pub data_js: Option<&'static str>,
+    pub agent_js: Option<&'static str>,
+    pub pak: &'static [u8],
+}
+
+impl EmbeddedApp {
+    pub const fn new(
+        descriptor_json: &'static str,
+        pocket_json: &'static str,
+        js: &'static str,
+        data_js: Option<&'static str>,
+        agent_js: Option<&'static str>,
+        pak: &'static [u8],
+    ) -> Self {
+        Self {
+            descriptor_json,
+            pocket_json,
+            js,
+            data_js,
+            agent_js,
+            pak,
+        }
+    }
 }
 
 #[derive(Clone)]
-struct BuiltinApp {
+struct CatalogApp {
     descriptor: AppDescriptor,
-    descriptor_json: &'static str,
-    pocket_json: &'static str,
-    js: &'static str,
-    data_js: Option<&'static str>,
-    pak: &'static [u8],
+    bundle: EmbeddedApp,
 }
 
 #[derive(Clone)]
 pub struct AppCatalog {
-    apps: BTreeMap<String, BuiltinApp>,
+    apps: BTreeMap<String, CatalogApp>,
     tool_owner: BTreeMap<String, String>,
 }
 
 impl AppCatalog {
-    pub fn builtin() -> Result<Self> {
+    pub fn new(bundles: impl IntoIterator<Item = EmbeddedApp>) -> Result<Self> {
         let mut apps = BTreeMap::new();
-        for (descriptor_json, pocket_json, js, data_js, pak) in [
-            (ROOT_DESCRIPTOR, ROOT_POCKET, ROOT_JS, None, ROOT_PAK),
-            (
-                ROBINHOOD_DESCRIPTOR,
-                ROBINHOOD_POCKET,
-                ROBINHOOD_JS,
-                Some(ROBINHOOD_DATA_JS),
-                ROBINHOOD_PAK,
-            ),
-            (
-                EXA_DESCRIPTOR,
-                EXA_POCKET,
-                EXA_JS,
-                Some(EXA_DATA_JS),
-                EXA_PAK,
-            ),
-        ] {
-            let descriptor: AppDescriptor =
-                serde_json::from_str(descriptor_json).context("parse built-in agent-app.json")?;
-            if apps.contains_key(&descriptor.id) {
-                anyhow::bail!("duplicate built-in App id: {}", descriptor.id);
+        for bundle in bundles {
+            let mut descriptor: AppDescriptor = serde_json::from_str(bundle.descriptor_json)
+                .context("parse embedded agent-app.json")?;
+            let pocket: Value =
+                serde_json::from_str(bundle.pocket_json).context("parse embedded pocket.json")?;
+            descriptor.title = pocket
+                .get("title")
+                .and_then(Value::as_str)
+                .filter(|title| !title.is_empty())
+                .ok_or_else(|| anyhow!("App {} pocket.json is missing title", descriptor.id))?
+                .to_owned();
+            if descriptor.tool_namespace.is_empty() {
+                descriptor.tool_namespace.clone_from(&descriptor.id);
             }
-            apps.insert(
-                descriptor.id.clone(),
-                BuiltinApp {
-                    descriptor,
-                    descriptor_json,
-                    pocket_json,
-                    js,
-                    data_js,
-                    pak,
-                },
-            );
+            if apps.contains_key(&descriptor.id) {
+                anyhow::bail!("duplicate embedded App id: {}", descriptor.id);
+            }
+            apps.insert(descriptor.id.clone(), CatalogApp { descriptor, bundle });
         }
+        anyhow::ensure!(
+            apps.contains_key(ROOT_APP_ID),
+            "missing {ROOT_APP_ID} System App"
+        );
+        anyhow::ensure!(
+            apps[ROOT_APP_ID].bundle.agent_js.is_some(),
+            "{ROOT_APP_ID} System App is missing agent.js"
+        );
+        anyhow::ensure!(
+            apps.values()
+                .filter(|app| app.bundle.agent_js.is_some())
+                .count()
+                == 1,
+            "only {ROOT_APP_ID} may contain agent.js"
+        );
         let mut tool_owner = BTreeMap::new();
         for app in apps.values() {
             let provider_operations = app
@@ -153,9 +202,7 @@ impl AppCatalog {
                     .get("name")
                     .and_then(Value::as_str)
                     .ok_or_else(|| anyhow!("{} tool is missing name", app.descriptor.id))?;
-                if !name.starts_with(&format!("{}.", app.descriptor.id))
-                    && !(app.descriptor.id == EXA_APP_ID && name.starts_with("research."))
-                {
+                if !name.starts_with(&format!("{}.", app.descriptor.tool_namespace)) {
                     anyhow::bail!("App {} owns non-namespaced tool {name}", app.descriptor.id);
                 }
                 if tool_owner
@@ -189,8 +236,12 @@ impl AppCatalog {
         self.tool_owner.get(name).map(String::as_str)
     }
 
-    fn descriptors(&self) -> impl Iterator<Item = &AppDescriptor> {
+    pub fn descriptors(&self) -> impl Iterator<Item = &AppDescriptor> {
         self.apps.values().map(|app| &app.descriptor)
+    }
+
+    pub fn descriptor(&self, id: &str) -> Option<&AppDescriptor> {
+        self.apps.get(id).map(|app| &app.descriptor)
     }
 
     /// Provider operations are declared by the App release and consumed by a
@@ -205,7 +256,48 @@ impl AppCatalog {
             .collect()
     }
 
-    fn app(&self, id: &str) -> Option<&BuiltinApp> {
+    pub fn provider_operation_allowed(&self, app_id: &str, operation: &str) -> bool {
+        self.descriptor(app_id)
+            .is_some_and(|app| app.provider_operations.iter().any(|item| item == operation))
+    }
+
+    pub fn http_policy(&self, app_id: &str, method: &str, url: &str) -> Option<&HttpServicePolicy> {
+        self.descriptor(app_id)?
+            .native_services
+            .http
+            .iter()
+            .find(|policy| policy.method == method && policy.urls.iter().any(|item| item == url))
+    }
+
+    pub fn mcp_policy(&self, app_id: &str, connection: &str) -> Option<&McpServicePolicy> {
+        self.descriptor(app_id)?
+            .native_services
+            .mcp
+            .iter()
+            .find(|policy| policy.connection == connection)
+    }
+
+    pub fn credential_ids(&self) -> BTreeSet<String> {
+        self.descriptors()
+            .flat_map(|descriptor| {
+                descriptor
+                    .native_services
+                    .http
+                    .iter()
+                    .filter_map(|policy| policy.credential.as_ref())
+                    .chain(
+                        descriptor
+                            .native_services
+                            .mcp
+                            .iter()
+                            .map(|policy| &policy.credential),
+                    )
+            })
+            .map(|credential| credential.id.clone())
+            .collect()
+    }
+
+    fn app(&self, id: &str) -> Option<&CatalogApp> {
         self.apps.get(id)
     }
 }
@@ -575,7 +667,7 @@ struct AppRuntime {
 
 impl AppRuntime {
     fn load(
-        app: &BuiltinApp,
+        app: &CatalogApp,
         release_dir: &Path,
         fs_root: &Path,
         tmp_root: &Path,
@@ -906,9 +998,12 @@ pub struct AppSupervisor {
 }
 
 impl AppSupervisor {
-    pub fn new(workspace: impl Into<PathBuf>, services: Arc<dyn AppServiceHost>) -> Result<Self> {
+    pub fn new(
+        workspace: impl Into<PathBuf>,
+        catalog: AppCatalog,
+        services: Arc<dyn AppServiceHost>,
+    ) -> Result<Self> {
         let workspace = workspace.into();
-        let catalog = AppCatalog::builtin()?;
         seed_builtin_releases(&workspace, &catalog)?;
         let schedules = AppScheduleStore::load(&workspace, &catalog)?;
         let mut databases = BTreeMap::new();
@@ -941,7 +1036,7 @@ impl AppSupervisor {
                         .get(&descriptor.id)
                         .expect("revision created for descriptor")
                         .clone(),
-                    net: serde_json::from_str::<Value>(app.pocket_json)
+                    net: serde_json::from_str::<Value>(app.bundle.pocket_json)
                         .ok()
                         .and_then(|manifest| {
                             manifest
@@ -1325,23 +1420,28 @@ fn seed_builtin_releases(workspace: &Path, catalog: &AppCatalog) -> Result<()> {
         std::fs::create_dir_all(&fs_root)?;
         std::fs::create_dir_all(&db_root)?;
         std::fs::create_dir_all(&tmp_root)?;
-        atomic_write(&release_dir.join("app.js"), app.js.as_bytes())?;
-        if let Some(data_js) = app.data_js {
+        atomic_write(&release_dir.join("app.js"), app.bundle.js.as_bytes())?;
+        if let Some(data_js) = app.bundle.data_js {
             atomic_write(&release_dir.join("data-action.js"), data_js.as_bytes())?;
         }
-        if app.descriptor.id == ROOT_APP_ID {
-            atomic_write(&release_dir.join("agent.js"), ROOT_AGENT_JS.as_bytes())?;
+        if let Some(agent_js) = app.bundle.agent_js {
+            atomic_write(&release_dir.join("agent.js"), agent_js.as_bytes())?;
         }
-        atomic_write(&release_dir.join("app.pak"), app.pak)?;
+        atomic_write(&release_dir.join("app.pak"), app.bundle.pak)?;
         atomic_write(
             &release_dir.join("agent-app.json"),
-            app.descriptor_json.as_bytes(),
+            app.bundle.descriptor_json.as_bytes(),
         )?;
-        atomic_write(&release_dir.join("pocket.json"), app.pocket_json.as_bytes())?;
-        let mut modules = vec!["ui", "data.fs", "data.sqlite"];
-        if app.descriptor.id == EXA_APP_ID {
-            modules.push("net.http");
-        }
+        atomic_write(
+            &release_dir.join("pocket.json"),
+            app.bundle.pocket_json.as_bytes(),
+        )?;
+        let manifest: Value = serde_json::from_str(app.bundle.pocket_json)?;
+        let modules = manifest
+            .pointer("/engine/capabilities/requires")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         atomic_write(
             &release_dir.join("plan.json"),
             &serde_json::to_vec_pretty(&json!({
@@ -1601,222 +1701,88 @@ fn unix_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
 
-    struct NoServices;
+    #[test]
+    fn catalog_uses_each_apps_declared_tool_namespace() {
+        let catalog = AppCatalog::new([
+            fixture(
+                r#"{"id":"pi-agent","description":"System","version":"1","tools":[],"tasks":[],"schedules":[]}"#,
+                Some("agent"),
+            ),
+            fixture(
+                r#"{"id":"search","description":"Research","version":"1","toolNamespace":"research","tools":[{"name":"research.query","parameters":{"type":"object"}}],"tasks":[],"schedules":[]}"#,
+                None,
+            ),
+        ])
+        .unwrap();
 
-    impl AppServiceHost for NoServices {
-        fn call(
-            &self,
-            _app_id: &str,
-            _service: &str,
-            _operation: &str,
-            _args: &Value,
-        ) -> Result<Value, String> {
-            Err("not used by Pi Agent UI tests".into())
-        }
-    }
-
-    struct BackgroundBackend;
-
-    impl ModelBackend for BackgroundBackend {
-        fn complete(
-            &self,
-            _request_json: &str,
-            on_event: &mut dyn FnMut(pocket_pi_embedded::ModelStreamEvent),
-        ) -> Result<String, String> {
-            std::thread::sleep(Duration::from_millis(20));
-            on_event(pocket_pi_embedded::ModelStreamEvent::Text(
-                "background-ok".into(),
-            ));
-            Ok(serde_json::json!({
-                "thinking":"",
-                "text":"background-ok",
-                "toolCalls":[],
-                "usage":{},
-                "stopReason":"stop"
-            })
-            .to_string())
-        }
-    }
-
-    struct NoTools;
-
-    impl ToolHost for NoTools {
-        fn definitions(&self) -> Vec<Value> {
-            Vec::new()
-        }
-
-        fn execute(&self, _call_id: &str, name: &str, _args_json: &str) -> ToolResult {
-            tool_error(format!("unexpected tool: {name}"))
-        }
-    }
-
-    struct ToolCallingBackend(AtomicUsize);
-
-    impl ModelBackend for ToolCallingBackend {
-        fn complete(
-            &self,
-            request_json: &str,
-            on_event: &mut dyn FnMut(pocket_pi_embedded::ModelStreamEvent),
-        ) -> Result<String, String> {
-            if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
-                Ok(serde_json::json!({
-                    "thinking":"get portfolio",
-                    "thinkingSignature":"reasoning_content",
-                    "text":"",
-                    "toolCalls":[{
-                        "id":"call_portfolio",
-                        "name":"robinhood.call",
-                        "arguments":{
-                            "name":"get_portfolio",
-                            "arguments":{"account_number":"SIM-001"}
-                        }
-                    }],
-                    "usage":{},
-                    "stopReason":"toolUse"
-                })
-                .to_string())
-            } else {
-                assert!(request_json.contains("100.00"), "{request_json}");
-                assert!(!request_json.contains("Queued robinhood.call"));
-                on_event(pocket_pi_embedded::ModelStreamEvent::Text("tool-ok".into()));
-                Ok(serde_json::json!({
-                    "thinking":"",
-                    "text":"tool-ok",
-                    "toolCalls":[],
-                    "usage":{},
-                    "stopReason":"stop"
-                })
-                .to_string())
-            }
-        }
-    }
-
-    struct RobinhoodServices;
-
-    impl AppServiceHost for RobinhoodServices {
-        fn call(
-            &self,
-            app_id: &str,
-            service: &str,
-            operation: &str,
-            _args: &Value,
-        ) -> Result<Value, String> {
-            if (app_id, service, operation) == ("robinhood", "mcp.client", "callTool") {
-                Ok(json!({"equity":"100.00","day_pnl":"1.00","week_pnl":"2.00"}))
-            } else {
-                Err("unexpected service call".to_owned())
-            }
-        }
+        assert_eq!(catalog.app_for_tool("research.query"), Some("search"));
+        assert_eq!(catalog.descriptors().count(), 2);
     }
 
     #[test]
-    fn exa_catalog_exposes_bounded_advanced_search() {
-        let catalog = AppCatalog::builtin().unwrap();
-        let exa = catalog
-            .descriptors()
-            .find(|descriptor| descriptor.id == EXA_APP_ID)
-            .unwrap();
-        assert_eq!(exa.tools.len(), 3);
-        assert!(serde_json::to_vec(&exa.tools).unwrap().len() < 5 * 1024);
+    fn catalog_rejects_a_tool_outside_its_declared_namespace() {
+        let error = AppCatalog::new([
+            fixture(
+                r#"{"id":"pi-agent","description":"System","version":"1","tools":[],"tasks":[],"schedules":[]}"#,
+                Some("agent"),
+            ),
+            fixture(
+                r#"{"id":"search","description":"Research","version":"1","tools":[{"name":"other.query","parameters":{"type":"object"}}],"tasks":[],"schedules":[]}"#,
+                None,
+            ),
+        ])
+        .err()
+        .unwrap();
 
-        let search = exa
-            .tools
-            .iter()
-            .find(|tool| tool["name"] == "research.search")
-            .unwrap();
-        let properties = search["parameters"]["properties"].as_object().unwrap();
-        for name in [
-            "category",
-            "startPublishedDate",
-            "endPublishedDate",
-            "additionalQueries",
-            "maxAgeHours",
-        ] {
-            assert!(
-                properties.contains_key(name),
-                "missing Exa search field {name}"
-            );
-        }
-        let search_types = properties["searchType"]["enum"].as_array().unwrap();
-        assert!(search_types.iter().any(|value| value == "deep"));
-        assert!(search_types.iter().any(|value| value == "deep-reasoning"));
-        assert_eq!(search["parameters"]["additionalProperties"], false);
+        assert!(error.to_string().contains("non-namespaced tool"));
+    }
 
-        let fetch = exa
-            .tools
-            .iter()
-            .find(|tool| tool["name"] == "research.fetch")
-            .unwrap();
-        assert!(fetch["parameters"]["properties"]
-            .get("maxAgeHours")
+    #[test]
+    fn catalog_exposes_only_declared_native_policies() {
+        let catalog = AppCatalog::new([
+            fixture(
+                r#"{"id":"pi-agent","description":"System","version":"1","tools":[],"tasks":[],"schedules":[]}"#,
+                Some("agent"),
+            ),
+            fixture(
+                r#"{"id":"search","description":"Research","version":"1","tools":[],"tasks":[],"schedules":[],"nativeServices":{"http":[{"method":"POST","urls":["https://example.com/search"],"allowedRequestHeaders":["content-type"],"credential":{"id":"search.api-key","header":"x-api-key"}}],"mcp":[]}}"#,
+                None,
+            ),
+        ])
+        .unwrap();
+
+        assert!(catalog
+            .http_policy("search", "POST", "https://example.com/search")
             .is_some());
-        assert_eq!(fetch["parameters"]["additionalProperties"], false);
+        assert!(catalog
+            .http_policy("search", "GET", "https://example.com/search")
+            .is_none());
+        assert_eq!(
+            catalog.credential_ids(),
+            BTreeSet::from(["search.api-key".to_owned()])
+        );
     }
 
     #[test]
-    fn robinhood_catalog_matches_the_checked_in_tool_catalog() {
-        let catalog = AppCatalog::builtin().unwrap();
-        let operations = catalog.provider_operations(ROBINHOOD_APP_ID);
-        let snapshot: Value = serde_json::from_str(ROBINHOOD_TOOL_CATALOG).unwrap();
-        let upstream = snapshot["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|tool| tool["name"].as_str().unwrap().to_owned())
-            .collect::<BTreeSet<_>>();
-        assert_eq!(operations, upstream);
-        assert_eq!(operations.len(), 54);
-        assert!(operations.contains("place_equity_order"));
-        assert!(operations.contains("place_option_order"));
-        assert!(!operations.contains("refresh_portfolio"));
-        let mut namespace_counts = BTreeMap::<&str, usize>::new();
-        for tool in snapshot["tools"].as_array().unwrap() {
-            *namespace_counts
-                .entry(tool["namespace"].as_str().unwrap())
-                .or_default() += 1;
-            assert!(!tool["description"].as_str().unwrap_or_default().is_empty());
-            assert!(tool.get("agentDescription").is_none());
-            assert_eq!(tool["inputSchema"]["type"], "object");
-        }
-        assert_eq!(namespace_counts.len(), 8);
-        assert!(namespace_counts.values().all(|count| *count <= 9));
-        let robinhood = catalog
-            .descriptors()
-            .find(|descriptor| descriptor.id == ROBINHOOD_APP_ID)
-            .unwrap();
-        assert_eq!(robinhood.tools.len(), 4);
-        assert!(serde_json::to_vec(&robinhood.tools).unwrap().len() < 8 * 1024);
-        for tool in &robinhood.tools {
-            let name = tool["name"].as_str().unwrap();
-            assert!(
-                !tool["description"].as_str().unwrap_or_default().is_empty(),
-                "{name}"
-            );
-            assert_eq!(tool["parameters"]["type"], "object", "{name}");
-            if tool.get("providerOperation").is_some() {
-                assert_eq!(tool["parameters"]["additionalProperties"], false, "{name}");
-            }
-        }
-    }
-
-    #[test]
-    fn data_version_resets_only_that_app_database_once() {
+    fn data_version_resets_only_that_apps_database_once() {
         let temp = tempfile::tempdir().unwrap();
-        let db_root = temp.path().join("apps/exa/data");
+        let db_root = temp.path().join("apps/notes/data");
         std::fs::create_dir_all(&db_root).unwrap();
-        let database = db_root.join("exa.sqlite");
+        let database = db_root.join("notes.sqlite");
         std::fs::write(&database, "old-schema").unwrap();
         let mut descriptor = AppDescriptor {
-            id: EXA_APP_ID.to_owned(),
-            version: "1.0.0".to_owned(),
+            id: "notes".into(),
+            title: "Notes".into(),
+            description: "Notes App".into(),
+            version: "1.0.0".into(),
             data_version: 3,
+            tool_namespace: "notes".into(),
             tools: Vec::new(),
             provider_operations: Vec::new(),
             tasks: Vec::new(),
             schedules: Vec::new(),
+            native_services: NativeServices::default(),
         };
 
         reset_development_database(temp.path(), &descriptor, &db_root).unwrap();
@@ -1833,196 +1799,14 @@ mod tests {
         assert!(!database.exists());
     }
 
-    #[test]
-    fn app_task_schedule_state_is_owned_by_each_app_data_root() {
-        let temp = tempfile::tempdir().unwrap();
-        let _supervisor = AppSupervisor::new(temp.path(), Arc::new(NoServices)).unwrap();
-        let app_state = temp
-            .path()
-            .join("apps/robinhood/data/.system/schedules.json");
-        let stored: Vec<StoredSchedule> =
-            serde_json::from_slice(&std::fs::read(app_state).unwrap()).unwrap();
-
-        assert_eq!(stored.len(), 1);
-        assert_eq!(stored[0].app_id, ROBINHOOD_APP_ID);
-        assert_eq!(stored[0].last_ok, None);
-        assert!(!temp.path().join(".system/schedules.json").exists());
-    }
-
-    #[test]
-    fn pi_agent_system_app_survives_foreground_app_navigation() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut supervisor = AppSupervisor::new(temp.path(), Arc::new(NoServices)).unwrap();
-        assert_eq!(supervisor.runtimes.len(), 2, "all ordinary Views preload");
-        let system_guest = &supervisor.system.guest as *const Guest as usize;
-        let exa_guest = &supervisor
-            .runtimes
-            .get(EXA_APP_ID)
-            .expect("Exa runtime preloaded")
-            .guest as *const Guest as usize;
-        supervisor
-            .boot_agent(
-                r#"{"model":"offline"}"#,
-                Arc::new(BackgroundBackend),
-                Arc::new(NoTools),
-            )
-            .unwrap();
-        supervisor.prompt_agent("keep working").unwrap();
-        supervisor.open(ROBINHOOD_APP_ID).unwrap();
-
-        let mut saw_delta = false;
-        let mut finished = false;
-        for _ in 0..100 {
-            for event in supervisor.frame().unwrap() {
-                saw_delta |=
-                    matches!(event, AgentEvent::ResponseText(ref text) if text == "background-ok");
-                finished |= event == AgentEvent::Done;
-            }
-            if finished {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-
-        assert!(saw_delta && finished);
-        assert_eq!(supervisor.active_id(), ROBINHOOD_APP_ID);
-        assert_eq!(
-            &supervisor.system.guest as *const Guest as usize,
-            system_guest
-        );
-        let robinhood_guest = &supervisor
-            .runtimes
-            .get(ROBINHOOD_APP_ID)
-            .expect("Robinhood runtime")
-            .guest as *const Guest as usize;
-        supervisor.open(ROOT_APP_ID).unwrap();
-        assert_eq!(supervisor.active_id(), ROOT_APP_ID);
-        assert_eq!(
-            &supervisor.system.guest as *const Guest as usize,
-            system_guest
-        );
-        supervisor.open(ROBINHOOD_APP_ID).unwrap();
-        assert_eq!(
-            &supervisor
-                .runtimes
-                .get(ROBINHOOD_APP_ID)
-                .expect("cached Robinhood runtime")
-                .guest as *const Guest as usize,
-            robinhood_guest
-        );
-        supervisor.open(EXA_APP_ID).unwrap();
-        assert_eq!(
-            &supervisor
-                .runtimes
-                .get(EXA_APP_ID)
-                .expect("resident Exa runtime")
-                .guest as *const Guest as usize,
-            exa_guest
-        );
-    }
-
-    #[test]
-    fn background_agent_routes_headless_app_tool_while_exa_is_foreground() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut supervisor = AppSupervisor::new(temp.path(), Arc::new(RobinhoodServices)).unwrap();
-        let (routed, app_rx) = RoutedToolHost::new(Arc::new(NoTools), supervisor.catalog.clone());
-        supervisor
-            .boot_agent(
-                r#"{"model":"offline"}"#,
-                Arc::new(ToolCallingBackend(AtomicUsize::new(0))),
-                Arc::new(routed),
-            )
-            .unwrap();
-        supervisor.prompt_agent("check portfolio").unwrap();
-        supervisor.open(EXA_APP_ID).unwrap();
-
-        let mut finished = false;
-        for _ in 0..200 {
-            while let Ok(request) = app_rx.try_recv() {
-                request.handle(&mut supervisor);
-            }
-            finished |= supervisor
-                .frame()
-                .unwrap()
-                .into_iter()
-                .any(|event| event == AgentEvent::Done);
-            if finished {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-
-        assert!(finished);
-        assert_eq!(supervisor.active_id(), EXA_APP_ID);
-        assert!(temp
-            .path()
-            .join("apps/robinhood/data/robinhood.sqlite")
-            .exists());
-    }
-
-    #[test]
-    fn app_revisions_coalesce_at_the_foreground_frame_boundary() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut supervisor = AppSupervisor::new(temp.path(), Arc::new(NoServices)).unwrap();
-        supervisor.open(EXA_APP_ID).unwrap();
-
-        let revision = supervisor
-            .runtimes
-            .get(EXA_APP_ID)
-            .unwrap()
-            .revision
-            .clone();
-        revision.fetch_add(1, Ordering::Release);
-        revision.fetch_add(1, Ordering::Release);
-        revision.fetch_add(1, Ordering::Release);
-        assert!(supervisor.active_projection_is_stale());
-
-        // A host tick that does not render the selected View never reloads its
-        // SQLite projection. The next rendered frame observes only the newest
-        // revision and therefore folds all three commits into one reload.
-        supervisor.frame_render(false).unwrap();
-        let exa = supervisor.runtimes.get(EXA_APP_ID).unwrap();
-        assert_eq!(exa.projection_refreshes.get(), 0);
-        assert_eq!(exa.last_seen_revision.get(), 0);
-
-        supervisor.frame_render(true).unwrap();
-        let exa = supervisor.runtimes.get(EXA_APP_ID).unwrap();
-        assert_eq!(exa.projection_refreshes.get(), 1);
-        assert_eq!(exa.last_seen_revision.get(), 3);
-        assert!(!supervisor.active_projection_is_stale());
-
-        for _ in 0..5 {
-            supervisor.frame_render(true).unwrap();
-        }
-        assert_eq!(
-            supervisor
-                .runtimes
-                .get(EXA_APP_ID)
-                .unwrap()
-                .projection_refreshes
-                .get(),
-            1
-        );
-
-        // Inactive Apps never query. They catch up exactly once when selected
-        // again, no matter how many commits happened while they were hidden.
-        supervisor.open(ROOT_APP_ID).unwrap();
-        revision.fetch_add(1, Ordering::Release);
-        revision.fetch_add(1, Ordering::Release);
-        supervisor.frame_render(true).unwrap();
-        assert_eq!(
-            supervisor
-                .runtimes
-                .get(EXA_APP_ID)
-                .unwrap()
-                .projection_refreshes
-                .get(),
-            1
-        );
-        supervisor.open(EXA_APP_ID).unwrap();
-        supervisor.frame_render(true).unwrap();
-        let exa = supervisor.runtimes.get(EXA_APP_ID).unwrap();
-        assert_eq!(exa.projection_refreshes.get(), 2);
-        assert_eq!(exa.last_seen_revision.get(), 5);
+    fn fixture(descriptor_json: &'static str, agent_js: Option<&'static str>) -> EmbeddedApp {
+        EmbeddedApp::new(
+            descriptor_json,
+            r#"{"pocket":2,"name":"fixture","title":"Fixture","engine":{"capabilities":{"requires":[]}}}"#,
+            "",
+            None,
+            agent_js,
+            &[],
+        )
     }
 }

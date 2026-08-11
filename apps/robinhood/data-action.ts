@@ -221,11 +221,20 @@ function validatedProviderCall(args: any): any {
   return invokeProviderTool(operation, providerArgs);
 }
 
+function retryableOperation(name: string): boolean {
+  return name.startsWith("get_") || name.startsWith("review_") || name === "search" || name === "run_scan";
+}
+
 function callTool(operation: string, args: any): any {
   const envelope = JSON.parse((globalThis as any).services.call(
     "mcp.client",
     "callTool",
-    JSON.stringify({ connection: "robinhood", name: operation, arguments: args }),
+    JSON.stringify({
+      connection: "robinhood",
+      name: operation,
+      arguments: args,
+      retryable: retryableOperation(operation),
+    }),
   ));
   if (!envelope.ok) throw new Error(envelope.error || "Robinhood service failed");
   return envelope.value;
@@ -238,6 +247,7 @@ function callTools(calls: Array<{ operation: string; args: any }>): any[] {
     JSON.stringify({
       connection: "robinhood",
       calls: calls.map((call) => ({ name: call.operation, arguments: call.args })),
+      retryable: calls.every((call) => retryableOperation(call.operation)),
     }),
   ));
   if (!envelope.ok) throw new Error(envelope.error || "Robinhood batch service failed");

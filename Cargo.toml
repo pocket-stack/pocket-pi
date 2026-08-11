@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/pocket-pi-app-pack",
     "crates/pocket-pi-agentos",
     "crates/pocket-pi-embedded",
     "crates/pocket-pi-protocols",

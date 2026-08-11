@@ -5,7 +5,7 @@
 截至 2026-08-11，当前工作树已经实现可运行的第一版：Pi Agent Root App、App
 Supervisor、App Tool Catalog/Router、`AppTask` Schedule、`data.fs`、
 `data.sqlite`、后台 Data Action、revision-coalesced projection cache，以及
-Robinhood 和 Exa 两个 App。
+Robinhood 和 Exa 两个可选 App，以及 build-time App selection。
 Simulator contract tests 已通过；常驻 System App refactor 已在 ESP32-P4 实机
 完成冷启动、LittleFS App 加载、Root View、MIPI-DSI/Touch 初始化、Agent Tool
 Registry 启动和一次完整 UART model turn。运行中切换普通 App 的生命周期 contract
@@ -90,6 +90,11 @@ catalog、Agent Tool ownership 或后台任务生命周期。如果其中某个 
 合法 Bundle 怎么进入 `/workspace/apps/` 不属于本架构。第一版可以预装，也
 可以通过 Mac 开发/部署路径复制。这里定义“如何加载和运行”，不定义“如何
 分发”。
+
+当前预装由 `crates/pocket-pi-app-pack` 在 build time 组合。`pi-agent` 始终存在；
+ordinary Apps 只通过一个 `--apps` build 参数选择，例如 `--apps robinhood,exa`、
+`--apps exa` 或 `--apps none`。未选择的 App 不进入 catalog、Tool definitions、
+native policy 或 Root Apps View；已有 App data 不自动删除。
 
 ## 4. 核心概念
 
@@ -318,7 +323,8 @@ flowchart TB
 
 这是目标布局与当前布局的并集。当前 v1 已写入 fixed `builtin-v1` release、`current`、
 App SQLite 和 App-local `schedules.json`；`data/agent.sqlite`、持久
-`app-catalog.json`、`migrations.json` 仍未实现。当前 `plan.json` 也是
+`app-catalog.json`、`migrations.json` 仍未实现。当前 `agent-app.json.nativeServices`
+保存 build-time trusted、无 secret 的 endpoint/credential-reference policy；当前 `plan.json` 也是
 `seed_builtin_releases()` 生成的最小 runtime/module 记录，不是 PocketJS resolver 的
 完整 target-specific plan。
 
@@ -398,7 +404,7 @@ catalog。
 - viewport contract；
 - artifact hashes。
 
-当前 fixed built-in catalog 已能只解析 descriptor 建立 Agent Tool Catalog，但 ordinary
+当前 build-selected embedded catalog 已能只解析 descriptor 建立 Agent Tool Catalog，但 ordinary
 View 仍会在 Supervisor 启动时全部 preload；动态发现和按需 residency 尚未实现。
 
 ### App 内部依赖方向
@@ -424,10 +430,10 @@ UI refresh ─────┘                                             │
 
 当前 v1 的 App Supervisor 是受信任 Host 代码，实际负责：
 
-- 构建固定 built-in App catalog，并解析 `agent-app.json`；
+- 接收 build-time App pack，并解析所选 App 的 `agent-app.json`；
 - 把固定 `builtin-v1` artifacts 原子写入各 App release 目录和 `current`；
 - 根据 `dataVersion` 只重建变化 App 的开发期 SQLite；
-- 启动一次 Pi Agent System App，并 preload 当前两个 ordinary View Runtime；
+- 启动一次 Pi Agent System App，并 preload 所选 ordinary View Runtime；
 - 挂载正确的 data root 和 Modules；
 - 切换前台 App；
 - 路由 App Tool/AppTask，并用一个 bounded Data Action queue 串行执行；
@@ -444,7 +450,7 @@ Supervisor 持有两种不同的引用：
 
 ```text
 system:     PiAgentSystemRuntime                // 启动一次，始终存在
-runtimes:   Map<AppId, OrdinaryAppRuntime>      // 固定 catalog 在启动时全部 preload
+runtimes:   Map<AppId, OrdinaryAppRuntime>      // build-selected catalog 在启动时全部 preload
 active_app: Option<AppId>                       // None 表示显示 Root View
 ```
 
@@ -999,8 +1005,8 @@ isolation 和 lifecycle。App Bundle 拥有名称、schema、provider mapping、
 2. Pi Agent 位于顶层 `/workspace`；Root View release 位于
    `/workspace/data/view`，其中 `app.js` 和 `agent.js` 是同一个 System App
    release；普通 App 位于 `/workspace/apps/<id>`。
-3. App Supervisor 会 seed/校验 built-in release，并在启动时创建一次常驻的
-   Pi Agent System App；当前固定 catalog 中的普通 App View Runtime 也全部在启动
+3. App Supervisor 会 seed/校验 build-selected embedded release，并在启动时创建一次常驻的
+   Pi Agent System App；当前所选 catalog 中的普通 App View Runtime 也全部在启动
    阶段 preload。普通 View Guest 被限制在自己的 `data/` 和 `tmp/`，切换它们不会
    替换 System App；前台导航只选择已经存在的 surface。这里没有 Marketplace、
    LRU、pinning 或 residency policy。
@@ -1115,7 +1121,7 @@ isolation 和 lifecycle。App Bundle 拥有名称、schema、provider mapping、
   transaction、上一版本回退和独立 recovery UI 还没有完成。
 - 当前跨硬件实证是 ESP32 simulator + physical ESP32-P4；simulator 证明共享
   product contract，最终硬件验收仍以实体设备为准。
-- 固定 catalog 的普通 App View 现在全部在 Supervisor 启动时 preload；真实
+- build-selected catalog 的普通 App View 现在全部在 Supervisor 启动时 preload；真实
   ESP32-P4 启动时长已量测，但持续切换仍需人工验收。后续如果 catalog
   扩大，再依据实测在 PocketJS runtime 层设计加载策略，不能先引入 Marketplace、
   LRU/residency policy，也不能把 App UI/数据逻辑写回 Rust。
@@ -1139,7 +1145,7 @@ isolation 和 lifecycle。App Bundle 拥有名称、schema、provider mapping、
 
 ### 22.3 日后扩展项目：Marketplace / Distribution
 
-当前 v1 固定 `builtin-v1` catalog，启动时把内置 artifact 播种到 `/workspace` 并
+当前 v1 使用 build-selected App pack，release id 仍为 `builtin-v1`，启动时把所选 artifact 播种到 `/workspace` 并
 preload 全部普通 View。Marketplace 是独立的后续项目，不属于当前 runtime 完成度。
 启动该项目时按下面的依赖顺序扩展：
 
@@ -1174,7 +1180,7 @@ preload 全部普通 View。Marketplace 是独立的后续项目，不属于当�
 7. 普通 App 无法读取另一个 App 的 data root。
 8. Pi Agent 可以读取和管理顶层 `/workspace`。
 9. 重启后 App 数据保留，错过的 recurring run 按规则合并一次。
-10. 当前 v1 在 Tool schema 非法、capability 缺失或内置 Bundle 损坏时 fail
+10. 当前 v1 在 Tool schema 非法、capability 缺失或 embedded Bundle 损坏时 fail
     closed；`dataVersion` 变化只重建对应 App SQLite。migration recovery 和保留上一
     个合法 release 属于 22.3 的 Marketplace 扩展验收，不冒充当前能力。
 11. 同一份 Robinhood source 通过 simulator contract tests，并用对应 target
