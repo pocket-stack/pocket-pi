@@ -7,6 +7,7 @@ export const DYNAMIC_TEXT_GLYPHS = "‘’“”–—…•";
 
 const widthCache = new Map<string, number>();
 const wrapCache = new Map<string, string[]>();
+const PREVIEW_SOURCE_CHARACTERS = 512;
 
 function width(text: string, fontSlot: number): number {
   if (!text) return 0;
@@ -80,9 +81,11 @@ export function wrapPreview(
   maxWidth: number,
   maxLines: number,
 ): string {
-  const lines = wrapLines(text, fontSlot, maxWidth);
-  if (lines.length <= maxLines) return lines.join("\n");
+  const source = text.slice(0, PREVIEW_SOURCE_CHARACTERS);
+  const lines = wrapLines(source, fontSlot, maxWidth);
+  if (source.length === text.length && lines.length <= maxLines) return lines.join("\n");
   const visible = lines.slice(0, maxLines);
-  visible[maxLines - 1] = visible[maxLines - 1].replace(/[\s.]+$/, "") + "…";
+  const last = visible.length - 1;
+  visible[last] = visible[last].replace(/[\s.]+$/, "") + "…";
   return visible.join("\n");
 }

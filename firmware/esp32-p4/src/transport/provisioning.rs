@@ -81,7 +81,7 @@ pub fn request_runtime_config(
         model_api_key,
         exa_api_key: secret(&value, "exaApiKey", 512)?,
         robinhood_access_token: secret(&value, "robinhoodAccessToken", 4096)?,
-        initial_prompt: text(&value, "initialPrompt", 4_000)?,
+        initial_prompt: string(&value, "initialPrompt")?.map(str::to_owned),
         initial_prompt_delay_seconds: value
             .get("initialPromptDelaySeconds")
             .and_then(serde_json::Value::as_u64)
@@ -98,16 +98,26 @@ fn text(
     field: &str,
     max_bytes: usize,
 ) -> Result<Option<String>, String> {
+    let Some(value) = string(value, field)? else {
+        return Ok(None);
+    };
+    if value.len() > max_bytes {
+        return Err(format!("{field} has invalid length"));
+    }
+    Ok(Some(value.to_owned()))
+}
+
+fn string<'a>(value: &'a serde_json::Value, field: &str) -> Result<Option<&'a str>, String> {
     let Some(value) = value.get(field) else {
         return Ok(None);
     };
     let value = value
         .as_str()
         .ok_or_else(|| format!("{field} must be a string"))?;
-    if value.is_empty() || value.len() > max_bytes {
+    if value.is_empty() {
         return Err(format!("{field} has invalid length"));
     }
-    Ok(Some(value.to_owned()))
+    Ok(Some(value))
 }
 
 fn secret(
