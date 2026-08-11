@@ -520,7 +520,7 @@ impl DataActionRuntime {
                 std::time::Instant::now() < deadline,
                 "PocketPiData.{method} timed out"
             );
-            std::thread::sleep(Duration::from_millis(5));
+            yield_scheduler_tick();
         }
     }
 }
@@ -955,11 +955,23 @@ fn mount_services(guest: &Guest, app_id: String, services: Arc<dyn AppServiceHos
 }
 
 #[cfg(target_os = "espidf")]
+fn yield_scheduler_tick() {
+    unsafe extern "C" {
+        fn vTaskDelay(ticks: u32);
+    }
+    // The firmware runs FreeRTOS at 100 Hz. Sub-tick sleeps remain runnable,
+    // so block for one actual scheduler tick and let the IDLE task run.
+    unsafe { vTaskDelay(1) };
+}
+
+#[cfg(not(target_os = "espidf"))]
+fn yield_scheduler_tick() {
+    std::thread::sleep(Duration::from_millis(5));
+}
+
+#[cfg(target_os = "espidf")]
 fn yield_after_db_call() {
-    // A Data Action may issue many synchronous SQLite calls in one QuickJS
-    // turn. Block for one scheduler tick so the display loop and IDLE task can
-    // run between calls instead of tripping the task watchdog.
-    std::thread::sleep(Duration::from_millis(1));
+    yield_scheduler_tick();
 }
 
 #[cfg(not(target_os = "espidf"))]

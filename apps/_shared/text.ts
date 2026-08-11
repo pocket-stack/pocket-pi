@@ -5,26 +5,14 @@ import { getOps } from "@pocketjs/framework";
 // module so model/provider text does not fall back to missing-glyph boxes.
 export const DYNAMIC_TEXT_GLYPHS = "‘’“”–—…•";
 
-const widthCache = new Map<string, number>();
-const wrapCache = new Map<string, string[]>();
 const PREVIEW_SOURCE_CHARACTERS = 512;
 
-function width(text: string, fontSlot: number): number {
-  if (!text) return 0;
-  const key = fontSlot + "|" + text;
-  const cached = widthCache.get(key);
-  if (cached !== undefined) return cached;
-  const measured = getOps().measureText(text, fontSlot);
-  widthCache.set(key, measured);
-  return measured;
-}
-
-function breakToken(token: string, fontSlot: number, maxWidth: number): string[] {
+function breakToken(token: string, width: (text: string) => number, maxWidth: number): string[] {
   const chunks: string[] = [];
   let chunk = "";
   let chunkWidth = 0;
   for (const character of token) {
-    const characterWidth = width(character, fontSlot);
+    const characterWidth = width(character);
     if (chunk && chunkWidth + characterWidth > maxWidth) {
       chunks.push(chunk);
       chunk = "";
@@ -41,22 +29,27 @@ function breakToken(token: string, fontSlot: number, maxWidth: number): string[]
 // string and insert those newlines before the DrawList reaches native UI.
 export function wrapLines(text: string, fontSlot: number, maxWidth: number): string[] {
   void DYNAMIC_TEXT_GLYPHS;
-  const key = fontSlot + "|" + maxWidth + "|" + text;
-  const cached = wrapCache.get(key);
-  if (cached) return cached;
-
+  const widths = new Map<string, number>();
+  const width = (value: string) => {
+    let measured = widths.get(value);
+    if (measured === undefined) {
+      measured = getOps().measureText(value, fontSlot);
+      widths.set(value, measured);
+    }
+    return measured;
+  };
   const lines: string[] = [];
-  const spaceWidth = width(" ", fontSlot);
+  const spaceWidth = width(" ");
   for (const paragraph of text.split("\n")) {
     const words = paragraph.split(" ").flatMap((token) =>
-      token && width(token, fontSlot) > maxWidth
-        ? breakToken(token, fontSlot, maxWidth)
+      token && width(token) > maxWidth
+        ? breakToken(token, width, maxWidth)
         : [token],
     );
     let line = "";
     let lineWidth = 0;
     for (const word of words) {
-      const wordWidth = width(word, fontSlot);
+      const wordWidth = width(word);
       if (!line) {
         line = word;
         lineWidth = wordWidth;
@@ -71,7 +64,6 @@ export function wrapLines(text: string, fontSlot: number, maxWidth: number): str
     }
     lines.push(line);
   }
-  wrapCache.set(key, lines);
   return lines;
 }
 
