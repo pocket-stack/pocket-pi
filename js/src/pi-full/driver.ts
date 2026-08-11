@@ -1,4 +1,4 @@
-// Path B session harness: stand up an AgentSession from the UNMODIFIED bundled
+// Session harness: stand up an AgentSession from the unmodified bundled
 // pi-coding-agent and (optionally) run one turn, load an extension, enable tools,
 // or persist/resume — all through Pocket Pi's runtime (fetch → __catpiFetchPump →
 // Rust HTTP hub → system proxy; our oxc loader for extension .ts; our fs for the

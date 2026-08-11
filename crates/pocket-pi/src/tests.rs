@@ -49,9 +49,8 @@ fn reply_text(events: &[HostEvent]) -> String {
     out
 }
 
-/// Milestone 1 of the Node-compat runtime: the module system resolves + loads
-/// real modules — a relative `.ts` file (transpiled), `node:` builtins, and a
-/// bare package from `node_modules` — and they run correctly.
+/// The module system resolves and loads a relative transpiled `.ts` file,
+/// `node:` builtins, and a bare package from `node_modules`.
 #[test]
 fn node_module_system_loads_ts_builtins_and_a_bare_package() {
     use std::fs;
@@ -215,71 +214,6 @@ fn whatwg_fetch_returns_a_readable_response() {
     }
 }
 
-/// Live end-to-end against OpenAI. Skipped unless OPENAI_API_KEY is set.
-#[test]
-fn live_openai_turn() {
-    let Ok(key) = std::env::var("OPENAI_API_KEY") else {
-        eprintln!("skipping live_openai_turn: OPENAI_API_KEY not set");
-        return;
-    };
-    let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into());
-    let (sink, cb) = collector();
-    let mut rt = PiRuntime::new().expect("runtime");
-    rt.on_event(cb);
-    let cfg = serde_json::json!({
-        "provider": "openai",
-        "model": model,
-        "apiKey": key,
-        // Reasoning models (gpt-5.x) spend tokens thinking before answering —
-        // a tiny cap leaves nothing for the visible reply.
-        "maxTokens": 2048,
-        "systemPrompt": "Reply with exactly the word: pong"
-    });
-    rt.boot(&cfg.to_string()).expect("boot");
-    rt.prompt("ping").expect("prompt");
-    run(&mut rt, sink.clone(), 4.0, 90.0);
-
-    let events = sink.borrow();
-    let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
-    eprintln!("openai event kinds: {kinds:?}");
-    for e in events.iter().filter(|e| e.kind == "error") {
-        eprintln!("openai error raw: {}", e.raw);
-    }
-    assert!(kinds.contains(&"end"), "turn did not complete: {kinds:?}");
-    let text = reply_text(&events);
-    eprintln!("live openai said: {text:?}");
-    assert!(!text.is_empty(), "no assistant text");
-}
-
-/// Live end-to-end against Anthropic. Skipped unless ANTHROPIC_API_KEY is set,
-/// so `cargo test` is hermetic by default.
-#[test]
-fn live_anthropic_turn() {
-    let Ok(key) = std::env::var("ANTHROPIC_API_KEY") else {
-        eprintln!("skipping live_anthropic_turn: ANTHROPIC_API_KEY not set");
-        return;
-    };
-    let (sink, cb) = collector();
-    let mut rt = PiRuntime::new().expect("runtime");
-    rt.on_event(cb);
-    let cfg = serde_json::json!({
-        "model": "claude-opus-4-8",
-        "apiKey": key,
-        "maxTokens": 64,
-        "systemPrompt": "Reply with exactly the word: pong"
-    });
-    rt.boot(&cfg.to_string()).expect("boot");
-    rt.prompt("ping").expect("prompt");
-    run(&mut rt, sink.clone(), 4.0, 60.0);
-
-    let events = sink.borrow();
-    let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
-    assert!(kinds.contains(&"end"), "turn did not complete: {kinds:?}");
-    let text = reply_text(&events);
-    eprintln!("live model said: {text:?}");
-    assert!(!text.is_empty(), "no assistant text");
-}
-
 /// The full, unmodified pi-coding-agent is embedded and loaded by every
 /// `PiRuntime::new()`: `globalThis.PiFull` (createAgentSession, …) and the
 /// `PocketPi` host harness are both present with no external bundle, no network.
@@ -329,72 +263,10 @@ fn full_pi_runs_with_offline_provider() {
     assert_eq!(reply_text(&events), "OFFLINE-E2E-OK");
 }
 
-/// Path B end-to-end: stand up an AgentSession from the UNMODIFIED bundled
-/// pi-coding-agent and run one real turn against gpt-5.6 through Pocket Pi's
-/// fetch + system proxy. Requires OPENAI_API_KEY and a reachable proxy, so it is
-/// `#[ignore]`. Run with:
-///   https_proxy=http://127.0.0.1:7897 OPENAI_API_KEY=... \
-///     cargo test -p pocket-pi runs_bundled_pi_turn -- --ignored --nocapture
-#[ignore]
-#[test]
-fn runs_bundled_pi_turn() {
-    let manifest = env!("CARGO_MANIFEST_DIR");
-    let driver = format!("{manifest}/js/pi-full/driver.js");
-    let key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
-    if key.is_empty() {
-        eprintln!("skip: OPENAI_API_KEY not set");
-        return;
-    }
-
-    let mut rt = PiRuntime::new().expect("runtime");
-    // Inject the key as a global (kept out of logs) then load the driver script.
-    rt.eval_script(&format!("globalThis.__OPENAI_KEY = {key:?};"))
-        .expect("inject key");
-    let driver_src = std::fs::read_to_string(&driver).expect("driver.js");
-    rt.eval_script(&driver_src).expect("driver eval");
-
-    // Kick off the async turn (fire-and-forget promise), then pump at 2Hz.
-    rt.eval_script("globalThis.__piRun('Reply with exactly: pocket pi lives');")
-        .expect("kick off");
-
-    let start = std::time::Instant::now();
-    let mut done = false;
-    while start.elapsed().as_secs_f64() < 90.0 {
-        rt.pump().expect("pump");
-        if rt.get_global_json("__piDone") == Some(serde_json::Value::Bool(true)) {
-            done = true;
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(250));
-    }
-
-    let result = rt.get_global_json("__piResult");
-    let err = rt.get_global_json("__piError");
-    let last = rt.get_global_json("__piLastEvent");
-    let log = rt.get_global_json("__piLog");
-    eprintln!("TURN done={done} last_event={last:?}");
-    eprintln!("TURN error={err:?}");
-    eprintln!("TURN result={result:?}");
-    if let Some(serde_json::Value::Array(items)) = log {
-        eprintln!("TURN log ({} events):", items.len());
-        for it in items {
-            eprintln!("  - {}", it.as_str().unwrap_or_default());
-        }
-    }
-    assert!(done, "turn did not complete within budget");
-    assert_eq!(err, Some(serde_json::Value::Null), "agent errored");
-    let text = result
-        .and_then(|v| v.as_str().map(String::from))
-        .unwrap_or_default();
-    assert!(!text.trim().is_empty(), "no assistant text produced");
-}
-
-/// Path B extensions (M6): load a real, unmodified pi extension through Pocket
+/// Load a real, unmodified pi extension through Pocket
 /// Pi's OWN module loader — the `.ts` is transpiled natively with oxc, NOT jiti
 /// (which needs Node internals QuickJS lacks) — and hand its default factory to
-/// pi's unmodified `loadExtensionFromFactory`. Asserts the extension's tool and
-/// lifecycle hook register. Offline; only needs the built bundle. Run with:
-///   cargo test -p pocket-pi loads_pi_extension_via_our_loader -- --ignored --nocapture
+/// pi's unmodified `loadExtensionFromFactory`.
 #[test]
 fn loads_pi_extension_via_our_loader() {
     let manifest = env!("CARGO_MANIFEST_DIR");
@@ -458,10 +330,9 @@ fn drive_session(rt: &mut PiRuntime, opts_json: &str, max_secs: f64) -> bool {
     false
 }
 
-/// M6b: bind an unmodified pi extension into a *live* AgentSession via the
-/// first-class `extensionFactories` seam (no jiti, no network) and confirm the
-/// session's ExtensionRunner picked up the hook and tool. Offline; bundle-gated.
-///   cargo test -p pocket-pi binds_extension_into_session -- --ignored --nocapture
+/// Bind an unmodified pi extension into a real AgentSession through the
+/// first-class `extensionFactories` seam and confirm the ExtensionRunner picks
+/// up its hook and tool.
 #[test]
 fn binds_extension_into_session() {
     let manifest = env!("CARGO_MANIFEST_DIR");
@@ -496,57 +367,9 @@ fn binds_extension_into_session() {
     );
 }
 
-/// M6b (online): run a real gpt-5.6 turn with the extension's `echo` tool active
-/// and instruct the model to call it. Asserts the extension's lifecycle hook
-/// fired and the tool actually executed. Network + bundle gated. Run with:
-///   https_proxy=http://127.0.0.1:7897 OPENAI_API_KEY=... \
-///     cargo test -p pocket-pi runs_pi_turn_with_extension_tool -- --ignored --nocapture
-#[ignore]
-#[test]
-fn runs_pi_turn_with_extension_tool() {
-    let manifest = env!("CARGO_MANIFEST_DIR");
-    let driver = format!("{manifest}/js/pi-full/driver.js");
-    let ext = format!("{manifest}/../../js/src/pi-full/example-extension.ts");
-    let key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
-    if key.is_empty() {
-        eprintln!("skip: OPENAI_API_KEY not set");
-        return;
-    }
-    let mut rt = PiRuntime::new().expect("runtime");
-    rt.eval_script(&format!("globalThis.__OPENAI_KEY = {key:?};"))
-        .expect("inject key");
-    rt.eval_script(&std::fs::read_to_string(&driver).expect("driver.js"))
-        .expect("driver eval");
-
-    let opts = serde_json::json!({
-        "extensionPath": ext,
-        "tools": ["echo"],
-        "prompt": "Call the echo tool with text set to \"ping\". Use the tool; do not answer in prose.",
-    })
-    .to_string();
-    let done = drive_session(&mut rt, &opts, 90.0);
-    let err = rt.get_global_json("__piError");
-    let hook = rt.get_global_json("__extAgentStartFired");
-    let echoed = rt.get_global_json("__echoCalled");
-    eprintln!("EXT-TURN done={done} error={err:?}");
-    eprintln!("EXT-TURN agent_start_fired={hook:?} echoCalled={echoed:?}");
-    assert!(done, "turn did not complete within budget");
-    assert_eq!(err, Some(serde_json::Value::Null), "agent errored");
-    assert_eq!(
-        hook,
-        Some(serde_json::Value::Bool(true)),
-        "extension agent_start hook did not fire during the turn"
-    );
-    assert!(
-        echoed.is_some() && echoed != Some(serde_json::Value::Null),
-        "extension echo tool was not executed"
-    );
-}
-
-/// M7: persist a session to disk with pi's unmodified SessionManager (backed by
+/// Persist a session to disk with pi's unmodified SessionManager (backed by
 /// Pocket Pi's fs builtin), then resume it in a fresh manager and confirm the
-/// history round-trips. Offline; bundle-gated. Run with:
-///   cargo test -p pocket-pi persists_and_resumes_session -- --ignored --nocapture
+/// history round-trips.
 #[test]
 fn persists_and_resumes_session() {
     let manifest = env!("CARGO_MANIFEST_DIR");
@@ -607,35 +430,4 @@ fn persists_and_resumes_session() {
             .any(|f| f.to_string_lossy().ends_with(".jsonl")),
         "no .jsonl session file on disk"
     );
-}
-
-/// WIP integration probe toward loading unmodified pi-coding-agent. Run with
-/// `cargo test -- --ignored probe_pi_coding_agent --nocapture`. Currently clears
-/// the whole Node-builtin + CJS dependency surface and reaches pi-coding-agent's
-/// own modules (blocked on a QuickJS ESM indirect-re-export cycle).
-#[ignore]
-#[test]
-fn probe_pi_coding_agent() {
-    let manifest = env!("CARGO_MANIFEST_DIR");
-    let sdk =
-        format!("{manifest}/../../js/node_modules/@mariozechner/pi-coding-agent/dist/core/sdk.js");
-    if !std::path::Path::new(&sdk).exists() {
-        eprintln!("skip: not installed");
-        return;
-    }
-    let dir = std::env::temp_dir().join(format!("pca-probe-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("e.ts"), format!(
-        "import {{ createAgentSession }} from \"{sdk}\";\n(globalThis as any).__pca = typeof createAgentSession;\n"
-    )).unwrap();
-    let mut rt = PiRuntime::new().expect("rt");
-    match rt.run_module(dir.join("e.ts").to_str().unwrap()) {
-        Ok(()) => eprintln!(
-            "PROBE OK: createAgentSession = {:?}",
-            rt.get_global_json("__pca")
-        ),
-        Err(e) => eprintln!("PROBE ERR: {e}"),
-    }
-    let _ = std::fs::remove_dir_all(&dir);
 }

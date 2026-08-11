@@ -14,7 +14,6 @@ pocket-pi-agentos = { path = "../../crates/pocket-pi-agentos" }
 pocket-pi-embedded = { path = "../../crates/pocket-pi-embedded" }
 pocket-pi-protocols = { path = "../../crates/pocket-pi-protocols" }
 pocket-pi-tools = { path = "../../crates/pocket-pi-tools" }
-pocketjs-core.workspace = true
 pocket-ui-wgpu = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "9c809bbd047ddc75c27caa4990951a78d942477a" }
 pocket3d = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "9c809bbd047ddc75c27caa4990951a78d942477a", default-features = false }
 serde_json.workspace = true

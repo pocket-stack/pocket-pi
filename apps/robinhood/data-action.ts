@@ -124,7 +124,7 @@ function number(value: string | null): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 function accountNumber(value: any, args: any): string {
-  const requested = args?.account_number ?? args?.accountNumber;
+  const requested = args?.account_number;
   return requested === null || requested === undefined || requested === ""
     ? deep(value, ["account_number", "accountNumber", "account"]) || ""
     : String(requested);
@@ -430,7 +430,7 @@ function refreshPortfolio(): any {
 }
 
 function saveEquityAction(operation: string, value: any, args: any, observedAt: number): void {
-  const account = String(args?.account_number ?? args?.accountNumber ?? "");
+  const account = String(args?.account_number ?? "");
   if (!account) return;
   const orderId = String(args?.order_id ?? deep(value, ["order_id", "orderId", "id"]) ?? "");
   const activityId = orderId || [observedAt, args?.symbol || "EQUITY", operation].join(":");

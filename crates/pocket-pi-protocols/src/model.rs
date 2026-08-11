@@ -2,8 +2,6 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use serde::{Deserialize, Serialize};
 
-pub const OPENAI_API_BASE_URL: &str = "https://api.openai.com/v1";
-pub const CODEX_BACKEND_BASE_URL: &str = "https://chatgpt.com/backend-api";
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelStreamEvent {
     Thinking(String),

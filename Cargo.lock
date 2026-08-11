@@ -2637,7 +2637,6 @@ dependencies = [
  "pocket-pi-tools",
  "pocket-ui-wgpu",
  "pocket3d",
- "pocketjs-core",
  "serde_json",
  "tempfile",
  "ureq",

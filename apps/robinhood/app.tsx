@@ -497,7 +497,6 @@ mount(() => <Robinhood />);
 
 (globalThis as any).PocketPiApp = {
   tick,
-  update() { return ""; },
   dataChanged(eventsLine: string) {
     const events = parse(eventsLine);
     const revision = Array.isArray(events)
@@ -512,9 +511,6 @@ mount(() => <Robinhood />);
         : (() => { throw new Error("Data-writing tools run in the background App Data Action"); })();
       return JSON.stringify({ text: JSON.stringify(value), details: value, isError: false });
     } catch (error) { return JSON.stringify({ text: error instanceof Error ? error.message : String(error), isError: true }); }
-  },
-  invokeTask(name: string) {
-    return JSON.stringify({ text: "Data Action tasks do not run in the View: " + name, isError: true });
   },
   tap(x: number, y: number) {
     if (screen() !== "dashboard") {

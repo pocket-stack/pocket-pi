@@ -31,7 +31,6 @@ pocket-pi-protocols = { path = "../../crates/pocket-pi-protocols" }
 pocket-pi-tools = { path = "../../crates/pocket-pi-tools" }
 esp-idf-svc = { version = "0.52.1", features = ["critical-section"] }
 embedded-svc = "0.29"
-pocketjs-core = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "9c809bbd047ddc75c27caa4990951a78d942477a" }
 pocketjs-esp32p4-ppa = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "9c809bbd047ddc75c27caa4990951a78d942477a", features = ["esp-idf"] }
 
 [build-dependencies]

@@ -58,6 +58,7 @@ The current firmware target is the
 ### Build all three modes
 
 ```sh
+cargo xtask build agentos-apps
 cargo xtask build macos
 cargo xtask build esp32-p4-sim
 cargo xtask build esp32-p4
@@ -213,9 +214,10 @@ The shared PocketJS device UI includes:
 - touch keyboard and next-schedule status.
 
 Settings is an embedded-device feature and is not linked into native macOS
-Pocket Pi. This repository does not include Robinhood or Exa UI, clients,
-credentials or tools. External products add their own plugin/tool and UI
-adapters without changing Agent core.
+Pocket Pi. The embedded AgentOS ships Pi Agent as its resident System App and
+Robinhood and Exa as ordinary Apps. Each ordinary App owns its Tool catalog,
+Data Action, SQLite projection and fixed PocketJS View; native hosts provide
+only scoped credentials, transport and hardware adapters.
 
 ## Desktop profile
 

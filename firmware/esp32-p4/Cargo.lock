@@ -1209,7 +1209,6 @@ dependencies = [
  "pocket-pi-embedded",
  "pocket-pi-protocols",
  "pocket-pi-tools",
- "pocketjs-core",
  "pocketjs-esp32p4-ppa",
  "serde_json",
 ]

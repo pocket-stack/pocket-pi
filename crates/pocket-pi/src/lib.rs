@@ -278,8 +278,8 @@ impl PiRuntime {
 
     /// Import and evaluate an ES module by specifier (absolute path, or a
     /// `node:` builtin), driving the Node resolver/loader — relative imports,
-    /// `node_modules` packages, and `.ts` transpile all work. Milestone toward
-    /// running unmodified pi-coding-agent. Returns after the module settles.
+    /// `node_modules` packages, and `.ts` transpilation all work for the
+    /// unmodified pi-coding-agent. Returns after the module settles.
     pub fn run_module(&mut self, specifier: &str) -> Result<(), String> {
         let spec = specifier.to_string();
         self.ctx.with(|ctx| -> Result<(), String> {

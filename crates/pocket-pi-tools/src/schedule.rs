@@ -43,8 +43,6 @@ impl ScheduleStore {
         let directory = workspace_root.join(".pi-agent");
         let path = directory.join("schedule.json");
         let _ = std::fs::create_dir_all(&directory);
-        // The previous recurring format is intentionally removed, not migrated.
-        let _ = std::fs::remove_file(directory.join("routines.json"));
         let state = match read_state(&path) {
             Ok(state) => state,
             Err(error) => {

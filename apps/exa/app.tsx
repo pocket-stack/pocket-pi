@@ -154,7 +154,6 @@ mount(() => <Exa />);
 
 (globalThis as any).PocketPiApp = {
   tick() { return ""; },
-  update() { return ""; },
   dataChanged(eventsLine: string) {
     const events = parse(eventsLine);
     const revision = Array.isArray(events)
@@ -172,7 +171,6 @@ mount(() => <Exa />);
       return JSON.stringify({ text: error instanceof Error ? error.message : String(error), isError: true });
     }
   },
-  invokeTask(name: string) { return JSON.stringify({ text: "Unknown Exa task: " + name, isError: true }); },
   tap(x: number, y: number) {
     if (y < 112 && x < 100) return JSON.stringify({ type: "navigate", app: "pi-agent" });
     return "";

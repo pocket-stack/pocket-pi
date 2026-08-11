@@ -1,4 +1,4 @@
-// Session persistence (M7): write a session to disk with pi's unmodified
+// Session persistence: write a session to disk with pi's unmodified
 // SessionManager (backed by Pocket Pi's fs builtin), then resume it in a fresh
 // manager over the same directory and confirm the history round-trips. Offline —
 // no LLM, just the disk store. Results land on globalThis for the Rust side.

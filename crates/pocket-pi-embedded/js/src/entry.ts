@@ -354,10 +354,6 @@ function prompt(text: string): void {
   void agent.prompt(text).catch((error) => events.push({ type: "agent_error", message: String(error) }));
 }
 
-function abort(): void {
-  agent?.abort();
-}
-
 function tick(): void {
   const batch = JSON.parse(globalThis.host?.poll() || "[]") as HostEvent[];
   for (const event of batch) {
@@ -407,4 +403,4 @@ function drain(): string {
   });
 }
 
-globalThis.PocketPiEmbedded = { boot, prompt, abort, tick, drain };
+globalThis.PocketPiEmbedded = { boot, prompt, tick, drain };

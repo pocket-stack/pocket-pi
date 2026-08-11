@@ -1,12 +1,10 @@
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::Duration;
 
 use pocket_mod::qjs::{CatchResultExt, Function, Object};
 use pocket_mod::Guest;
 pub use pocket_pi_protocols::model::ModelStreamEvent;
 
-const AGENT_BUNDLE: &str = include_str!("../js/pi-agent.bundle.js");
 const PRELUDE: &str = include_str!("../js/prelude.js");
 pub const MODEL_WORKER_STACK_BYTES: usize = 64 * 1024;
 const TOOL_WORKER_STACK_BYTES: usize = 16 * 1024;
@@ -66,34 +64,15 @@ impl ToolResult {
 /// the Root App's existing PocketJS Guest, so the Agent Loop, context, tools
 /// and Root View have one App lifecycle. Slow model and tool work happens on
 /// worker threads; `tick` only delivers completed events into the Guest.
-pub struct GuestAgent {
-    on_text: Arc<dyn Fn(String) + Send + Sync>,
-}
+pub struct GuestAgent;
 
 impl GuestAgent {
-    pub fn mount(
-        guest: &Guest,
-        config_json: &str,
-        backend: Arc<dyn ModelBackend>,
-        tools: Arc<dyn ToolHost>,
-    ) -> Result<Self, String> {
-        Self::mount_source(
-            guest,
-            config_json,
-            backend,
-            tools,
-            AGENT_BUNDLE,
-            Arc::new(|_| {}),
-        )
-    }
-
     pub fn mount_source(
         guest: &Guest,
         config_json: &str,
         backend: Arc<dyn ModelBackend>,
         tools: Arc<dyn ToolHost>,
         agent_source: &str,
-        on_text: Arc<dyn Fn(String) + Send + Sync>,
     ) -> Result<Self, String> {
         let config_json = config_with_tools(config_json, tools.definitions())?;
         let (host_tx, host_rx) = mpsc::channel::<serde_json::Value>();
@@ -232,15 +211,11 @@ impl GuestAgent {
         call_agent::<_, ()>(guest, "boot", (config_json,))?;
         guest.drain_jobs();
 
-        Ok(Self { on_text })
+        Ok(Self)
     }
 
     pub fn prompt(&self, guest: &Guest, text: &str) -> Result<(), String> {
         call_agent(guest, "prompt", (text.to_owned(),))
-    }
-
-    pub fn abort(&self, guest: &Guest) -> Result<(), String> {
-        call_agent(guest, "abort", ())
     }
 
     pub fn tick(&self, guest: &Guest) -> Result<Vec<AgentEvent>, String> {
@@ -255,7 +230,6 @@ impl GuestAgent {
                 Some("agent_ready") => events.push(AgentEvent::Ready),
                 Some("message_update") if event["kind"] == "text_delta" => {
                     if let Some(delta) = event["delta"].as_str().filter(|delta| !delta.is_empty()) {
-                        (self.on_text)(delta.to_owned());
                         events.push(AgentEvent::ResponseText(delta.to_owned()));
                     }
                 }
@@ -322,56 +296,6 @@ where
     })
 }
 
-/// Standalone harness. Product hosts should mount `GuestAgent`
-/// through `AppSupervisor`, which keeps the System App alive across View
-/// navigation.
-pub struct PiEmbedded {
-    guest: Guest,
-    agent: GuestAgent,
-}
-
-impl PiEmbedded {
-    pub fn new(
-        config_json: &str,
-        backend: Arc<dyn ModelBackend>,
-        tools: Arc<dyn ToolHost>,
-        on_text: Arc<dyn Fn(String) + Send + Sync>,
-    ) -> Result<Self, String> {
-        let guest = Guest::new().map_err(|error| error.to_string())?;
-        let agent =
-            GuestAgent::mount_source(&guest, config_json, backend, tools, AGENT_BUNDLE, on_text)?;
-        Ok(Self { guest, agent })
-    }
-
-    pub fn prompt(&self, text: &str) -> Result<(), String> {
-        self.agent.prompt(&self.guest, text)
-    }
-
-    pub fn pump(&self) -> Result<String, String> {
-        let mut observed = Vec::new();
-        loop {
-            self.guest.frame(0).map_err(|error| error.to_string())?;
-            let events = self.agent.tick(&self.guest)?;
-            let mut finished = false;
-            for event in events {
-                match event {
-                    AgentEvent::Ready => observed.push("agent_ready"),
-                    AgentEvent::ResponseText(_) => observed.push("message_update"),
-                    AgentEvent::Done => {
-                        observed.push("agent_end");
-                        finished = true;
-                    }
-                    AgentEvent::Failed(error) => return Err(error),
-                }
-            }
-            if finished {
-                return serde_json::to_string(&observed).map_err(|error| error.to_string());
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-    }
-}
-
 fn config_with_tools(
     config_json: &str,
     definitions: Vec<serde_json::Value>,
@@ -399,26 +323,9 @@ fn config_with_tools(
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
 
-    struct Backend;
-
-    impl ModelBackend for Backend {
-        fn complete(
-            &self,
-            _request_json: &str,
-            on_event: &mut dyn FnMut(ModelStreamEvent),
-        ) -> Result<String, String> {
-            on_event(ModelStreamEvent::Text("embedded-ok".into()));
-            Ok(serde_json::json!({
-                "thinking":"",
-                "text":"embedded-ok",
-                "toolCalls":[],
-                "usage":{},
-                "stopReason":"stop"
-            })
-            .to_string())
-        }
-    }
+    const TEST_AGENT_BUNDLE: &str = include_str!("../js/pi-agent.bundle.js");
 
     struct BurstBackend;
 
@@ -471,27 +378,14 @@ mod tests {
     }
 
     #[test]
-    fn boots_and_runs_a_real_pi_agent_turn() {
-        let runtime = PiEmbedded::new(
-            r#"{"model":"offline"}"#,
-            Arc::new(Backend),
-            Arc::new(Tools),
-            Arc::new(|_| {}),
-        )
-        .unwrap();
-        runtime.prompt("hello").unwrap();
-        let events = runtime.pump().unwrap();
-        assert!(events.contains("agent_end"));
-    }
-
-    #[test]
     fn model_progress_is_coalesced_before_reaching_the_embedded_ui() {
         let guest = Guest::new().unwrap();
-        let agent = GuestAgent::mount(
+        let agent = GuestAgent::mount_source(
             &guest,
             r#"{"model":"offline"}"#,
             Arc::new(BurstBackend),
             Arc::new(Tools),
+            TEST_AGENT_BUNDLE,
         )
         .unwrap();
         agent.prompt(&guest, "burst").unwrap();
@@ -596,7 +490,7 @@ mod tests {
         let threads = Arc::new(Mutex::new(Vec::new()));
         let executed = Arc::new(Mutex::new(Vec::new()));
         let guest = Guest::new().unwrap();
-        let agent = GuestAgent::mount(
+        let agent = GuestAgent::mount_source(
             &guest,
             r#"{"provider":"deepseek","model":"deepseek-v4-pro","thinkingLevel":"high"}"#,
             Arc::new(ThinkingToolBackend {
@@ -605,6 +499,7 @@ mod tests {
                 threads: threads.clone(),
             }),
             Arc::new(OrderedTools(executed.clone())),
+            TEST_AGENT_BUNDLE,
         )
         .unwrap();
         agent.prompt(&guest, "run both").unwrap();

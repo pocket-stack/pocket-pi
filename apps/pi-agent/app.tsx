@@ -479,17 +479,6 @@ queueMicrotask(() => refreshFiles("", true));
     setProjection(JSON.parse(line));
     return "";
   },
-  dataChanged() {
-    fileCache.delete(filePath());
-    if (activeTab() === "files") refreshFiles(filePath(), true);
-    return "";
-  },
-  invokeTool() {
-    return JSON.stringify({ text: "Pi Agent has no App tools", isError: true });
-  },
-  invokeTask() {
-    return JSON.stringify({ text: "Pi Agent has no App tasks", isError: true });
-  },
   pointerDown(x: number, y: number) {
     setPressedKey(screen() === "keyboard" ? keyboardButtonAt(x, y) : null);
     return "";

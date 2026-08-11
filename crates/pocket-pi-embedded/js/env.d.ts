@@ -10,7 +10,6 @@ declare global {
     | {
         boot(config: string): void;
         prompt(text: string): void;
-        abort(): void;
         tick(): void;
         drain(): string;
       }

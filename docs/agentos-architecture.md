@@ -1047,16 +1047,15 @@ isolation 和 lifecycle。App Bundle 拥有名称、schema、provider mapping、
     KiB PSRAM stack，并把 PSRAM allocation caps 继承给按需创建的 96 KiB NET
     worker；常驻 model worker 使用 64 KiB PSRAM stack。System App 的其他线程仍
     使用恢复后的 platform default。
-13. Simulator tests 已证明：Agent turn 进行中打开 Robinhood，仍能收到完整回复
+13. AgentOS 核心 contract tests 已证明：Agent turn 进行中打开 Robinhood，仍能收到完整回复
     和 `agent_end`；前后台切换前后 System App Guest identity 不变；Exa 在前台
-    时 Agent 仍能路由 Robinhood App Tool、写 SQLite 并完成 turn。新增 contract
+    时 Agent 仍能路由 Robinhood App Tool、写 SQLite 并完成 turn。revision contract
     test 证明 3 次 commit 在下一前台 frame 只 reload 一次，5 个普通 frame 不
     reload，后台 2 次 commit 在重新打开时只 reload 一次。
-14. Simulator Data Action tests 已证明：Exa search 用一次 transaction 写入
+14. Simulator 的核心 Data Action tests 已证明：Exa search 用一次 transaction 写入
     `searches` View projection；Robinhood 完整 fixture refresh 用一次
-    transaction 写入各业务表与 terminal `refresh_runs`，并成功显示；provider
-    failure 只写 failed refresh run、保留上一次业务 projection，而且可以再次
-    enqueue。
+    transaction 写入各业务表与 terminal `refresh_runs`，形成固定 View 所需的
+    projection；provider failure 只写 failed refresh run，不写入业务 projection。
 15. `legacy_main()`、Rust `ScreenState` product UI 和其专属 display path 已删除，
     固件没有保留旧 UI 或死代码。
 16. 删除全部 legacy Rust UI 后的基线固件已刷入 ESP32-P4；实机从 System App
@@ -1078,9 +1077,10 @@ isolation 和 lifecycle。App Bundle 拥有名称、schema、provider mapping、
     ESP32 owner 是原生 FreeRTOS task，主循环必须用
     `vTaskDelay` 明确让出 CPU，不能用 pthread 语义的 `std::thread::sleep` 代替；
     否则即使总 CPU/内存数字不高，CPU0 idle task 仍可能无法喂 watchdog。
-20. 当前代码已通过 `pocket-pi-agentos` 10 个 tests、ESP32-P4 Simulator 6 个 tests；
-    workspace 合计 58 passed、0 failed、3 ignored。对应实现此前也通过 ESP32-P4
-    release cross-build 并刷入实体板。稳态冷启动测得 Root、Exa、
+20. 当前自动化只保留 Tool catalog、安全边界、App state ownership、Data Action
+    transaction、resident Agent lifecycle、Tool routing 和 revision coalescing 等核心
+    contract；不保留 UI 坐标、按压视觉状态或重复 smoke tests。对应实现已通过
+    ESP32-P4 release cross-build，并曾刷入实体板。稳态冷启动测得 Root、Exa、
     Robinhood View preload 分别约 2.0、2.8、3.3 秒，约 20.5 秒进入完整 UI；没有
     watchdog 或蓝屏。`dataVersion` reset 只发生一次，正常启动不重复 DDL。
 21. 实机断网 Tool 验证已证明：Agent 调用 `research.search` 后，Data Action 在
@@ -1177,8 +1177,9 @@ preload 全部普通 View。Marketplace 是独立的后续项目，不属于当�
 7. 普通 App 无法读取另一个 App 的 data root。
 8. Pi Agent 可以读取和管理顶层 `/workspace`。
 9. 重启后 App 数据保留，错过的 recurring run 按规则合并一次。
-10. Tool schema 非法、capability 缺失、Bundle 损坏、migration 失败时 fail
-    closed，并进入 recovery 或保留上一个合法 release。
+10. 当前 v1 在 Tool schema 非法、capability 缺失或内置 Bundle 损坏时 fail
+    closed；`dataVersion` 变化只重建对应 App SQLite。migration recovery 和保留上一
+    个合法 release 属于 22.3 的 Marketplace 扩展验收，不冒充当前能力。
 11. 同一份 Robinhood source 通过 simulator contract tests，并用对应 target
     artifacts 在真实 ESP32-P4 上运行。
 12. Agent turn 进行中可以操作键盘、打开 Robinhood/Exa、在 App 内触摸交互并

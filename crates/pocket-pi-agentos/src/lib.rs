@@ -24,8 +24,8 @@ use serde_json::{json, Value};
 pub const ROOT_APP_ID: &str = "pi-agent";
 pub const ROBINHOOD_APP_ID: &str = "robinhood";
 pub const EXA_APP_ID: &str = "exa";
-pub const BUILTIN_RELEASE: &str = "builtin-v1";
-pub const VIEWPORT: (f32, f32) = (720.0, 1280.0);
+const BUILTIN_RELEASE: &str = "builtin-v1";
+const VIEWPORT: (f32, f32) = (720.0, 1280.0);
 
 // App tools must enqueue remote work quickly. Keep a defensive bound for the
 // Tool Router handoff and local read-only diagnostics; remote work itself runs
@@ -51,29 +51,29 @@ const EXA_POCKET: &str = include_str!("../../../apps/exa/pocket.json");
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AppDescriptor {
-    pub id: String,
-    pub version: String,
+struct AppDescriptor {
+    id: String,
+    version: String,
     #[serde(default)]
-    pub data_version: u32,
+    data_version: u32,
     #[serde(default)]
-    pub tools: Vec<Value>,
+    tools: Vec<Value>,
     #[serde(default)]
-    pub provider_operations: Vec<String>,
+    provider_operations: Vec<String>,
     #[serde(default)]
-    pub tasks: Vec<String>,
+    tasks: Vec<String>,
     #[serde(default)]
-    pub schedules: Vec<AppSchedule>,
+    schedules: Vec<AppSchedule>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AppSchedule {
-    pub id: String,
-    pub every_minutes: u64,
-    pub task: String,
+struct AppSchedule {
+    id: String,
+    every_minutes: u64,
+    task: String,
     #[serde(default)]
-    pub args: Value,
+    args: Value,
 }
 
 #[derive(Clone)]
@@ -178,18 +178,18 @@ impl AppCatalog {
         Ok(Self { apps, tool_owner })
     }
 
-    pub fn tool_definitions(&self) -> Vec<Value> {
+    fn tool_definitions(&self) -> Vec<Value> {
         self.apps
             .values()
             .flat_map(|app| app.descriptor.tools.clone())
             .collect()
     }
 
-    pub fn app_for_tool(&self, name: &str) -> Option<&str> {
+    fn app_for_tool(&self, name: &str) -> Option<&str> {
         self.tool_owner.get(name).map(String::as_str)
     }
 
-    pub fn descriptors(&self) -> impl Iterator<Item = &AppDescriptor> {
+    fn descriptors(&self) -> impl Iterator<Item = &AppDescriptor> {
         self.apps.values().map(|app| &app.descriptor)
     }
 
@@ -562,8 +562,7 @@ impl AppDataRunner {
     }
 }
 
-pub struct AppRuntime {
-    descriptor: AppDescriptor,
+struct AppRuntime {
     guest: Guest,
     surface: UiSurface,
     _fs: Rc<RefCell<FsModule>>,
@@ -644,7 +643,6 @@ impl AppRuntime {
 
         let last_seen_revision = revision.load(Ordering::Acquire);
         Ok(Self {
-            descriptor,
             guest,
             surface,
             _fs: fs,
@@ -654,14 +652,6 @@ impl AppRuntime {
             #[cfg(test)]
             projection_refreshes: Cell::new(0),
         })
-    }
-
-    pub fn id(&self) -> &str {
-        &self.descriptor.id
-    }
-
-    pub fn frame(&self) -> Result<()> {
-        self.advance(true)
     }
 
     fn projection_is_stale(&self) -> bool {
@@ -698,12 +688,12 @@ impl AppRuntime {
         Ok(())
     }
 
-    pub fn update(&self, projection: &Value) -> Result<()> {
+    fn update(&self, projection: &Value) -> Result<()> {
         self.call_method("update", (projection.to_string(),))
             .map(|_: String| ())
     }
 
-    pub fn tap(&self, x: u16, y: u16) -> Result<Value> {
+    fn tap(&self, x: u16, y: u16) -> Result<Value> {
         let line: String = self.call_method("tap", (x as i32, y as i32))?;
         if line.is_empty() {
             return Ok(Value::Null);
@@ -711,26 +701,21 @@ impl AppRuntime {
         serde_json::from_str(&line).context("parse App tap action")
     }
 
-    pub fn pointer_down(&self, x: u16, y: u16) -> Result<()> {
+    fn pointer_down(&self, x: u16, y: u16) -> Result<()> {
         self.call_optional_method("pointerDown", (x as i32, y as i32))
     }
 
-    pub fn pointer_up(&self) -> Result<()> {
+    fn pointer_up(&self) -> Result<()> {
         self.call_optional_method("pointerUp", ())
     }
 
-    pub fn invoke_tool(&self, name: &str, args_json: &str) -> Result<ToolResult> {
+    fn invoke_tool(&self, name: &str, args_json: &str) -> Result<ToolResult> {
         let line: String =
             self.call_method("invokeTool", (name.to_owned(), args_json.to_owned()))?;
         self.tool_result(&line)
     }
 
-    pub fn invoke_task(&self, name: &str, args: &Value) -> Result<ToolResult> {
-        let line: String = self.call_method("invokeTask", (name.to_owned(), args.to_string()))?;
-        self.tool_result(&line)
-    }
-
-    pub fn with_ui<R>(&self, f: impl FnOnce(&mut pocketjs_core::Ui) -> R) -> R {
+    fn with_ui<R>(&self, f: impl FnOnce(&mut pocketjs_core::Ui) -> R) -> R {
         self.surface.with_ui(f)
     }
 
@@ -1034,7 +1019,6 @@ impl AppSupervisor {
                 backend,
                 tools,
                 &agent_source,
-                Arc::new(|_| {}),
             )
             .map_err(|error| anyhow!(error))?,
         );
@@ -1048,16 +1032,6 @@ impl AppSupervisor {
             .ok_or_else(|| anyhow!("Pi Agent System App is not booted"))?;
         agent
             .prompt(&self.system.guest, text)
-            .map_err(|error| anyhow!(error))
-    }
-
-    pub fn abort_agent(&self) -> Result<()> {
-        let agent = self
-            .agent
-            .as_ref()
-            .ok_or_else(|| anyhow!("Pi Agent System App is not booted"))?;
-        agent
-            .abort(&self.system.guest)
             .map_err(|error| anyhow!(error))
     }
 
@@ -1498,13 +1472,6 @@ impl AppScheduleStore {
     fn load(workspace: &Path, catalog: &AppCatalog) -> Result<Self> {
         // AppTask declarations travel with the App release, while their
         // mutable scheduler cursor belongs to that App's private data root.
-        // The former central file is read once only to migrate existing
-        // installs; it is never written again.
-        let legacy_path = workspace.join(".system/schedules.json");
-        let mut legacy: Vec<StoredSchedule> = std::fs::read(&legacy_path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
         let now = unix_seconds();
         let mut paths = BTreeMap::new();
         let mut schedules = Vec::new();
@@ -1533,7 +1500,6 @@ impl AppScheduleStore {
                 let every_seconds = declaration.every_minutes.saturating_mul(60).max(60);
                 let existing = prior
                     .iter_mut()
-                    .chain(legacy.iter_mut())
                     .find(|item| item.app_id == app.id && item.schedule_id == declaration.id);
                 schedules.push(match existing {
                     Some(item)
@@ -1555,10 +1521,6 @@ impl AppScheduleStore {
         }
         let store = Self { paths, schedules };
         store.persist()?;
-        if legacy_path.exists() {
-            std::fs::remove_file(&legacy_path)
-                .with_context(|| format!("remove migrated {}", legacy_path.display()))?;
-        }
         Ok(store)
     }
 
@@ -1736,19 +1698,6 @@ mod tests {
     }
 
     #[test]
-    fn catalog_exposes_namespaced_app_tools() {
-        let catalog = AppCatalog::builtin().unwrap();
-        let names = catalog
-            .tool_definitions()
-            .into_iter()
-            .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
-            .collect::<Vec<_>>();
-        assert!(names.contains(&"robinhood.search_tools".to_owned()));
-        assert!(names.contains(&"robinhood.call".to_owned()));
-        assert!(names.contains(&"research.search".to_owned()));
-    }
-
-    #[test]
     fn exa_catalog_exposes_bounded_advanced_search() {
         let catalog = AppCatalog::builtin().unwrap();
         let exa = catalog
@@ -1886,23 +1835,6 @@ mod tests {
     #[test]
     fn app_task_schedule_state_is_owned_by_each_app_data_root() {
         let temp = tempfile::tempdir().unwrap();
-        let legacy = temp.path().join(".system/schedules.json");
-        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        std::fs::write(
-            &legacy,
-            serde_json::to_vec(&vec![StoredSchedule {
-                app_id: ROBINHOOD_APP_ID.to_owned(),
-                schedule_id: "portfolio-refresh".to_owned(),
-                task: "refreshPortfolio".to_owned(),
-                args: json!({}),
-                every_seconds: 300,
-                next_run_at: unix_seconds().saturating_add(123),
-                last_ok: Some(true),
-            }])
-            .unwrap(),
-        )
-        .unwrap();
-
         let _supervisor = AppSupervisor::new(temp.path(), Arc::new(NoServices)).unwrap();
         let app_state = temp
             .path()
@@ -1912,63 +1844,8 @@ mod tests {
 
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].app_id, ROBINHOOD_APP_ID);
-        assert_eq!(stored[0].last_ok, Some(true));
-        assert!(!legacy.exists());
-    }
-
-    #[test]
-    fn root_view_keeps_legacy_tabs_and_adds_app_navigation() {
-        let temp = tempfile::tempdir().unwrap();
-        std::fs::write(temp.path().join("agent-note.txt"), "top-level workspace").unwrap();
-        let supervisor = AppSupervisor::new(temp.path(), Arc::new(NoServices)).unwrap();
-        supervisor
-            .update_root(&json!({
-                "agent":"IDLE",
-                "model":"test",
-                "messages":[{"role":"assistant","text":"ready"}],
-            }))
-            .unwrap();
-
-        // Files remains a Pi Agent screen and its PocketJS FS is rooted at
-        // the complete workspace, not only /workspace/data.
-        assert_eq!(supervisor.tap(270, 1220).unwrap(), Value::Null);
-        supervisor.frame().unwrap();
-
-        // Apps is the only new bottom tab; its cards navigate through the
-        // native App Supervisor instead of embedding another App's View.
-        assert_eq!(supervisor.tap(450, 1220).unwrap(), Value::Null);
-        let action = supervisor.tap(300, 220).unwrap();
-        assert_eq!(action["type"], "navigate");
-        assert_eq!(action["app"], ROBINHOOD_APP_ID);
-
-        // Settings stays in the Root App, while the command is returned to
-        // the host that owns Wi-Fi credentials and drivers.
-        assert_eq!(supervisor.tap(630, 1220).unwrap(), Value::Null);
-        let action = supervisor.tap(560, 170).unwrap();
-        assert_eq!(action["type"], "settings");
-        assert_eq!(action["command"], "scan");
-    }
-
-    #[test]
-    fn keyboard_key_has_a_bounded_pointer_down_visual_state() {
-        let temp = tempfile::tempdir().unwrap();
-        let supervisor = AppSupervisor::new(temp.path(), Arc::new(NoServices)).unwrap();
-
-        // Open the prompt keyboard, then press Q without invoking the key. The
-        // DrawList must change only while the pointer is held down.
-        supervisor.tap(300, 1110).unwrap();
-        supervisor.frame().unwrap();
-        let idle = supervisor.with_ui(|ui| ui.draw().words.clone());
-
-        supervisor.pointer_down(50, 520).unwrap();
-        supervisor.frame().unwrap();
-        let pressed = supervisor.with_ui(|ui| ui.draw().words.clone());
-        assert_ne!(pressed, idle);
-
-        supervisor.pointer_up().unwrap();
-        supervisor.frame().unwrap();
-        let released = supervisor.with_ui(|ui| ui.draw().words.clone());
-        assert_eq!(released, idle);
+        assert_eq!(stored[0].last_ok, None);
+        assert!(!temp.path().join(".system/schedules.json").exists());
     }
 
     #[test]

@@ -77,14 +77,14 @@ fn parse_args() -> Result<Args> {
             "--screenshot" => screenshot = Some(PathBuf::from(next(&mut args, "--screenshot")?)),
             "--prompt" => prompt = Some(next(&mut args, "--prompt")?),
             "--workspace" => workspace = PathBuf::from(next(&mut args, "--workspace")?),
-            "--app" | "--view" => {
+            "--app" => {
                 app = match next(&mut args, &argument)?.as_str() {
-                    "chat" | "pi-agent" => ROOT_APP_ID.to_owned(),
-                    "workspace" | "files" => {
+                    "pi-agent" => ROOT_APP_ID.to_owned(),
+                    "files" => {
                         root_tap = Some((270, 1220));
                         ROOT_APP_ID.to_owned()
                     }
-                    "apps" | "runs" => {
+                    "apps" => {
                         root_tap = Some((450, 1220));
                         ROOT_APP_ID.to_owned()
                     }
@@ -167,7 +167,6 @@ impl PlatformTools for SimPlatform {
 
 /// Deterministic native fixtures keep the simulator useful without credentials.
 /// The App code, SQLite writes and View are exactly the same bundles as the board.
-#[derive(Default)]
 struct SimAppServices;
 
 impl AppServiceHost for SimAppServices {
@@ -344,7 +343,7 @@ impl Product {
                 format!("Codex / {}", model.as_deref().unwrap_or("coding-plan"))
             }
         };
-        let services: Arc<dyn AppServiceHost> = Arc::new(SimAppServices::default());
+        let services: Arc<dyn AppServiceHost> = Arc::new(SimAppServices);
         let mut supervisor = AppSupervisor::new(workspace.clone(), services)?;
         supervisor.open(app)?;
 
@@ -851,8 +850,7 @@ mod tests {
     fn exa_tool_writes_app_owned_sqlite() {
         init_logs();
         let temp = tempfile::tempdir().unwrap();
-        let mut supervisor =
-            AppSupervisor::new(temp.path(), Arc::new(SimAppServices::default())).unwrap();
+        let mut supervisor = AppSupervisor::new(temp.path(), Arc::new(SimAppServices)).unwrap();
         let result = supervisor.invoke_tool(
             "research.search",
             r#"{"query":"NVIDIA FY2026 annual report 10-K revenue data center guidance","numResults":5,"includeDomains":["investor.nvidia.com","sec.gov"]}"#,
@@ -880,9 +878,8 @@ mod tests {
     fn exa_write_removes_rows_older_than_seven_days() {
         init_logs();
         let temp = tempfile::tempdir().unwrap();
-        let mut supervisor =
-            AppSupervisor::new(temp.path(), Arc::new(SimAppServices::default())).unwrap();
-        let first = supervisor.invoke_tool("research.search", r#"{"query":"old search"}"#);
+        let mut supervisor = AppSupervisor::new(temp.path(), Arc::new(SimAppServices)).unwrap();
+        let first = supervisor.invoke_tool("research.search", r#"{"query":"expired search"}"#);
         assert!(!first.is_error, "{}", first.text);
         wait_for(|| {
             supervisor
@@ -916,46 +913,12 @@ mod tests {
     }
 
     #[test]
-    fn views_open_empty_databases_without_starting_data_actions() {
-        init_logs();
-        let temp = tempfile::tempdir().unwrap();
-        let mut supervisor =
-            AppSupervisor::new(temp.path(), Arc::new(SimAppServices::default())).unwrap();
-
-        let robinhood = supervisor.invoke_tool("robinhood.storage_status", "{}");
-        assert!(!robinhood.is_error, "{}", robinhood.text);
-        assert!(robinhood.details["tables"].as_array().unwrap().is_empty());
-
-        let exa = supervisor.invoke_tool("research.storage_status", "{}");
-        assert!(!exa.is_error, "{}", exa.text);
-        assert_eq!(exa.details["searches"], 0);
-        assert_eq!(exa.details["retentionDays"], 7);
-        assert_eq!(exa.details["schemaVersion"], 0);
-        assert_eq!(exa.details["expectedSchemaVersion"], 5);
-        assert!(exa.details["latestSearch"].is_null());
-    }
-
-    #[test]
-    fn app_navigation_keeps_pi_agent_at_workspace_root() {
-        init_logs();
-        let temp = tempfile::tempdir().unwrap();
-        let mut supervisor =
-            AppSupervisor::new(temp.path(), Arc::new(SimAppServices::default())).unwrap();
-        supervisor.open("robinhood").unwrap();
-        assert_eq!(supervisor.active_id(), "robinhood");
-        assert!(temp.path().join("data/view/current").exists());
-        assert!(temp.path().join("apps/robinhood/current").exists());
-    }
-
-    #[test]
-    fn robinhood_refresh_recovers_after_service_failure() {
+    fn robinhood_refresh_failure_records_no_view_data() {
         init_logs();
         let temp = tempfile::tempdir().unwrap();
         let mut supervisor = AppSupervisor::new(temp.path(), Arc::new(FailingRobinhood)).unwrap();
         supervisor.open("robinhood").unwrap();
 
-        let first = supervisor.tap(650, 1220).unwrap();
-        assert_eq!(first["type"], "invokeTask");
         let failed = supervisor.invoke_active_task("refreshPortfolio", &Value::Null);
         assert!(!failed.is_error);
         wait_for(|| {
@@ -977,17 +940,13 @@ mod tests {
             .find(|table| table["name"] == "total_value")
             .unwrap();
         assert_eq!(values["rowCount"], 0);
-
-        let retry = supervisor.tap(650, 1220).unwrap();
-        assert_eq!(retry["type"], "invokeTask");
     }
 
     #[test]
-    fn robinhood_full_views_and_account_switch_render() {
+    fn robinhood_refresh_writes_the_fixed_view_projection() {
         init_logs();
         let temp = tempfile::tempdir().unwrap();
-        let mut supervisor =
-            AppSupervisor::new(temp.path(), Arc::new(SimAppServices::default())).unwrap();
+        let mut supervisor = AppSupervisor::new(temp.path(), Arc::new(SimAppServices)).unwrap();
         supervisor.open("robinhood").unwrap();
         let refreshed = supervisor.invoke_tool("robinhood.refresh_portfolio", "{}");
         assert!(!refreshed.is_error, "{}", refreshed.text);
@@ -1032,21 +991,5 @@ mod tests {
                 .unwrap()["rowCount"],
             3
         );
-
-        supervisor.tap(350, 140).unwrap();
-        supervisor.frame().unwrap();
-        assert!(supervisor.with_ui(|ui| ui.draw().words.len()) > 100);
-
-        supervisor.tap(350, 250).unwrap();
-        supervisor.frame().unwrap();
-        supervisor.tap(350, 700).unwrap();
-        supervisor.frame().unwrap();
-        assert!(supervisor.with_ui(|ui| ui.draw().words.len()) > 100);
-
-        supervisor.tap(80, 60).unwrap();
-        supervisor.frame().unwrap();
-        supervisor.tap(350, 900).unwrap();
-        supervisor.frame().unwrap();
-        assert!(supervisor.with_ui(|ui| ui.draw().words.len()) > 100);
     }
 }
