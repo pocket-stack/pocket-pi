@@ -44,6 +44,9 @@ bindings_header = "src/waveshare_bindings.h"
 component_dirs = ["components/pocketjs_ppa"]
 
 [[package.metadata.esp-idf-sys.extra_components]]
+component_dirs = ["components/esp_hosted_late_response_fix"]
+
+[[package.metadata.esp-idf-sys.extra_components]]
 remote_component = { name = "espressif/esp_wifi_remote", version = "0.14.*" }
 
 [[package.metadata.esp-idf-sys.extra_components]]
