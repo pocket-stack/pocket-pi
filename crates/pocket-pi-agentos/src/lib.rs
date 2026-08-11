@@ -809,7 +809,9 @@ fn mount_shared_db(guest: &Guest, db: SharedDb) -> Result<()> {
         ns.set(
             "exec",
             Function::new(ctx.clone(), move |handle: i32, sql: String| -> i32 {
-                module.lock().map_or(1, |mut db| db.exec(handle, &sql))
+                let result = module.lock().map_or(1, |mut db| db.exec(handle, &sql));
+                yield_after_db_call();
+                result
             })?,
         )?;
         let module = db.clone();
@@ -818,10 +820,12 @@ fn mount_shared_db(guest: &Guest, db: SharedDb) -> Result<()> {
             Function::new(
                 ctx.clone(),
                 move |handle: i32, sql: String, args: String| -> String {
-                    module.lock().map_or_else(
+                    let result = module.lock().map_or_else(
                         |_| json!({"error":"App database owner is unavailable"}).to_string(),
                         |mut db| db.query(handle, &sql, &args),
-                    )
+                    );
+                    yield_after_db_call();
+                    result
                 },
             )?,
         )?;
@@ -857,6 +861,17 @@ fn mount_services(guest: &Guest, app_id: String, services: Arc<dyn AppServiceHos
         Ok(())
     })
 }
+
+#[cfg(target_os = "espidf")]
+fn yield_after_db_call() {
+    // A Data Action may issue many synchronous SQLite calls in one QuickJS
+    // turn. Block for one scheduler tick so the display loop and IDLE task can
+    // run between calls instead of tripping the task watchdog.
+    std::thread::sleep(Duration::from_millis(1));
+}
+
+#[cfg(not(target_os = "espidf"))]
+fn yield_after_db_call() {}
 
 fn mount_data_lifecycle(guest: &Guest, revision: AppRevision) -> Result<()> {
     guest.mount("app", |ctx, ns| {

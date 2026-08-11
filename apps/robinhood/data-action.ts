@@ -18,9 +18,16 @@ function query(sql: string, args: any[] = []): any {
   return result;
 }
 function run(sql: string, args: any[] = []): any { return query(sql, args); }
+function insertRows(sql: string, rows: any[][]): void {
+  if (!rows.length) return;
+  const values = rows.map((row) => "(" + row.map(() => "?").join(",") + ")").join(",");
+  const args: any[] = [];
+  for (const row of rows) args.push(...row);
+  run(sql + " VALUES " + values, args);
+}
 
-const version = query("PRAGMA user_version") as { user_version?: number } | null;
-if (Number(version?.user_version ?? 0) !== SCHEMA_VERSION) {
+const version = Number(query("PRAGMA user_version")?.rows?.[0]?.[0] ?? 0);
+if (version !== SCHEMA_VERSION) {
   exec(`
     CREATE TABLE IF NOT EXISTS accounts (
     account_number TEXT PRIMARY KEY,
@@ -252,6 +259,7 @@ function transaction(action: () => void): void {
 function saveAccounts(value: any, observedAt: number): void {
   const rows = list(value, ["accounts"]);
   run("DELETE FROM accounts");
+  const values: any[][] = [];
   for (const item of rows) {
     const account = accountNumber(item, {});
     if (!account) continue;
@@ -260,11 +268,9 @@ function saveAccounts(value: any, observedAt: number): void {
     const label = agentic ? "AGENTIC"
       : accountType.includes("IRA") || accountType.includes("RETIRE") ? "RETIREMENT"
       : accountType.includes("JOINT") ? "JOINT" : "PERSONAL";
-    run(
-      "INSERT INTO accounts(account_number,label,suffix,account_type,status,agentic_allowed,updated_at) VALUES(?,?,?,?,?,?,?)",
-      [account, label, account.slice(-4), accountType, (deep(item, ["status"]) || "active").toUpperCase(), agentic ? 1 : 0, observedAt],
-    );
+    values.push([account, label, account.slice(-4), accountType, (deep(item, ["status"]) || "active").toUpperCase(), agentic ? 1 : 0, observedAt]);
   }
+  insertRows("INSERT INTO accounts(account_number,label,suffix,account_type,status,agentic_allowed,updated_at)", values);
 }
 
 function savePortfolio(value: any, args: any, observedAt: number): void {
@@ -295,14 +301,13 @@ function savePositions(value: any, args: any, observedAt: number): void {
   if (!account) throw new Error("Robinhood positions are missing account_number");
   const rows = list(value, ["positions"]).slice(0, 64);
   run("DELETE FROM positions WHERE account_number=?", [account]);
+  const values: any[][] = [];
   for (const item of rows) {
     const symbol = deep(item, ["symbol"]);
     if (!symbol) continue;
-    run(
-      "INSERT INTO positions(account_number,symbol,quantity,average_price,market_value,observed_at) VALUES(?,?,?,?,?,?)",
-      [account, symbol, deep(item, ["quantity", "shares"]), deep(item, ["average_price", "averagePrice", "average_buy_price"]), deep(item, ["market_value", "marketValue", "equity"]), observedAt],
-    );
+    values.push([account, symbol, deep(item, ["quantity", "shares"]), deep(item, ["average_price", "averagePrice", "average_buy_price"]), deep(item, ["market_value", "marketValue", "equity"]), observedAt]);
   }
+  insertRows("INSERT INTO positions(account_number,symbol,quantity,average_price,market_value,observed_at)", values);
 }
 
 function saveActivities(value: any, args: any, observedAt: number): void {
@@ -310,6 +315,7 @@ function saveActivities(value: any, args: any, observedAt: number): void {
   if (!account) throw new Error("Robinhood activities are missing account_number");
   const rows = list(value, ["orders", "activities", "results"]).slice(0, 64);
   run("DELETE FROM activities WHERE account_number=?", [account]);
+  const values: any[][] = [];
   rows.forEach((item, index) => {
     const symbol = deep(item, ["symbol"]);
     const side = (deep(item, ["side"]) || "").toUpperCase();
@@ -321,12 +327,9 @@ function saveActivities(value: any, args: any, observedAt: number): void {
     const quantityNumber = number(quantity);
     const priceNumber = number(price);
     const amount = quantityNumber !== null && priceNumber !== null ? String(quantityNumber * priceNumber) : price || quantity;
-    run(
-      `INSERT INTO activities(account_number,activity_id,occurred_at,observed_at,symbol,side,quantity,price,amount,state,activity_type)
-       VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-      [account, activityId, occurredAt, observedAt, symbol, side, quantity, price, amount, (deep(item, ["state", "status"]) || "RECENT").toUpperCase(), (deep(item, ["type", "order_type"]) || "ORDER").toUpperCase()],
-    );
+    values.push([account, activityId, occurredAt, observedAt, symbol, side, quantity, price, amount, (deep(item, ["state", "status"]) || "RECENT").toUpperCase(), (deep(item, ["type", "order_type"]) || "ORDER").toUpperCase()]);
   });
+  insertRows("INSERT INTO activities(account_number,activity_id,occurred_at,observed_at,symbol,side,quantity,price,amount,state,activity_type)", values);
 }
 
 function saveRealizedPnl(value: any, args: any, observedAt: number): void {

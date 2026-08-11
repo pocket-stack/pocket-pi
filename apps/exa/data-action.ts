@@ -20,8 +20,8 @@ function query(sql: string, args: any[] = []): any {
 }
 function run(sql: string, args: any[] = []): any { return query(sql, args); }
 
-const version = query("PRAGMA user_version") as { user_version?: number } | null;
-if (Number(version?.user_version ?? 0) !== SCHEMA_VERSION) {
+const version = Number(query("PRAGMA user_version")?.rows?.[0]?.[0] ?? 0);
+if (version !== SCHEMA_VERSION) {
   exec(`
     DROP TABLE IF EXISTS searches;
     CREATE TABLE searches (
