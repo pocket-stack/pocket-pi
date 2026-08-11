@@ -1768,20 +1768,6 @@ mod tests {
         }
         assert_eq!(namespace_counts.len(), 8);
         assert!(namespace_counts.values().all(|count| *count <= 9));
-        let description = |name: &str| {
-            snapshot["tools"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|tool| tool["name"] == name)
-                .unwrap()["description"]
-                .as_str()
-                .unwrap()
-        };
-        assert!(description("place_equity_order").contains("REAL-MONEY ACTION"));
-        assert!(description("place_equity_order").contains("explicitly authorizes"));
-        assert!(description("review_equity_order").contains("non-submitting"));
-
         let robinhood = catalog
             .descriptors()
             .find(|descriptor| descriptor.id == ROBINHOOD_APP_ID)

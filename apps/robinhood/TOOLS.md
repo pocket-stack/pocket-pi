@@ -107,6 +107,7 @@ mistaken for completion. The provider JSON is serialized once as ToolResult
 responses do not retain a second copy in the QuickJS/Agent bridge.
 
 Review Tools are explicitly described as non-submitting. Place, cancel, and
-exercise Tools retain Robinhood's confirmation and Agentic-account guidance and
-add Pocket Pi's real-account warning. A repeated real-money order must reuse the
-same `ref_id`; an ambiguous transport result must not be retried with a new ID.
+exercise Tools describe their real account effects, functional account limits,
+and parameter contracts without embedding an interaction or authorization
+policy. A repeated real-money order must reuse the same `ref_id`; an ambiguous
+transport result must not be retried with a new ID.
