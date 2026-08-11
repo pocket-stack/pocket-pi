@@ -1,4 +1,5 @@
 use core::time::Duration;
+use std::cell::RefCell;
 
 use embedded_svc::http::{client::Client as HttpClient, Method};
 use embedded_svc::io::Write;
@@ -7,6 +8,11 @@ use pocket_pi_embedded::ModelBackend;
 use pocket_pi_protocols::anthropic_messages;
 use pocket_pi_protocols::model::{ModelStreamEvent, WirelessProvider};
 use pocket_pi_protocols::openai_chat;
+
+// EspHttpConnection is thread-affine, so the resident model worker owns it.
+thread_local! {
+    static MODEL_CLIENT: RefCell<Option<HttpClient<EspHttpConnection>>> = const { RefCell::new(None) };
+}
 
 pub struct WirelessBackend {
     provider: WirelessProvider,
@@ -41,35 +47,8 @@ impl WirelessBackend {
             )),
         }
     }
-}
 
-impl ModelBackend for WirelessBackend {
-    fn complete(
-        &self,
-        request_json: &str,
-        on_event: &mut dyn FnMut(ModelStreamEvent),
-    ) -> Result<String, String> {
-        let (endpoint, body) = self.request(request_json)?;
-        let content_length = body.len().to_string();
-        let bearer = format!("Bearer {}", self.api_key);
-        let mut headers = vec![
-            ("accept", "text/event-stream"),
-            ("content-type", "application/json"),
-            ("content-length", content_length.as_str()),
-            ("user-agent", "pocket-pi-p4/0.1"),
-        ];
-        match self.provider {
-            WirelessProvider::Anthropic => {
-                headers.push(("x-api-key", self.api_key.as_str()));
-                headers.push(("anthropic-version", "2023-06-01"));
-            }
-            WirelessProvider::OpenAi
-            | WirelessProvider::OpenRouter
-            | WirelessProvider::DeepSeek => {
-                headers.push(("authorization", bearer.as_str()));
-            }
-        }
-
+    fn connect() -> Result<HttpClient<EspHttpConnection>, String> {
         let configuration = Configuration {
             buffer_size: Some(4 * 1024),
             buffer_size_tx: Some(4 * 1024),
@@ -77,12 +56,22 @@ impl ModelBackend for WirelessBackend {
             crt_bundle_attach: Some(esp_idf_svc::sys::esp_crt_bundle_attach),
             ..Default::default()
         };
-        let mut client = HttpClient::wrap(
+        Ok(HttpClient::wrap(
             EspHttpConnection::new(&configuration)
                 .map_err(|error| format!("initialize HTTPS: {error}"))?,
-        );
+        ))
+    }
+
+    fn send(
+        &self,
+        client: &mut HttpClient<EspHttpConnection>,
+        endpoint: &str,
+        body: &str,
+        headers: &[(&str, &str)],
+        on_event: &mut dyn FnMut(ModelStreamEvent),
+    ) -> Result<String, String> {
         let mut request = client
-            .request(Method::Post, endpoint, &headers)
+            .request(Method::Post, endpoint, headers)
             .map_err(|error| format!("create model request: {error}"))?;
         request
             .write_all(body.as_bytes())
@@ -132,6 +121,53 @@ impl ModelBackend for WirelessBackend {
             drain_sse_lines(&mut pending, &mut decoder, on_event)?;
         }
         decoder.finish()
+    }
+}
+
+impl ModelBackend for WirelessBackend {
+    fn complete(
+        &self,
+        request_json: &str,
+        on_event: &mut dyn FnMut(ModelStreamEvent),
+    ) -> Result<String, String> {
+        let (endpoint, body) = self.request(request_json)?;
+        let content_length = body.len().to_string();
+        let bearer = format!("Bearer {}", self.api_key);
+        let mut headers = vec![
+            ("accept", "text/event-stream"),
+            ("content-type", "application/json"),
+            ("content-length", content_length.as_str()),
+            ("user-agent", "pocket-pi-p4/0.1"),
+        ];
+        match self.provider {
+            WirelessProvider::Anthropic => {
+                headers.push(("x-api-key", self.api_key.as_str()));
+                headers.push(("anthropic-version", "2023-06-01"));
+            }
+            WirelessProvider::OpenAi
+            | WirelessProvider::OpenRouter
+            | WirelessProvider::DeepSeek => {
+                headers.push(("authorization", bearer.as_str()));
+            }
+        }
+
+        MODEL_CLIENT.with(|slot| {
+            let mut client = slot.borrow_mut();
+            if client.is_none() {
+                *client = Some(Self::connect()?);
+            }
+            let result = self.send(
+                client.as_mut().unwrap(),
+                endpoint,
+                &body,
+                &headers,
+                on_event,
+            );
+            if result.is_err() {
+                *client = None;
+            }
+            result
+        })
     }
 }
 

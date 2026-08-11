@@ -68,7 +68,7 @@ function modelFor(config: Config): any {
   const provider = config.provider || "openai";
   const deepseek = provider === "deepseek";
   const anthropic = provider === "anthropic";
-  const defaultModel = deepseek ? "deepseek-v4-pro" : "gpt-5-mini";
+  const defaultModel = deepseek ? "deepseek-v4-flash" : "gpt-5-mini";
   return {
     id: config.model || defaultModel,
     name: config.model || defaultModel,

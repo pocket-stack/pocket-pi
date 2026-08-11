@@ -861,17 +861,15 @@ mod tests {
         assert_eq!(result.details["status"], "queued");
         wait_for(|| {
             let storage = supervisor.invoke_tool("research.storage_status", "{}");
-            storage.details["tableCounts"]["searches"] == 1
+            storage.details["searches"] == 1
         });
         assert!(temp.path().join("apps/exa/data/exa.sqlite").exists());
         let storage = supervisor.invoke_tool("research.storage_status", "{}");
         assert!(!storage.is_error, "{}", storage.text);
-        assert_eq!(storage.details["tableCounts"]["searches"], 1);
-        assert_eq!(storage.details["tableCounts"]["searchResults"], 2);
-        assert_eq!(storage.details["tableCounts"]["documents"], 0);
+        assert_eq!(storage.details["searches"], 1);
         assert_eq!(storage.details["retentionDays"], 7);
-        assert_eq!(storage.details["schemaVersion"], 4);
-        assert_eq!(storage.details["expectedSchemaVersion"], 4);
+        assert_eq!(storage.details["schemaVersion"], 5);
+        assert_eq!(storage.details["expectedSchemaVersion"], 5);
         assert_eq!(storage.details["latestSearch"]["status"], "ok");
         assert!(storage.text.len() < 240, "{}", storage.text);
         assert!(storage.details.get("tables").is_none());
@@ -889,7 +887,7 @@ mod tests {
         wait_for(|| {
             supervisor
                 .invoke_tool("research.storage_status", "{}")
-                .details["tableCounts"]["searches"]
+                .details["searches"]
                 == 1
         });
 
@@ -898,12 +896,7 @@ mod tests {
         let handle = database.open("exa");
         assert!(handle >= 0);
         assert_eq!(
-            database.exec(
-                handle,
-                "UPDATE searches SET searched_at=0;\
-                 INSERT INTO documents(url,fetched_at,title,published_at,author,text)\
-                 VALUES('https://expired.example',0,NULL,NULL,NULL,'expired');",
-            ),
+            database.exec(handle, "UPDATE searches SET searched_at=0;"),
             0,
             "{}",
             database.last_error(handle)
@@ -919,9 +912,7 @@ mod tests {
                 == 2
         });
         let storage = supervisor.invoke_tool("research.storage_status", "{}");
-        assert_eq!(storage.details["tableCounts"]["searches"], 1);
-        assert_eq!(storage.details["tableCounts"]["searchResults"], 2);
-        assert_eq!(storage.details["tableCounts"]["documents"], 0);
+        assert_eq!(storage.details["searches"], 1);
     }
 
     #[test]
@@ -937,12 +928,10 @@ mod tests {
 
         let exa = supervisor.invoke_tool("research.storage_status", "{}");
         assert!(!exa.is_error, "{}", exa.text);
-        assert_eq!(exa.details["tableCounts"]["searches"], 0);
-        assert_eq!(exa.details["tableCounts"]["searchResults"], 0);
-        assert_eq!(exa.details["tableCounts"]["documents"], 0);
+        assert_eq!(exa.details["searches"], 0);
         assert_eq!(exa.details["retentionDays"], 7);
         assert_eq!(exa.details["schemaVersion"], 0);
-        assert_eq!(exa.details["expectedSchemaVersion"], 4);
+        assert_eq!(exa.details["expectedSchemaVersion"], 5);
         assert!(exa.details["latestSearch"].is_null());
     }
 

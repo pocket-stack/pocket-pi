@@ -4,7 +4,7 @@ import { mount } from "@pocketjs/framework";
 import { Database } from "@pocketjs/framework/db";
 import { ActionButton, EmptyState, MetricCard, PocketHeader, ScrollButtons, SectionHeading, statusBadge, StatusBar } from "../_shared/ui";
 
-const DB_SCHEMA_VERSION = 4;
+const DB_SCHEMA_VERSION = 5;
 const db = new Database("robinhood");
 
 type Screen = "dashboard" | "accounts" | "activity" | "positions";
@@ -247,7 +247,7 @@ function loadRefreshProjection(loadedRevision: number): void {
   setRefreshing(false);
   if (latestRun?.status === "failed") setStatus("REFRESH FAILED · " + String(latestRun.error || "UNKNOWN ERROR").slice(0, 52));
   else if (latestRun?.status === "partial") setStatus("LIVE WITH PARTIAL DATA");
-  else if (dashboard().observedAt) setStatus("LIVE / READ ONLY · " + relativeTime(dashboard().observedAt as number));
+  else if (dashboard().observedAt) setStatus("LIVE · " + relativeTime(dashboard().observedAt as number));
   else setStatus("WAITING FOR ROBINHOOD");
   refreshLoadedRevision = loadedRevision;
 }
@@ -264,7 +264,7 @@ function loadAccountProjection(accountNumber: string, loadedRevision: number): v
   if (cached?.loadedRevision === loadedRevision) {
     setDashboard(cached.value);
     loadChart(accountNumber, loadedRevision);
-    if (cached.value.observedAt && !refreshing()) setStatus("LIVE / READ ONLY · " + relativeTime(cached.value.observedAt));
+    if (cached.value.observedAt && !refreshing()) setStatus("LIVE · " + relativeTime(cached.value.observedAt));
     return;
   }
   setDashboard(EMPTY);
@@ -349,7 +349,7 @@ function trend(): { change: string; percent: string; positive: boolean } {
 
 function Header(props: { title: string; metaBottom?: string }) {
   return (
-    <PocketHeader title={props.title} back metaTop="READ ONLY" metaBottom={props.metaBottom ?? "AUTO · 5 MIN"} />
+    <PocketHeader title={props.title} back metaTop="AGENTIC" metaBottom={props.metaBottom ?? "AUTO · 5 MIN"} />
   );
 }
 

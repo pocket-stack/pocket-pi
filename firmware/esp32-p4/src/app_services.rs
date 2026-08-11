@@ -1,5 +1,5 @@
 use core::time::Duration;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -8,7 +8,9 @@ use embedded_svc::http::{client::Client as HttpClient, Method};
 use embedded_svc::io::Write as _;
 use esp_idf_svc::http::client::{Configuration, EspHttpConnection};
 use esp_idf_svc::io::EspIOError;
-use pocket_pi_agentos::{AppServiceHost, HttpRequest, NetFailure, TransportCompletion};
+use pocket_pi_agentos::{
+    AppCatalog, AppServiceHost, HttpRequest, NetFailure, TransportCompletion, ROBINHOOD_APP_ID,
+};
 use serde_json::{json, Value};
 
 const ROBINHOOD_MCP_URL: &str = "https://agent.robinhood.com/mcp/trading";
@@ -23,6 +25,7 @@ struct EspAppServicesInner {
     network_ready: Arc<AtomicBool>,
     exa_api_key: Option<String>,
     robinhood_access_token: Option<String>,
+    robinhood_operations: BTreeSet<String>,
     robinhood: Mutex<McpState>,
 }
 
@@ -38,10 +41,14 @@ impl EspAppServices {
         exa_api_key: Option<String>,
         robinhood_access_token: Option<String>,
     ) -> Self {
+        let robinhood_operations = AppCatalog::builtin()
+            .expect("built-in App catalog")
+            .provider_operations(ROBINHOOD_APP_ID);
         let inner = Arc::new(EspAppServicesInner {
             network_ready,
             exa_api_key,
             robinhood_access_token,
+            robinhood_operations,
             robinhood: Mutex::new(McpState {
                 session_id: None,
                 next_id: 1,
@@ -52,18 +59,8 @@ impl EspAppServices {
 }
 
 impl EspAppServicesInner {
-    fn robinhood_operation_allowed(operation: &str) -> bool {
-        matches!(
-            operation,
-            "get_accounts"
-                | "get_portfolio"
-                | "get_equity_positions"
-                | "get_equity_orders"
-                | "get_equity_historicals"
-                | "get_realized_pnl"
-                | "get_pnl_trade_history"
-                | "review_equity_order"
-        )
+    fn robinhood_operation_allowed(&self, operation: &str) -> bool {
+        self.robinhood_operations.contains(operation)
     }
 
     fn exa_http(
@@ -115,7 +112,7 @@ impl EspAppServicesInner {
             .and_then(Value::as_str)
             .ok_or_else(|| "mcp.client callTool requires name".to_owned())?;
         let arguments = args.get("arguments").unwrap_or(&Value::Null);
-        if !Self::robinhood_operation_allowed(operation) {
+        if !self.robinhood_operation_allowed(operation) {
             return Err(format!(
                 "Robinhood operation is not allowlisted: {operation}"
             ));
@@ -161,7 +158,7 @@ impl EspAppServicesInner {
                 .get("name")
                 .and_then(Value::as_str)
                 .ok_or_else(|| "mcp.client callTools requires a name for every call".to_owned())?;
-            if !Self::robinhood_operation_allowed(name) {
+            if !self.robinhood_operation_allowed(name) {
                 return Err(format!("Robinhood operation is not allowlisted: {name}"));
             }
         }

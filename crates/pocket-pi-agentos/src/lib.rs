@@ -40,6 +40,8 @@ const ROBINHOOD_JS: &str = include_str!("../../../apps/robinhood/dist/app.js");
 const ROBINHOOD_DATA_JS: &str = include_str!("../../../apps/robinhood/dist/data-action.js");
 const ROBINHOOD_PAK: &[u8] = include_bytes!("../../../apps/robinhood/dist/app.pak");
 const ROBINHOOD_DESCRIPTOR: &str = include_str!("../../../apps/robinhood/agent-app.json");
+#[cfg(test)]
+const ROBINHOOD_TOOL_CATALOG: &str = include_str!("../../../apps/robinhood/tool-catalog.json");
 const ROBINHOOD_POCKET: &str = include_str!("../../../apps/robinhood/pocket.json");
 const EXA_JS: &str = include_str!("../../../apps/exa/dist/app.js");
 const EXA_DATA_JS: &str = include_str!("../../../apps/exa/dist/data-action.js");
@@ -56,6 +58,8 @@ pub struct AppDescriptor {
     pub data_version: u32,
     #[serde(default)]
     pub tools: Vec<Value>,
+    #[serde(default)]
+    pub provider_operations: Vec<String>,
     #[serde(default)]
     pub tasks: Vec<String>,
     #[serde(default)]
@@ -127,6 +131,23 @@ impl AppCatalog {
         }
         let mut tool_owner = BTreeMap::new();
         for app in apps.values() {
+            let provider_operations = app
+                .descriptor
+                .provider_operations
+                .iter()
+                .collect::<BTreeSet<_>>();
+            anyhow::ensure!(
+                provider_operations.len() == app.descriptor.provider_operations.len(),
+                "App {} declares duplicate provider operations",
+                app.descriptor.id
+            );
+            anyhow::ensure!(
+                provider_operations
+                    .iter()
+                    .all(|operation| !operation.is_empty()),
+                "App {} declares an empty provider operation",
+                app.descriptor.id
+            );
             for tool in &app.descriptor.tools {
                 let name = tool
                     .get("name")
@@ -142,6 +163,15 @@ impl AppCatalog {
                     .is_some()
                 {
                     anyhow::bail!("duplicate App tool: {name}");
+                }
+                if let Some(operation) = tool.get("providerOperation") {
+                    let operation = operation
+                        .as_str()
+                        .ok_or_else(|| anyhow!("{name} providerOperation must be a string"))?;
+                    anyhow::ensure!(
+                        name == format!("{}.{}", app.descriptor.id, operation),
+                        "{name} providerOperation must match its namespaced Tool name"
+                    );
                 }
             }
         }
@@ -161,6 +191,18 @@ impl AppCatalog {
 
     pub fn descriptors(&self) -> impl Iterator<Item = &AppDescriptor> {
         self.apps.values().map(|app| &app.descriptor)
+    }
+
+    /// Provider operations are declared by the App release and consumed by a
+    /// native credential/transport owner as its exact allowlist. Local-only
+    /// App Tools omit `providerOperation` and can never cross this boundary.
+    pub fn provider_operations(&self, app_id: &str) -> BTreeSet<String> {
+        self.apps
+            .get(app_id)
+            .into_iter()
+            .flat_map(|app| &app.descriptor.provider_operations)
+            .cloned()
+            .collect()
     }
 
     fn app(&self, id: &str) -> Option<&BuiltinApp> {
@@ -408,8 +450,14 @@ fn parse_data_result(line: &str) -> Result<ToolResult> {
     })
 }
 
+struct DataActionCompletion {
+    run_id: u64,
+    result: ToolResult,
+}
+
 struct AppDataRunner {
     tx: mpsc::SyncSender<DataActionRequest>,
+    completions: Mutex<mpsc::Receiver<DataActionCompletion>>,
     next_run_id: AtomicU32,
     busy: Arc<AtomicBool>,
 }
@@ -417,6 +465,7 @@ struct AppDataRunner {
 impl AppDataRunner {
     fn start(configs: Vec<DataAppConfig>, services: Arc<dyn AppServiceHost>) -> Result<Self> {
         let (tx, rx) = mpsc::sync_channel::<DataActionRequest>(DATA_ACTION_QUEUE);
+        let (completion_tx, completion_rx) = mpsc::channel::<DataActionCompletion>();
         let busy = Arc::new(AtomicBool::new(false));
         let worker_busy = busy.clone();
         std::thread::Builder::new()
@@ -445,34 +494,39 @@ impl AppDataRunner {
                             .expect("Data Action runtime inserted")
                             .invoke(&request)
                     })();
-                    match result {
-                        Ok(result) if result.is_error => log::warn!(
-                            "App Data Action run={} {}.{} failed: {}",
-                            request.run_id,
-                            request.app_id,
-                            request.name,
-                            result.text
-                        ),
-                        Ok(result) => log::info!(
-                            "App Data Action run={} {}.{} completed: {}",
-                            request.run_id,
-                            request.app_id,
-                            request.name,
-                            result.text
-                        ),
-                        Err(error) => log::error!(
-                            "App Data Action run={} {}.{} crashed: {error:#}",
-                            request.run_id,
-                            request.app_id,
-                            request.name
-                        ),
-                    }
+                    let result = match result {
+                        Ok(result) if result.is_error => {
+                            log::warn!(
+                                "App Data Action run={} {}.{} failed: {}",
+                                request.run_id,
+                                request.app_id,
+                                request.name,
+                                result.text
+                            );
+                            result
+                        }
+                        Ok(result) => result,
+                        Err(error) => {
+                            log::error!(
+                                "App Data Action run={} {}.{} crashed: {error:#}",
+                                request.run_id,
+                                request.app_id,
+                                request.name
+                            );
+                            tool_error(format!("{}: {error:#}", request.name))
+                        }
+                    };
+                    let _ = completion_tx.send(DataActionCompletion {
+                        run_id: request.run_id,
+                        result,
+                    });
                     worker_busy.store(false, Ordering::Release);
                 }
             })
             .context("start App Data Action runner")?;
         Ok(Self {
             tx,
+            completions: Mutex::new(completion_rx),
             next_run_id: AtomicU32::new(1),
             busy,
         })
@@ -494,6 +548,17 @@ impl AppDataRunner {
 
     fn busy(&self) -> bool {
         self.busy.load(Ordering::Acquire)
+    }
+
+    fn poll_completions(&self) -> Vec<DataActionCompletion> {
+        let Ok(completions) = self.completions.lock() else {
+            return Vec::new();
+        };
+        let mut ready = Vec::new();
+        while let Ok(completion) = completions.try_recv() {
+            ready.push(completion);
+        }
+        ready
     }
 }
 
@@ -827,6 +892,7 @@ pub struct AppSupervisor {
     catalog: AppCatalog,
     services: Arc<dyn AppServiceHost>,
     data_runner: AppDataRunner,
+    pending_tool_responses: Mutex<BTreeMap<u64, mpsc::Sender<ToolResult>>>,
     /// The Pi Agent System App is booted once and remains resident for the
     /// entire supervisor lifetime. Foreground navigation never replaces it.
     system: AppRuntime,
@@ -913,6 +979,7 @@ impl AppSupervisor {
             catalog,
             services,
             data_runner,
+            pending_tool_responses: Mutex::new(BTreeMap::new()),
             system,
             agent: None,
             runtimes,
@@ -1003,6 +1070,7 @@ impl AppSupervisor {
     /// Advance the Agent every host tick, but only ask the selected PocketJS
     /// View to produce a new DrawList when the host knows it is dirty.
     pub fn frame_render(&self, render_selected: bool) -> Result<Vec<AgentEvent>> {
+        self.deliver_data_action_completions();
         let events = match &self.agent {
             Some(agent) => agent
                 .tick(&self.system.guest)
@@ -1016,6 +1084,18 @@ impl AppSupervisor {
                 .advance(render_selected && self.active_app.as_deref() == Some(app_id.as_str()))?;
         }
         Ok(events)
+    }
+
+    fn deliver_data_action_completions(&self) {
+        let completions = self.data_runner.poll_completions();
+        let Ok(mut pending) = self.pending_tool_responses.lock() else {
+            return;
+        };
+        for completion in completions {
+            if let Some(response) = pending.remove(&completion.run_id) {
+                let _ = response.send(completion.result);
+            }
+        }
     }
 
     pub fn update_root(&self, projection: &Value) -> Result<()> {
@@ -1065,6 +1145,42 @@ impl AppSupervisor {
                 terminate: false,
             },
             Err(error) => tool_error(format!("{name}: {error:#}")),
+        }
+    }
+
+    fn begin_agent_tool(
+        &mut self,
+        name: &str,
+        args_json: &str,
+        response: mpsc::Sender<ToolResult>,
+    ) {
+        let Some(app_id) = self.catalog.app_for_tool(name).map(str::to_owned) else {
+            let _ = response.send(tool_error(format!("unknown App tool: {name}")));
+            return;
+        };
+        if name.ends_with(".storage_status") {
+            let _ = response.send(
+                self.with_runtime(&app_id, |runtime| runtime.invoke_tool(name, args_json))
+                    .unwrap_or_else(|error| tool_error(format!("{name}: {error:#}"))),
+            );
+            return;
+        }
+        let args = serde_json::from_str(args_json).unwrap_or(Value::Null);
+        match self
+            .data_runner
+            .enqueue(&app_id, DataActionKind::Tool, name, args)
+        {
+            Ok(run_id) => {
+                if let Ok(mut pending) = self.pending_tool_responses.lock() {
+                    pending.insert(run_id, response);
+                } else {
+                    let _ =
+                        response.send(tool_error("App Tool completion registry is unavailable"));
+                }
+            }
+            Err(error) => {
+                let _ = response.send(tool_error(format!("{name}: {error:#}")));
+            }
         }
     }
 
@@ -1341,8 +1457,7 @@ impl ToolHost for RoutedToolHost {
 
 impl AppToolRequest {
     pub fn handle(self, supervisor: &mut AppSupervisor) {
-        let result = supervisor.invoke_tool(&self.name, &self.args_json);
-        let _ = self.response.send(result);
+        supervisor.begin_agent_tool(&self.name, &self.args_json, self.response);
     }
 }
 
@@ -1566,7 +1681,7 @@ mod tests {
     impl ModelBackend for ToolCallingBackend {
         fn complete(
             &self,
-            _request_json: &str,
+            request_json: &str,
             on_event: &mut dyn FnMut(pocket_pi_embedded::ModelStreamEvent),
         ) -> Result<String, String> {
             if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -1576,14 +1691,19 @@ mod tests {
                     "text":"",
                     "toolCalls":[{
                         "id":"call_portfolio",
-                        "name":"robinhood.get_portfolio",
-                        "arguments":{"account_number":"SIM-001"}
+                        "name":"robinhood.call",
+                        "arguments":{
+                            "name":"get_portfolio",
+                            "arguments":{"account_number":"SIM-001"}
+                        }
                     }],
                     "usage":{},
                     "stopReason":"toolUse"
                 })
                 .to_string())
             } else {
+                assert!(request_json.contains("100.00"), "{request_json}");
+                assert!(!request_json.contains("Queued robinhood.call"));
                 on_event(pocket_pi_embedded::ModelStreamEvent::Text("tool-ok".into()));
                 Ok(serde_json::json!({
                     "thinking":"",
@@ -1623,8 +1743,113 @@ mod tests {
             .into_iter()
             .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
             .collect::<Vec<_>>();
-        assert!(names.contains(&"robinhood.get_portfolio".to_owned()));
+        assert!(names.contains(&"robinhood.search_tools".to_owned()));
+        assert!(names.contains(&"robinhood.call".to_owned()));
         assert!(names.contains(&"research.search".to_owned()));
+    }
+
+    #[test]
+    fn exa_catalog_exposes_bounded_advanced_search() {
+        let catalog = AppCatalog::builtin().unwrap();
+        let exa = catalog
+            .descriptors()
+            .find(|descriptor| descriptor.id == EXA_APP_ID)
+            .unwrap();
+        assert_eq!(exa.tools.len(), 3);
+        assert!(serde_json::to_vec(&exa.tools).unwrap().len() < 5 * 1024);
+
+        let search = exa
+            .tools
+            .iter()
+            .find(|tool| tool["name"] == "research.search")
+            .unwrap();
+        let properties = search["parameters"]["properties"].as_object().unwrap();
+        for name in [
+            "category",
+            "startPublishedDate",
+            "endPublishedDate",
+            "additionalQueries",
+            "maxAgeHours",
+        ] {
+            assert!(
+                properties.contains_key(name),
+                "missing Exa search field {name}"
+            );
+        }
+        let search_types = properties["searchType"]["enum"].as_array().unwrap();
+        assert!(search_types.iter().any(|value| value == "deep"));
+        assert!(search_types.iter().any(|value| value == "deep-reasoning"));
+        assert_eq!(search["parameters"]["additionalProperties"], false);
+
+        let fetch = exa
+            .tools
+            .iter()
+            .find(|tool| tool["name"] == "research.fetch")
+            .unwrap();
+        assert!(fetch["parameters"]["properties"]
+            .get("maxAgeHours")
+            .is_some());
+        assert_eq!(fetch["parameters"]["additionalProperties"], false);
+    }
+
+    #[test]
+    fn robinhood_catalog_matches_the_checked_in_tool_catalog() {
+        let catalog = AppCatalog::builtin().unwrap();
+        let operations = catalog.provider_operations(ROBINHOOD_APP_ID);
+        let snapshot: Value = serde_json::from_str(ROBINHOOD_TOOL_CATALOG).unwrap();
+        let upstream = snapshot["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_owned())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(operations, upstream);
+        assert_eq!(operations.len(), 54);
+        assert!(operations.contains("place_equity_order"));
+        assert!(operations.contains("place_option_order"));
+        assert!(!operations.contains("refresh_portfolio"));
+        let mut namespace_counts = BTreeMap::<&str, usize>::new();
+        for tool in snapshot["tools"].as_array().unwrap() {
+            *namespace_counts
+                .entry(tool["namespace"].as_str().unwrap())
+                .or_default() += 1;
+            assert!(!tool["description"].as_str().unwrap_or_default().is_empty());
+            assert!(tool.get("agentDescription").is_none());
+            assert_eq!(tool["inputSchema"]["type"], "object");
+        }
+        assert_eq!(namespace_counts.len(), 8);
+        assert!(namespace_counts.values().all(|count| *count <= 9));
+        let description = |name: &str| {
+            snapshot["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap()["description"]
+                .as_str()
+                .unwrap()
+        };
+        assert!(description("place_equity_order").contains("REAL-MONEY ACTION"));
+        assert!(description("place_equity_order").contains("explicitly authorizes"));
+        assert!(description("review_equity_order").contains("non-submitting"));
+
+        let robinhood = catalog
+            .descriptors()
+            .find(|descriptor| descriptor.id == ROBINHOOD_APP_ID)
+            .unwrap();
+        assert_eq!(robinhood.tools.len(), 4);
+        assert!(serde_json::to_vec(&robinhood.tools).unwrap().len() < 8 * 1024);
+        for tool in &robinhood.tools {
+            let name = tool["name"].as_str().unwrap();
+            assert!(
+                !tool["description"].as_str().unwrap_or_default().is_empty(),
+                "{name}"
+            );
+            assert_eq!(tool["parameters"]["type"], "object", "{name}");
+            if tool.get("providerOperation").is_some() {
+                assert_eq!(tool["parameters"]["additionalProperties"], false, "{name}");
+            }
+        }
     }
 
     #[test]
@@ -1639,6 +1864,7 @@ mod tests {
             version: "1.0.0".to_owned(),
             data_version: 3,
             tools: Vec::new(),
+            provider_operations: Vec::new(),
             tasks: Vec::new(),
             schedules: Vec::new(),
         };

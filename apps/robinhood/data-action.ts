@@ -1,11 +1,14 @@
-// Headless Robinhood data plane. Provider bodies are normalized in memory,
-// then domain tables are changed in one transaction. The foreground View
-// never sees provider payloads and never writes business state.
+import toolCatalog from "./tool-catalog.json";
+
+// Headless Robinhood data plane. Every declared provider Tool returns its live
+// result to the Agent. Only data consumed by the fixed foreground View is
+// normalized into SQLite; transient research/watchlist/options payloads never
+// become App state merely because a Tool was called.
 const nativeDb = (globalThis as any).db;
 const handle = nativeDb.open("robinhood");
 if (handle < 0) throw new Error("open robinhood.sqlite");
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 function dbError(): string { return String(nativeDb.lastError(handle) || "SQLite operation failed"); }
 function exec(sql: string): void { if (nativeDb.exec(handle, sql) !== 0) throw new Error(dbError()); }
@@ -76,47 +79,15 @@ if (Number(version?.user_version ?? 0) !== SCHEMA_VERSION) {
     error TEXT
   );
   CREATE INDEX IF NOT EXISTS refresh_runs_recent ON refresh_runs(id DESC);
-  CREATE TABLE IF NOT EXISTS equity_historicals (
-    account_number TEXT NOT NULL,
-    span TEXT NOT NULL,
-    point_time TEXT NOT NULL,
-    price TEXT,
-    open TEXT,
-    high TEXT,
-    low TEXT,
-    close TEXT,
-    volume TEXT,
-    observed_at INTEGER NOT NULL,
-    PRIMARY KEY(account_number, span, point_time)
-  );
-  CREATE TABLE IF NOT EXISTS pnl_trades (
-    account_number TEXT NOT NULL,
-    trade_id TEXT NOT NULL,
-    occurred_at TEXT,
-    symbol TEXT,
-    side TEXT,
-    quantity TEXT,
-    price TEXT,
-    realized_pnl TEXT,
-    observed_at INTEGER NOT NULL,
-    PRIMARY KEY(account_number, trade_id)
-  );
-  CREATE TABLE IF NOT EXISTS order_reviews (
-    review_id TEXT PRIMARY KEY,
-    account_number TEXT,
-    symbol TEXT,
-    side TEXT,
-    quantity TEXT,
-    limit_price TEXT,
-    estimated_cost TEXT,
-    state TEXT,
-    observed_at INTEGER NOT NULL
-  );
-    PRAGMA user_version=4;
+    PRAGMA user_version=5;
   `);
 }
 
 type DomainUpdate = { operation: string; args: any; value: any; observedAt: number };
+type ToolMetadata = { name: string; namespace: string; description: string; inputSchema: any };
+
+const providerTools = (toolCatalog as any).tools as ToolMetadata[];
+const providerToolByName = new Map(providerTools.map((tool) => [tool.name, tool]));
 
 function now(): number { return Math.floor(Date.now() / 1000); }
 function text(value: unknown): string | null {
@@ -153,12 +124,94 @@ function number(value: string | null): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 function accountNumber(value: any, args: any): string {
-  return deep(value, ["account_number", "accountNumber", "account"])
-    || String(args?.account_number ?? args?.accountNumber ?? "");
+  const requested = args?.account_number ?? args?.accountNumber;
+  return requested === null || requested === undefined || requested === ""
+    ? deep(value, ["account_number", "accountNumber", "account"]) || ""
+    : String(requested);
 }
 function list(value: any, names: string[]): any[] {
   const nested = deepArray(value, names);
   return nested.length ? nested : Array.isArray(value) ? value : value ? [value] : [];
+}
+
+function searchTools(args: any): any {
+  const exact = Array.isArray(args?.names)
+    ? new Set(args.names.filter((name: any) => typeof name === "string"))
+    : new Set<string>();
+  const words = String(args?.query ?? "").toLowerCase().split(/[^a-z0-9_]+/).filter(Boolean);
+  const namespace = typeof args?.namespace === "string" ? args.namespace : "";
+  if (!exact.size && !words.length) throw new Error("search_tools requires query or names");
+  const limit = Math.max(1, Math.min(8, Number(args?.limit ?? 5) || 5));
+  const matches = providerTools
+    .filter((tool) => !namespace || tool.namespace === namespace)
+    .map((tool) => {
+      const name = tool.name.toLowerCase();
+      const haystack = name + " " + tool.description.toLowerCase();
+      const score = exact.has(tool.name) ? 1000
+        : words.reduce((total, word) => total + (name === word ? 100 : name.includes(word) ? 20 : haystack.includes(word) ? 3 : 0), 0);
+      return { tool, score };
+    })
+    .filter((item) => item.score > 0)
+    .sort((left, right) => right.score - left.score || left.tool.name.localeCompare(right.tool.name))
+    .slice(0, limit)
+    .map(({ tool }) => ({
+      name: tool.name,
+      namespace: tool.namespace,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+    }));
+  return {
+    source: (toolCatalog as any).source,
+    protocolVersion: (toolCatalog as any).protocolVersion,
+    matches,
+  };
+}
+
+function matchesType(value: any, expected: string): boolean {
+  if (expected === "null") return value === null;
+  if (expected === "array") return Array.isArray(value);
+  if (expected === "object") return value !== null && typeof value === "object" && !Array.isArray(value);
+  if (expected === "integer") return typeof value === "number" && Number.isInteger(value);
+  if (expected === "number") return typeof value === "number" && Number.isFinite(value);
+  return typeof value === expected;
+}
+
+function validateSchema(value: any, schema: any, path = "arguments"): void {
+  const types = Array.isArray(schema?.type) ? schema.type : schema?.type ? [schema.type] : [];
+  if (types.length && !types.some((expected: string) => matchesType(value, expected))) {
+    throw new Error(path + " must be " + types.join(" or "));
+  }
+  if (value === null) return;
+  if (typeof value === "number") {
+    if (typeof schema.minimum === "number" && value < schema.minimum) throw new Error(path + " is below minimum " + schema.minimum);
+    if (typeof schema.maximum === "number" && value > schema.maximum) throw new Error(path + " exceeds maximum " + schema.maximum);
+  }
+  if (Array.isArray(value)) {
+    if (schema.items) value.forEach((item, index) => validateSchema(item, schema.items, path + "[" + index + "]"));
+    return;
+  }
+  if (typeof value !== "object") return;
+  const properties = schema.properties || {};
+  for (const required of schema.required || []) {
+    if (!(required in value)) throw new Error(path + "." + required + " is required");
+  }
+  if (schema.additionalProperties === false) {
+    for (const key of Object.keys(value)) {
+      if (!(key in properties)) throw new Error(path + "." + key + " is not allowed");
+    }
+  }
+  for (const [key, child] of Object.entries(value)) {
+    if (properties[key]) validateSchema(child, properties[key], path + "." + key);
+  }
+}
+
+function validatedProviderCall(args: any): any {
+  const operation = typeof args?.name === "string" ? args.name : "";
+  const tool = providerToolByName.get(operation);
+  if (!tool) throw new Error("Unknown Robinhood provider Tool: " + operation);
+  const providerArgs = args?.arguments;
+  validateSchema(providerArgs, tool.inputSchema);
+  return invokeProviderTool(operation, providerArgs);
 }
 
 function callTool(operation: string, args: any): any {
@@ -291,60 +344,14 @@ function saveRealizedPnl(value: any, args: any, observedAt: number): void {
   );
 }
 
-function saveHistoricals(value: any, args: any, observedAt: number): void {
-  const account = accountNumber(value, args);
-  const span = String(args?.span ?? args?.interval ?? "default");
-  const rows = list(value, ["historicals", "results", "data"]);
-  run("DELETE FROM equity_historicals WHERE account_number=? AND span=?", [account, span]);
-  rows.forEach((item, index) => {
-    const pointTime = deep(item, ["begins_at", "timestamp", "time", "date"]) || String(index);
-    run(
-      `INSERT INTO equity_historicals(account_number,span,point_time,price,open,high,low,close,volume,observed_at)
-       VALUES(?,?,?,?,?,?,?,?,?,?)`,
-      [account, span, pointTime, deep(item, ["price", "adjusted_close", "close_price"]), deep(item, ["open_price", "open"]), deep(item, ["high_price", "high"]), deep(item, ["low_price", "low"]), deep(item, ["close_price", "close"]), deep(item, ["volume"]), observedAt],
-    );
-  });
-}
-
-function savePnlTrades(value: any, args: any, observedAt: number): void {
-  const account = accountNumber(value, args);
-  const rows = list(value, ["trades", "results", "data"]);
-  run("DELETE FROM pnl_trades WHERE account_number=?", [account]);
-  rows.forEach((item, index) => {
-    const occurredAt = deep(item, ["created_at", "updated_at", "date", "timestamp"]);
-    const tradeId = deep(item, ["id", "trade_id", "tradeId"]) || [occurredAt || observedAt, deep(item, ["symbol"]) || "TRADE", index].join(":");
-    run(
-      `INSERT INTO pnl_trades(account_number,trade_id,occurred_at,symbol,side,quantity,price,realized_pnl,observed_at)
-       VALUES(?,?,?,?,?,?,?,?,?)`,
-      [account, tradeId, occurredAt, deep(item, ["symbol"]), (deep(item, ["side"]) || "").toUpperCase(), deep(item, ["quantity", "shares"]), deep(item, ["price", "average_price"]), deep(item, ["realized_pnl", "pnl", "amount"]), observedAt],
-    );
-  });
-}
-
-function saveOrderReview(value: any, args: any, observedAt: number): void {
-  const account = accountNumber(value, args);
-  const symbol = deep(value, ["symbol"]) || text(args?.symbol);
-  const side = (deep(value, ["side"]) || text(args?.side) || "").toUpperCase();
-  const quantity = deep(value, ["quantity", "shares"]) || text(args?.quantity);
-  const limitPrice = deep(value, ["limit_price", "limitPrice", "price"]) || text(args?.limit_price ?? args?.price);
-  const reviewId = deep(value, ["id", "review_id", "reviewId"]) || [account, symbol, side, quantity, limitPrice, observedAt].join(":");
-  run(
-    `INSERT OR REPLACE INTO order_reviews(review_id,account_number,symbol,side,quantity,limit_price,estimated_cost,state,observed_at)
-     VALUES(?,?,?,?,?,?,?,?,?)`,
-    [reviewId, account, symbol, side, quantity, limitPrice, deep(value, ["estimated_cost", "estimatedCost", "total"]), deep(value, ["state", "status"]), observedAt],
-  );
-}
-
-function save(update: DomainUpdate): void {
+function saveProjection(update: DomainUpdate): boolean {
   if (update.operation === "get_accounts") saveAccounts(update.value, update.observedAt);
   else if (update.operation === "get_portfolio") savePortfolio(update.value, update.args, update.observedAt);
   else if (update.operation === "get_equity_positions") savePositions(update.value, update.args, update.observedAt);
   else if (update.operation === "get_equity_orders") saveActivities(update.value, update.args, update.observedAt);
   else if (update.operation === "get_realized_pnl") saveRealizedPnl(update.value, update.args, update.observedAt);
-  else if (update.operation === "get_equity_historicals") saveHistoricals(update.value, update.args, update.observedAt);
-  else if (update.operation === "get_pnl_trade_history") savePnlTrades(update.value, update.args, update.observedAt);
-  else if (update.operation === "review_equity_order") saveOrderReview(update.value, update.args, update.observedAt);
-  else throw new Error("No Robinhood table mapping for " + update.operation);
+  else return false;
+  return true;
 }
 
 function isTransportFailure(message: string): boolean {
@@ -411,7 +418,7 @@ function refreshPortfolio(): any {
 
   const status = terminalError ? "failed" : errors.length ? "partial" : "succeeded";
   transaction(() => {
-    if (!terminalError) for (const update of updates) save(update);
+    if (!terminalError) for (const update of updates) saveProjection(update);
     run(
       `INSERT INTO refresh_runs(started_at,completed_at,status,operation_count,success_count,error)
        VALUES(?,?,?,?,?,?)`,
@@ -422,23 +429,63 @@ function refreshPortfolio(): any {
   return { status, operationCount, successCount: updates.length };
 }
 
-const toolOperations: Record<string, string> = {
-  "robinhood.get_accounts": "get_accounts",
-  "robinhood.get_portfolio": "get_portfolio",
-  "robinhood.get_equity_positions": "get_equity_positions",
-  "robinhood.get_equity_orders": "get_equity_orders",
-  "robinhood.get_equity_historicals": "get_equity_historicals",
-  "robinhood.get_realized_pnl": "get_realized_pnl",
-  "robinhood.get_pnl_trade_history": "get_pnl_trade_history",
-  "robinhood.review_equity_order": "review_equity_order",
-};
+function saveEquityAction(operation: string, value: any, args: any, observedAt: number): void {
+  const account = String(args?.account_number ?? args?.accountNumber ?? "");
+  if (!account) return;
+  const orderId = String(args?.order_id ?? deep(value, ["order_id", "orderId", "id"]) ?? "");
+  const activityId = orderId || [observedAt, args?.symbol || "EQUITY", operation].join(":");
+  const state = operation === "cancel_equity_order"
+    ? deep(value, ["state", "status"]) || "CANCEL_REQUESTED"
+    : deep(value, ["state", "status"]) || "SUBMITTED";
+  run(
+    `INSERT INTO activities(account_number,activity_id,occurred_at,observed_at,symbol,side,quantity,price,amount,state,activity_type)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?)
+     ON CONFLICT(account_number,activity_id) DO UPDATE SET
+       occurred_at=COALESCE(excluded.occurred_at,activities.occurred_at),
+       observed_at=excluded.observed_at,
+       symbol=COALESCE(excluded.symbol,activities.symbol),
+       side=COALESCE(excluded.side,activities.side),
+       quantity=COALESCE(excluded.quantity,activities.quantity),
+       price=COALESCE(excluded.price,activities.price),
+       state=excluded.state,
+       activity_type=excluded.activity_type`,
+    [
+      account,
+      activityId,
+      deep(value, ["created_at", "updated_at", "last_transaction_at"]),
+      observedAt,
+      args?.symbol ?? deep(value, ["symbol"]),
+      args?.side ?? deep(value, ["side"]),
+      args?.quantity ?? args?.dollar_amount ?? deep(value, ["quantity", "executed_quantity"]),
+      args?.limit_price ?? args?.stop_price ?? deep(value, ["price", "average_price"]),
+      args?.dollar_amount ?? null,
+      String(state).toUpperCase(),
+      operation === "cancel_equity_order" ? "EQUITY ORDER CANCEL" : "EQUITY ORDER",
+    ],
+  );
+}
 
-function invokeMappedTool(name: string, args: any): any {
-  const operation = toolOperations[name];
-  if (!operation) throw new Error("Unknown Robinhood tool: " + name);
+function invokeProviderTool(operation: string, args: any): any {
   const value = callTool(operation, args);
-  transaction(() => save({ operation, args, value, observedAt: now() }));
+  const update = { operation, args, value, observedAt: now() };
+  if (["get_accounts", "get_portfolio", "get_equity_positions", "get_equity_orders", "get_realized_pnl"].includes(operation)) {
+    transaction(() => saveProjection(update));
+  }
+  if (operation === "place_equity_order" || operation === "cancel_equity_order") {
+    // The order result directly affects the View's activity projection. Avoid
+    // nesting a second MCP request in the same 128 KiB QuickJS call stack;
+    // portfolio and positions converge on the normal refresh task.
+    transaction(() => saveEquityAction(operation, value, args, update.observedAt));
+  }
   return value;
+}
+
+function success(value: any): string {
+  // The Agent consumes Tool results through text. Keeping the same provider
+  // object in details would retain a second copy in QuickJS and again in the
+  // Rust/Agent message bridge, which is especially expensive for market-data
+  // and options responses.
+  return JSON.stringify({ text: JSON.stringify(value), isError: false });
 }
 
 (globalThis as any).PocketPiData = {
@@ -446,7 +493,7 @@ function invokeMappedTool(name: string, args: any): any {
     try {
       if (name !== "refreshPortfolio") throw new Error("Unknown Robinhood Data Action: " + name);
       const value = refreshPortfolio();
-      return JSON.stringify({ text: JSON.stringify(value), details: value, isError: false });
+      return success(value);
     } catch (error) {
       return JSON.stringify({ text: error instanceof Error ? error.message : String(error), isError: true });
     }
@@ -454,8 +501,11 @@ function invokeMappedTool(name: string, args: any): any {
   invokeTool(name: string, argsLine: string) {
     try {
       const args = JSON.parse(argsLine);
-      const value = name === "robinhood.refresh_portfolio" ? refreshPortfolio() : invokeMappedTool(name, args);
-      return JSON.stringify({ text: JSON.stringify(value), details: value, isError: false });
+      const value = name === "robinhood.refresh_portfolio" ? refreshPortfolio()
+        : name === "robinhood.search_tools" ? searchTools(args)
+        : name === "robinhood.call" ? validatedProviderCall(args)
+        : (() => { throw new Error("Unknown Robinhood Tool: " + name); })();
+      return success(value);
     } catch (error) {
       return JSON.stringify({ text: error instanceof Error ? error.message : String(error), isError: true });
     }

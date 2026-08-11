@@ -181,7 +181,7 @@ the embedded Agent. Provider request/streaming codecs live in
 `pocket-pi-protocols`; serial framing, desktop CLIs and ESP-IDF HTTPS stay in
 their platform layers.
 
-DeepSeek defaults to `deepseek-v4-pro` with thinking level `high`. Set
+DeepSeek defaults to `deepseek-v4-flash` with thinking level `high`. Set
 `DEEPSEEK_THINKING_LEVEL=xhigh` in the simulator, or pass
 `--thinking-level xhigh` while provisioning the physical board, to request the
 provider's `max` reasoning effort.

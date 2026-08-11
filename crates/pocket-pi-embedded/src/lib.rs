@@ -8,7 +8,7 @@ pub use pocket_pi_protocols::model::ModelStreamEvent;
 
 const AGENT_BUNDLE: &str = include_str!("../js/pi-agent.bundle.js");
 const PRELUDE: &str = include_str!("../js/prelude.js");
-const MODEL_WORKER_STACK_BYTES: usize = 64 * 1024;
+pub const MODEL_WORKER_STACK_BYTES: usize = 64 * 1024;
 const TOOL_WORKER_STACK_BYTES: usize = 16 * 1024;
 
 pub trait ModelBackend: Send + Sync {
@@ -99,66 +99,68 @@ impl GuestAgent {
         let (host_tx, host_rx) = mpsc::channel::<serde_json::Value>();
         let host_rx = Arc::new(Mutex::new(host_rx));
         let next_request = Arc::new(AtomicI32::new(1));
+        let (model_tx, model_rx) = mpsc::channel::<(i32, String)>();
+        let model_host_tx = host_tx.clone();
+        std::thread::Builder::new()
+            .name("pi-model".into())
+            .stack_size(MODEL_WORKER_STACK_BYTES)
+            .spawn(move || {
+                while let Ok((id, request)) = model_rx.recv() {
+                    let worker_tx = model_host_tx.clone();
+                    let mut emit = |event| {
+                        let event = match event {
+                            ModelStreamEvent::Thinking(delta) => serde_json::json!({
+                                "type":"model_progress",
+                                "id":id,
+                                "thinkingDelta":delta,
+                                "textDelta":"",
+                            }),
+                            ModelStreamEvent::Text(delta) => serde_json::json!({
+                                "type":"model_progress",
+                                "id":id,
+                                "thinkingDelta":"",
+                                "textDelta":delta,
+                            }),
+                        };
+                        let _ = worker_tx.send(event);
+                    };
+                    match backend.complete(&request, &mut emit) {
+                        Ok(result) => {
+                            let _ = worker_tx.send(serde_json::json!({
+                                "type":"model_done",
+                                "id":id,
+                                "result":result,
+                            }));
+                        }
+                        Err(error) => {
+                            let _ = worker_tx.send(serde_json::json!({
+                                "type":"model_error",
+                                "id":id,
+                                "error":format!("model backend failed: {error}"),
+                            }));
+                        }
+                    }
+                }
+            })
+            .map_err(|error| format!("spawn model worker: {error}"))?;
 
         guest
             .mount("host", {
-                let backend = backend.clone();
                 let tools = tools.clone();
                 move |ctx, host| {
                     host.set(
                         "startModel",
                         Function::new(ctx.clone(), {
-                            let backend = backend.clone();
+                            let model_tx = model_tx.clone();
                             let host_tx = host_tx.clone();
                             let next_request = next_request.clone();
                             move |request: String| -> i32 {
                                 let id = next_request.fetch_add(1, Ordering::Relaxed);
-                                let backend = backend.clone();
-                                let host_tx = host_tx.clone();
-                                let worker_tx = host_tx.clone();
-                                let spawn = std::thread::Builder::new()
-                                    .name(format!("pi-model-{id}"))
-                                    .stack_size(MODEL_WORKER_STACK_BYTES)
-                                    .spawn(move || {
-                                        let mut emit = |event| {
-                                            let event = match event {
-                                                ModelStreamEvent::Thinking(delta) => serde_json::json!({
-                                                    "type":"model_progress",
-                                                    "id":id,
-                                                    "thinkingDelta":delta,
-                                                    "textDelta":"",
-                                                }),
-                                                ModelStreamEvent::Text(delta) => serde_json::json!({
-                                                    "type":"model_progress",
-                                                    "id":id,
-                                                    "thinkingDelta":"",
-                                                    "textDelta":delta,
-                                                }),
-                                            };
-                                            let _ = worker_tx.send(event);
-                                        };
-                                        match backend.complete(&request, &mut emit) {
-                                            Ok(result) => {
-                                                let _ = worker_tx.send(serde_json::json!({
-                                                    "type":"model_done",
-                                                    "id":id,
-                                                    "result":result,
-                                                }));
-                                            }
-                                            Err(error) => {
-                                                let _ = worker_tx.send(serde_json::json!({
-                                                    "type":"model_error",
-                                                    "id":id,
-                                                    "error":format!("model backend failed: {error}"),
-                                                }));
-                                            }
-                                        }
-                                    });
-                                if let Err(error) = spawn {
+                                if model_tx.send((id, request)).is_err() {
                                     let _ = host_tx.send(serde_json::json!({
                                         "type":"model_error",
                                         "id":id,
-                                        "error":format!("spawn model worker: {error}"),
+                                        "error":"model worker stopped",
                                     }));
                                 }
                                 id
@@ -520,6 +522,7 @@ mod tests {
     struct ThinkingToolBackend {
         calls: AtomicUsize,
         requests: Arc<Mutex<Vec<serde_json::Value>>>,
+        threads: Arc<Mutex<Vec<std::thread::ThreadId>>>,
     }
 
     impl ModelBackend for ThinkingToolBackend {
@@ -528,6 +531,10 @@ mod tests {
             request_json: &str,
             on_event: &mut dyn FnMut(ModelStreamEvent),
         ) -> Result<String, String> {
+            self.threads
+                .lock()
+                .unwrap()
+                .push(std::thread::current().id());
             self.requests
                 .lock()
                 .unwrap()
@@ -584,8 +591,9 @@ mod tests {
     }
 
     #[test]
-    fn preserves_thinking_and_executes_multiple_tools_sequentially() {
+    fn one_model_worker_preserves_thinking_and_sequential_tools() {
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let threads = Arc::new(Mutex::new(Vec::new()));
         let executed = Arc::new(Mutex::new(Vec::new()));
         let guest = Guest::new().unwrap();
         let agent = GuestAgent::mount(
@@ -594,6 +602,7 @@ mod tests {
             Arc::new(ThinkingToolBackend {
                 calls: AtomicUsize::new(0),
                 requests: requests.clone(),
+                threads: threads.clone(),
             }),
             Arc::new(OrderedTools(executed.clone())),
         )
@@ -620,6 +629,9 @@ mod tests {
         assert!(done);
         assert_eq!(text, "complete");
         assert_eq!(*executed.lock().unwrap(), ["first", "second"]);
+        let threads = threads.lock().unwrap();
+        assert_eq!(threads.len(), 2);
+        assert_eq!(threads[0], threads[1]);
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0]["options"]["reasoning"], "high");

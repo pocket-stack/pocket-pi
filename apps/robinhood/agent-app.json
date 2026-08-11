@@ -1,21 +1,152 @@
 {
   "id": "robinhood",
-  "version": "1.0.0",
-  "dataVersion": 4,
-  "tools": [
-    {"name":"robinhood.get_accounts","description":"List Robinhood brokerage accounts. Read-only.","parameters":{"type":"object","properties":{},"additionalProperties":true}},
-    {"name":"robinhood.get_portfolio","description":"Read the latest portfolio for an account and save it to the App database.","parameters":{"type":"object","properties":{"account_number":{"type":"string"}},"additionalProperties":true}},
-    {"name":"robinhood.get_equity_positions","description":"Read equity positions and save them to the App database.","parameters":{"type":"object","properties":{"account_number":{"type":"string"}},"additionalProperties":true}},
-    {"name":"robinhood.get_equity_orders","description":"Read equity orders and save them to the App database.","parameters":{"type":"object","properties":{"account_number":{"type":"string"}},"additionalProperties":true}},
-    {"name":"robinhood.get_equity_historicals","description":"Read equity historicals and save them to the App database.","parameters":{"type":"object","properties":{"account_number":{"type":"string"}},"additionalProperties":true}},
-    {"name":"robinhood.get_realized_pnl","description":"Read realized P&L and save it to the App database.","parameters":{"type":"object","properties":{"account_number":{"type":"string"}},"additionalProperties":true}},
-    {"name":"robinhood.get_pnl_trade_history","description":"Read chronological realized P&L trade history.","parameters":{"type":"object","properties":{"account_number":{"type":"string"}},"additionalProperties":true}},
-    {"name":"robinhood.review_equity_order","description":"Review an equity order without submitting it.","parameters":{"type":"object","additionalProperties":true}},
-    {"name":"robinhood.refresh_portfolio","description":"Refresh accounts, portfolio, positions, orders and P&L into local SQLite.","parameters":{"type":"object","properties":{},"additionalProperties":false}},
-    {"name":"robinhood.storage_status","description":"Inspect this App's local SQLite schema, row counts, and bounded recent row summaries without contacting Robinhood.","parameters":{"type":"object","properties":{},"additionalProperties":false}}
+  "version": "1.1.0",
+  "dataVersion": 5,
+  "providerOperations": [
+    "add_option_to_watchlist",
+    "add_to_watchlist",
+    "cancel_equity_order",
+    "cancel_option_exercise",
+    "cancel_option_order",
+    "create_scan",
+    "create_watchlist",
+    "exercise_option",
+    "follow_watchlist",
+    "get_accounts",
+    "get_earnings_calendar",
+    "get_earnings_results",
+    "get_equity_fundamentals",
+    "get_equity_historicals",
+    "get_equity_orders",
+    "get_equity_positions",
+    "get_equity_price_book",
+    "get_equity_quotes",
+    "get_equity_tax_lots",
+    "get_equity_technical_indicators",
+    "get_equity_tradability",
+    "get_financials",
+    "get_index_historicals",
+    "get_index_quotes",
+    "get_indexes",
+    "get_limited_margin_upgrade_info",
+    "get_option_chains",
+    "get_option_historicals",
+    "get_option_instruments",
+    "get_option_level_upgrade_info",
+    "get_option_orders",
+    "get_option_positions",
+    "get_option_quotes",
+    "get_option_watchlist",
+    "get_pnl_trade_history",
+    "get_popular_watchlists",
+    "get_portfolio",
+    "get_realized_pnl",
+    "get_scanner_filter_specs",
+    "get_scans",
+    "get_watchlist_items",
+    "get_watchlists",
+    "place_equity_order",
+    "place_option_order",
+    "remove_from_watchlist",
+    "remove_option_from_watchlist",
+    "review_equity_order",
+    "review_option_order",
+    "run_scan",
+    "search",
+    "unfollow_watchlist",
+    "update_scan_config",
+    "update_scan_filters",
+    "update_watchlist"
   ],
-  "tasks": ["refreshPortfolio"],
+  "tools": [
+    {
+      "name": "robinhood.search_tools",
+      "description": "Search Pocket Pi's checked-in Robinhood Trading MCP catalog. Use this before robinhood.call whenever the exact upstream Tool and arguments are not already present in the conversation. Returns the official description, exact JSON Schema, Pocket Pi persistence behavior, and whether the Tool is a real account or real-money action. This performs no Robinhood request and writes no SQLite data.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Natural-language capability or Tool-name fragment to find."
+          },
+          "names": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional exact upstream Tool names to retrieve."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8,
+            "description": "Maximum matches. Defaults to 5."
+          },
+          "namespace": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "description": "Optional domain filter: account_portfolio, equity_trading, equity_market_data, option_trading, option_market_data, watchlists, scanners, or indexes."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "robinhood.call",
+      "description": "Invoke one upstream Robinhood Trading MCP Tool by its exact unnamespaced name. First use robinhood.search_tools and follow the returned JSON Schema and safety instructions. Pocket Pi validates arguments locally, native code enforces the checked-in allowlist, and the completed provider result is returned to the Agent. Never retry a real-money action with a new ref_id after an ambiguous transport result.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Exact upstream Tool name returned by robinhood.search_tools."
+          },
+          "arguments": {
+            "type": "object",
+            "description": "Arguments that satisfy that Tool's returned JSON Schema.",
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "name",
+          "arguments"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "robinhood.refresh_portfolio",
+      "description": "Refresh accounts, portfolio, equity positions, recent equity orders, and day/week realized P&L into robinhood.sqlite. This is a local Pocket Pi aggregate and does not place, modify, or cancel orders.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "robinhood.storage_status",
+      "description": "Inspect bounded Robinhood App SQLite table counts and recent run summaries without contacting Robinhood. Account numbers are returned only as suffixes.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    }
+  ],
+  "tasks": [
+    "refreshPortfolio"
+  ],
   "schedules": [
-    {"id":"portfolio-refresh","everyMinutes":5,"task":"refreshPortfolio","args":{}}
+    {
+      "id": "portfolio-refresh",
+      "everyMinutes": 5,
+      "task": "refreshPortfolio",
+      "args": {}
+    }
   ]
 }

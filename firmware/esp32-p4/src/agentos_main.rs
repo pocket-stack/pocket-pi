@@ -6,7 +6,7 @@ use std::time::Instant;
 use pocket_pi_agentos::{
     AppServiceHost, AppSupervisor, RoutedToolHost, DATA_ACTION_STACK_BYTES,
 };
-use pocket_pi_embedded::{AgentEvent, ModelBackend, ToolHost};
+use pocket_pi_embedded::{AgentEvent, ModelBackend, ToolHost, MODEL_WORKER_STACK_BYTES};
 use pocket_pi_protocols::model::ModelBackendSettings;
 use pocket_pi_tools::CoreToolHost;
 use pocketjs_esp32p4_ppa::{EspIdfPpaOps, RenderTargetState, Renderer};
@@ -126,7 +126,7 @@ pub fn run() -> anyhow::Result<()> {
         runtime_config.exa_api_key,
         runtime_config.robinhood_access_token,
     ));
-    let mut supervisor = with_data_action_pthread_config(|| {
+    let mut supervisor = with_psram_pthread_config(DATA_ACTION_STACK_BYTES, || {
         AppSupervisor::new(storage::WORKSPACE_ROOT, services)
     })?;
     supervisor.frame()?;
@@ -158,7 +158,11 @@ pub fn run() -> anyhow::Result<()> {
         "thinkingLevel":model_settings.thinking_level.id(),
         "systemPrompt":"You are Pi Agent, the first-class system App in Pocket Pi AgentOS on an ESP32-P4. You can manage the top-level /workspace and use installed App tools. Use /workspace for durable memory, notes, plans, and artifacts; read and update relevant files when continuity matters. Be concise. Robinhood data is owned by the Robinhood App; Exa research history is owned by the Exa App."
     });
-    supervisor.boot_agent(&config.to_string(), backend, Arc::new(routed_tools))?;
+    with_psram_pthread_config(MODEL_WORKER_STACK_BYTES, || {
+        supervisor
+            .boot_agent(&config.to_string(), backend, Arc::new(routed_tools))
+            .map_err(anyhow::Error::msg)
+    })?;
 
     let mut messages = vec![Message {
         role: "assistant",
@@ -504,24 +508,22 @@ pub fn run() -> anyhow::Result<()> {
     }
 }
 
-fn with_data_action_pthread_config<T>(
+fn with_psram_pthread_config<T>(
+    stack_size: usize,
     action: impl FnOnce() -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
-    // std::thread maps to ESP-IDF pthread. Its default stack allocation is
-    // internal RAM, where a QuickJS Data Action Guest cannot fit. Configure
-    // this worker family to use byte-addressable PSRAM. The Data Action thread
-    // must pass the allocation caps to its on-demand NET child; the platform
-    // default is restored before unrelated System App threads are created.
+    // Large persistent workers use PSRAM stacks. App Data passes this setting
+    // to its NET child; the platform default is restored after each spawn.
     let default = unsafe { esp_idf_svc::sys::esp_pthread_get_default_config() };
     let mut config = default;
-    config.stack_size = DATA_ACTION_STACK_BYTES;
+    config.stack_size = stack_size;
     config.inherit_cfg = true;
     config.pin_to_core = 1;
     config.stack_alloc_caps =
         esp_idf_svc::sys::MALLOC_CAP_SPIRAM | esp_idf_svc::sys::MALLOC_CAP_8BIT;
     let configured = unsafe { esp_idf_svc::sys::esp_pthread_set_cfg(&config) };
     if configured != esp_idf_svc::sys::ESP_OK {
-        anyhow::bail!("configure App Data Action pthread: ESP-IDF error 0x{configured:x}");
+        anyhow::bail!("configure PSRAM pthread: ESP-IDF error 0x{configured:x}");
     }
     let result = action();
     let restored = unsafe { esp_idf_svc::sys::esp_pthread_set_cfg(&default) };

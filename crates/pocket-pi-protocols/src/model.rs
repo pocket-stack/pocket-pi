@@ -32,7 +32,7 @@ impl WirelessProvider {
     pub fn default_model(self) -> Option<&'static str> {
         match self {
             Self::OpenAi => Some("gpt-5-mini"),
-            Self::DeepSeek => Some("deepseek-v4-pro"),
+            Self::DeepSeek => Some("deepseek-v4-flash"),
             Self::OpenRouter | Self::Anthropic => None,
         }
     }
@@ -131,7 +131,7 @@ mod tests {
             model: None,
             thinking_level: ThinkingLevel::Xhigh,
         };
-        assert_eq!(settings.resolved_model().unwrap(), "deepseek-v4-pro");
+        assert_eq!(settings.resolved_model().unwrap(), "deepseek-v4-flash");
         assert_eq!(settings.thinking_level.id(), "xhigh");
     }
 }

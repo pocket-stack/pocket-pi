@@ -1,11 +1,126 @@
 {
   "id": "exa",
-  "version": "1.0.0",
-  "dataVersion": 4,
+  "version": "1.1.0",
+  "dataVersion": 5,
   "tools": [
-    {"name":"research.search","description":"Search the web through Exa, return bounded source-linked highlights, and save the search to local history.","parameters":{"type":"object","properties":{"query":{"type":"string","minLength":1,"maxLength":2000},"numResults":{"type":"integer","minimum":1,"maximum":8},"searchType":{"type":"string","enum":["auto","fast","instant"]},"includeDomains":{"type":"array","items":{"type":"string"},"maxItems":8},"excludeDomains":{"type":"array","items":{"type":"string"},"maxItems":8}},"required":["query"],"additionalProperties":false}},
-    {"name":"research.fetch","description":"Fetch a bounded research document through Exa and save it as the latest opened document.","parameters":{"type":"object","properties":{"url":{"type":"string","maxLength":2048},"maxCharacters":{"type":"integer","minimum":200,"maximum":12000}},"required":["url"],"additionalProperties":false}},
-    {"name":"research.storage_status","description":"Return compact local SQLite counts, space usage, 7-day retention policy, and latest run status without contacting Exa.","parameters":{"type":"object","properties":{},"additionalProperties":false}}
+    {
+      "name": "research.search",
+      "description": "Search the web through Exa and save a bounded, source-linked result set to local history. Pocket Pi defaults to auto so Exa can balance quality and speed; explicitly use deep or deep-reasoning for harder research, and fast or instant when latency matters. Use category and publication dates for targeted news, filings, company, or publication research. company and people categories cannot be combined with publication-date filters or excludeDomains.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "description": "Natural-language web search query. Put the research question here; use the dedicated filter fields instead of site: or date syntax."
+          },
+          "numResults": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10,
+            "description": "Number of results to return. Defaults to Exa's standard 10-result page."
+          },
+          "searchType": {
+            "type": "string",
+            "enum": ["auto", "fast", "instant", "deep-lite", "deep", "deep-reasoning"],
+            "description": "Exa search mode. auto is the default and balances quality and speed; deep modes increase research depth, latency, and cost."
+          },
+          "category": {
+            "type": "string",
+            "enum": ["company", "publication", "news", "personal site", "financial report", "people"],
+            "description": "Optional Exa content category. Use financial report for filings and reports, news for current reporting, publication for papers, and company for official company pages."
+          },
+          "includeDomains": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1, "maxLength": 255},
+            "maxItems": 8,
+            "description": "Only return these domains or domain paths, for example sec.gov or investor.example.com."
+          },
+          "excludeDomains": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1, "maxLength": 255},
+            "maxItems": 8,
+            "description": "Exclude these domains or domain paths. Do not combine with company or people category."
+          },
+          "startPublishedDate": {
+            "type": "string",
+            "minLength": 10,
+            "maxLength": 35,
+            "description": "Only return sources published at or after this ISO 8601 date or date-time, for example 2026-01-01."
+          },
+          "endPublishedDate": {
+            "type": "string",
+            "minLength": 10,
+            "maxLength": 35,
+            "description": "Only return sources published at or before this ISO 8601 date or date-time."
+          },
+          "userLocation": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 2,
+            "description": "Optional two-letter ISO country code such as US for geographically relevant results."
+          },
+          "additionalQueries": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1, "maxLength": 2000},
+            "minItems": 1,
+            "maxItems": 10,
+            "description": "Optional query variations used only with deep-lite, deep, or deep-reasoning to broaden research."
+          },
+          "maxAgeHours": {
+            "type": "integer",
+            "minimum": -1,
+            "maximum": 720,
+            "description": "Maximum cached content age in hours: 0 forces a fresh crawl, -1 uses cache only, and omission uses Exa's normal fallback policy."
+          },
+          "moderation": {
+            "type": "boolean",
+            "description": "Ask Exa to filter unsafe content from search results."
+          }
+        },
+        "required": ["query"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "research.fetch",
+      "description": "Fetch one known URL through Exa as bounded clean text with metadata and crawl status. Use after research.search when highlights are insufficient. Set maxAgeHours to 0 only when a fresh crawl is necessary because it is slower and costs more.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048,
+            "description": "Exact HTTP or HTTPS URL returned by search or supplied by the user."
+          },
+          "maxCharacters": {
+            "type": "integer",
+            "minimum": 200,
+            "maximum": 12000,
+            "description": "Maximum clean-text characters returned and saved. Defaults to 6000."
+          },
+          "maxAgeHours": {
+            "type": "integer",
+            "minimum": -1,
+            "maximum": 720,
+            "description": "Maximum cached content age in hours: 0 forces a fresh crawl, -1 uses cache only, and omission uses Exa's normal fallback policy."
+          }
+        },
+        "required": ["url"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "research.storage_status",
+      "description": "Return compact local SQLite counts, space usage, the 7-day retention policy, and latest search status without contacting Exa.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    }
   ],
   "tasks": [],
   "schedules": []
