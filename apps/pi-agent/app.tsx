@@ -146,6 +146,15 @@ function BottomBar() {
 
 function ChatScreen() {
   const schedule = () => projection().schedule;
+  const schedulePreview = () => {
+    const current = schedule();
+    return wrapPreview(
+      String(current?.name) + "  " + String(current?.next ?? "") + "\n\n" + String(current?.prompt ?? ""),
+      FONT_BODY,
+      CHAT_TEXT_WIDTH,
+      5,
+    );
+  };
   return (
     <View class="flex-col w-full h-full bg-slate-50">
       <Header title="ESP32 PI AGENT" />
@@ -176,7 +185,7 @@ function ChatScreen() {
             <Text class="pt-6 text-lg text-slate-500">{"NO WAKE SCHEDULED\n\nASK PI TO CREATE ONE WITH SCHEDULE.SET"}</Text>
           }>
             <Text class="pt-6 text-lg text-slate-900 font-bold">
-              {String(schedule()?.name) + "  " + String(schedule()?.next ?? "") + "\n\n" + String(schedule()?.prompt ?? "")}
+              {schedulePreview()}
             </Text>
           </Show>
       </View>
