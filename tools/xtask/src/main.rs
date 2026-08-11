@@ -7,7 +7,6 @@ fn main() -> Result<()> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut args = std::env::args().skip(1);
     match (args.next().as_deref(), args.next().as_deref()) {
-        (Some("build"), Some("macos")) => cargo(&root, ["build", "-p", "pocket-pi-macos"]),
         (Some("build"), Some("agentos-apps")) => build_agentos_apps(&root),
         (Some("build"), Some("esp32-p4")) => {
             build_embedded_guest(&root)?;
@@ -28,10 +27,6 @@ fn main() -> Result<()> {
             build_embedded_guest(&root)?;
             cargo(&root, ["build", "-p", "pocket-pi-esp32-p4-sim"])
         }
-        (Some("run"), Some("macos")) => {
-            let rest = args.collect::<Vec<_>>();
-            cargo_with_args(&root, ["run", "-p", "pocket-pi-macos", "--"], &rest)
-        }
         (Some("run"), Some("esp32-p4-sim")) => {
             build_embedded_guest(&root)?;
             let rest = args.collect::<Vec<_>>();
@@ -49,7 +44,7 @@ fn main() -> Result<()> {
         }
         _ => {
             eprintln!(
-                "usage:\n  cargo xtask build macos|agentos-apps|esp32-p4|esp32-p4-sim\n  cargo xtask run macos|esp32-p4-sim [args]\n  cargo xtask snapshot esp32-p4-sim"
+                "usage:\n  cargo xtask build agentos-apps|esp32-p4|esp32-p4-sim\n  cargo xtask run esp32-p4-sim [args]\n  cargo xtask snapshot esp32-p4-sim"
             );
             bail!("unknown xtask command")
         }

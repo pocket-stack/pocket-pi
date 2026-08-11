@@ -1,36 +1,30 @@
 # Pocket Pi
 
 Pocket Pi runs the [Pi coding agent](https://github.com/badlogic/pi-mono) in
-QuickJS. It provides a full desktop runtime and an embedded profile whose
-touch UI is built with PocketJS for the ESP32-P4 product.
+QuickJS. Its touch UI is built with PocketJS for the ESP32-P4 product.
 
-This repository contains one Pocket Pi runtime family with two profiles and
-exactly three supported run modes:
+This repository contains one embedded Agent profile with two supported run modes:
 
 | Run mode | Agent profile | What it is for |
 |---|---|---|
-| Native macOS | Full `pi-coding-agent` | Normal desktop Pocket Pi, including sessions and extensions |
 | ESP32 simulator on macOS | Embedded `pi-agent-core` | Fast development of the ESP32 product UI, tools and Agent flows |
 | Physical ESP32-P4 | Embedded `pi-agent-core` | The real standalone PocketJS/QuickJS device |
 
-They are not three forks. The simulator and firmware compile the same embedded
-Agent, device UI, tool contracts and interaction state. Only their platform
-adapters differ.
+The simulator and firmware compile the same embedded Agent, device UI, tool
+contracts and interaction state. Only their platform adapters differ.
 
-> **Project status:** the macOS host, ESP32 simulator and physical
-> Waveshare ESP32-P4 target all have working end-to-end paths. The embedded
-> port is still board-specific and under active development; see
+> **Project status:** the ESP32 simulator and physical Waveshare ESP32-P4 target
+> have working end-to-end paths. The embedded port is still board-specific and
+> under active development; see
 > [Current validation](#current-validation) for the exact evidence and limits.
 
-## Why two profiles?
+## One product profile, two hosts
 
-The desktop runtime can afford a broad Node/Web compatibility layer and embeds
-the full, unmodified `pi-coding-agent`. An ESP32 cannot carry that entire
-desktop platform unchanged, so the embedded profile runs upstream
-`pi-agent-core` in QuickJS and implements the Pi tools as small native Rust
-capabilities.
+The embedded profile runs upstream `pi-agent-core` in QuickJS and implements Pi
+tools as small native Rust capabilities. The simulator is a product-contract
+host for fast development; the physical ESP32-P4 is the final product host.
 
-The architecture keeps the Pi Harness design in both profiles:
+The architecture keeps the Pi Harness design in both hosts:
 
 - the model decides when to call a tool;
 - tools have explicit schemas and return structured results;
@@ -46,7 +40,7 @@ adapters. Physical hardware remains the final acceptance target.
 
 ### Prerequisites
 
-- Rust stable for the native macOS host and simulator;
+- Rust stable for the simulator;
 - Bun for rebuilding the embedded JavaScript guest;
 - a logged-in `codex` CLI for the simulator's local Codex backend;
 - the esp-rs/ESP-IDF toolchain, `nightly-2026-05-01`, and `espflash` for the
@@ -55,31 +49,15 @@ adapters. Physical hardware remains the final acceptance target.
 The current firmware target is the
 **Waveshare ESP32-P4-WIFI6-Touch-LCD-5**.
 
-### Build all three modes
+### Build both modes
 
 ```sh
 cargo xtask build agentos-apps
-cargo xtask build macos
 cargo xtask build esp32-p4-sim
 cargo xtask build esp32-p4
 ```
 
-### 1. Native Pocket Pi on macOS
-
-```sh
-cargo xtask run macos 'Who are you?'
-```
-
-The host selects a model in this order:
-
-1. `OPENAI_API_KEY` with optional `OPENAI_MODEL`;
-2. `ANTHROPIC_API_KEY` with optional `ANTHROPIC_MODEL`;
-3. Pi's deterministic Faux Provider when neither key exists.
-
-The Faux Provider is an offline development fallback. It still runs through a
-real `createAgentSession`; it is not evidence of a live provider request.
-
-### 2. ESP32 Pocket Pi simulator on macOS
+### 1. ESP32 Pocket Pi simulator on macOS
 
 The simulator defaults to the Mac's existing Codex Coding Plan login:
 
@@ -115,7 +93,7 @@ deterministic UI snapshot with:
 cargo xtask snapshot esp32-p4-sim
 ```
 
-### 3. Physical Pocket Pi on ESP32-P4
+### 2. Physical Pocket Pi on ESP32-P4
 
 Build and flash the release firmware:
 
@@ -173,7 +151,6 @@ Backends belong to their host composition, not to the Agent core:
 
 | Host | Supported backends |
 |---|---|
-| Native macOS | OpenAI, Anthropic, offline Faux Provider |
 | ESP32 simulator | local Codex, OpenAI, OpenRouter, Anthropic, DeepSeek V4 |
 | Physical ESP32-P4 | UART to Mac Codex or Claude Code; wireless OpenAI, OpenRouter, Anthropic or DeepSeek V4 |
 
@@ -213,46 +190,18 @@ The shared PocketJS device UI includes:
 - Settings with Wi-Fi scanning, selection and password entry;
 - touch keyboard and next-schedule status.
 
-Settings is an embedded-device feature and is not linked into native macOS
-Pocket Pi. The embedded AgentOS ships Pi Agent as its resident System App and
-Robinhood and Exa as ordinary Apps. Each ordinary App owns its Tool catalog,
-Data Action, SQLite projection and fixed PocketJS View; native hosts provide
-only scoped credentials, transport and hardware adapters.
-
-## Desktop profile
-
-`crates/pocket-pi` embeds the full, unmodified `pi-coding-agent` bundle in one
-QuickJS realm. It provides enough Node/Web compatibility for Pi sessions,
-extensions, native tools and streaming model turns without requiring Node or
-Bun on the destination machine.
-
-Desktop extensions use Pi's normal `(pi) => void` factory and may register
-tools and lifecycle hooks. Pocket Pi transpiles TypeScript with oxc and injects
-the factory through Pi's `extensionFactories` seam; Pi itself is not patched.
-
-The desktop compatibility layer includes real filesystem, path, buffer,
-events, stream, process, synchronous subprocess and global streaming `fetch`
-support. Socket servers, worker threads and several lower-level Node builtins
-remain stubs. These desktop APIs are intentionally **not** part of the embedded
-ESP32 contract.
-
-The full Pi bundle is committed and embedded, so normal Rust builds do not need
-Node. Rebuild it only after changing the desktop JavaScript guest:
-
-```sh
-npm --prefix js ci
-npm --prefix js run build
-```
+The embedded AgentOS ships Pi Agent as its resident System App and Robinhood and
+Exa as ordinary Apps. Each ordinary App owns its Tool catalog, Data Action,
+SQLite projection and fixed PocketJS View; hosts provide only scoped
+credentials, transport and hardware adapters.
 
 ## Repository map
 
 ```text
-crates/pocket-pi/             full desktop pi-coding-agent runtime
 crates/pocket-pi-embedded/    embedded pi-agent-core guest and host traits
 crates/pocket-pi-tools/       portable workspace, shell, time and schedule tools
 crates/pocket-pi-protocols/   model request, response and streaming codecs
 crates/pocket-pi-agentos/     App Supervisor, System App lifecycle and App contracts
-hosts/macos/                  native desktop composition root
 hosts/esp32-p4-sim/           macOS adapters for the embedded product
 firmware/esp32-p4/            ESP-IDF hardware composition root and adapters
 tools/uart_bridge/            Mac Codex and Claude Code streaming adapters
@@ -261,30 +210,21 @@ tools/uart-model-bridge.py    UART framing and provisioning CLI
 
 Dependencies point inward: hosts depend on shared runtimes, tools, UI and
 protocols; those shared crates do not depend on a host. Hardware APIs remain in
-the firmware, macOS APIs remain in hosts/tools, and optional external services
-remain plugins.
+the firmware, simulator adapters remain in `hosts/esp32-p4-sim`, and optional
+external services remain Apps.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for ownership and lifecycle boundaries,
 and [docs/esp32-p4-port.md](docs/esp32-p4-port.md) for board-specific details.
 
 ## Current validation
 
-The following three paths were exercised end-to-end on **2026-08-05**:
+On **2026-08-11**, the embedded-only workspace completed 27 tests with no
+failures, passed workspace Clippy with warnings denied, and built the ESP32-P4
+simulator after rebuilding the Pi Agent, Robinhood and Exa bundles.
 
-| Mode | Exercised path | Result |
-|---|---|---|
-| Native macOS | Full `PiRuntime` and `createAgentSession` with Pi's offline Faux Provider | Passed |
-| ESP32 simulator | Embedded Agent + local Codex; `write -> read -> recurring schedule.set -> schedule.list`; shared UI rendering | Passed |
-| Physical ESP32-P4 | Release firmware + UART Mac Codex; streamed reply; real LittleFS `write/read`; recurring schedule creation/listing | Passed |
-
-The workspace suite also completed with 46 passing tests and 3 ignored tests,
-and workspace clippy passed with warnings denied. These results validate the
-recorded revision; they are not a substitute for CI on later changes.
-
-The physical `WirelessBackend` and provider codecs are implemented and compile,
-but a live ESP32 Wi-Fi -> OpenAI request was **not** exercised in that session
-because the available AP did not provide the required network route. Do not
-interpret the UART E2E as evidence for that separate network path.
+Physical firmware, boot, Wi-Fi/DHCP, provider calls and unattended memory
+pressure remain separate evidence tiers. A successful simulator build is not a
+substitute for fresh physical-board acceptance.
 
 ## Development checks
 

@@ -1,12 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/pocket-pi",
     "crates/pocket-pi-agentos",
     "crates/pocket-pi-embedded",
     "crates/pocket-pi-protocols",
     "crates/pocket-pi-tools",
-    "hosts/macos",
     "hosts/esp32-p4-sim",
     "tools/xtask",
 ]

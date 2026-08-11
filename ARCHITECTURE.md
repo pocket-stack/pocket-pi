@@ -1,10 +1,9 @@
 # Pocket Pi architecture
 
-Pocket Pi is one AgentOS runtime family with three host profiles:
+Pocket Pi is one embedded AgentOS runtime with two hosts:
 
 | Run mode | Host | Agent profile |
 | --- | --- | --- |
-| Native Mac | `hosts/macos` | full `pi-coding-agent` |
 | ESP32 simulator | `hosts/esp32-p4-sim` | embedded `pi-agent-core` System App |
 | ESP32-P4 | `firmware/esp32-p4` | embedded `pi-agent-core` System App |
 
@@ -45,12 +44,10 @@ top-level `/workspace` and cross-App Tool Registry.
 
 ```text
 apps/                       PocketJS System/ordinary App sources and bundles
-crates/pocket-pi/           full desktop pi-coding-agent runtime
 crates/pocket-pi-agentos/   App Supervisor and AgentOS contracts
 crates/pocket-pi-embedded/  embedded pi-agent-core bridge and host traits
 crates/pocket-pi-tools/     native workspace/shell/time/schedule Tools
 crates/pocket-pi-protocols/ provider codecs
-hosts/macos/                native desktop composition root
 hosts/esp32-p4-sim/         embedded AgentOS simulator
 firmware/esp32-p4/          ESP-IDF hardware composition root
 tools/uart_bridge/          Mac Codex/Claude streaming adapters
@@ -61,7 +58,6 @@ tools/uart-model-bridge.py  UART framing and provisioning CLI
 
 ```sh
 cargo xtask build agentos-apps
-cargo xtask build macos
 cargo xtask build esp32-p4
 cargo xtask build esp32-p4-sim
 cargo xtask run esp32-p4-sim

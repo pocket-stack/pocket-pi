@@ -1,10 +1,9 @@
 # ESP32-P4 host
 
-Pocket Pi has two agent profiles and three hosts:
+Pocket Pi has one embedded agent profile and two hosts:
 
 | Target | Agent profile | Runs on |
 |---|---|---|
-| `macos` | full `pi-coding-agent` | macOS |
 | `esp32-p4` | bounded `pi-agent-core` | ESP32-P4 |
 | `esp32-p4-sim` | bounded `pi-agent-core` | macOS |
 
@@ -19,7 +18,6 @@ The physical host selects `UartBackend` for a Mac Codex/Claude Code bridge or
 host adapters; they do not belong in the UI or embedded Agent core.
 
 ```sh
-cargo xtask build macos
 cargo xtask build esp32-p4
 cargo xtask build esp32-p4-sim
 cargo xtask run esp32-p4-sim

@@ -73,8 +73,7 @@ catalog、Agent Tool ownership 或后台任务生命周期。如果其中某个 
 5. SQLite 是 App 数据的唯一持久化真相；成功写入后，正在显示的 View 自动
    更新，但不能每帧轮询数据库。
 6. 普通 App 彼此隔离；Pi Agent 始终拥有整个 `/workspace`。
-7. 同一套 App 源码和 Module contract 可以在 macOS、模拟器、ESP32-P4 和
-   后续硬件上复用。
+7. 同一套 App 源码和 Module contract 可以在模拟器、ESP32-P4 和后续硬件上复用。
 8. Agent 工作与前台 View 导航解耦：模型/Tool 在运行时，触摸、键盘、切换
    Robinhood/Exa 和返回 Agent 都不能中断或重建 Agent。
 
@@ -810,10 +809,10 @@ Agent 能在未来通过更新自己的 release 一起演进 context、Tools ada
 - 修改 firmware/Rust modules；
 - v1 动态加载 Tool source。
 
-### 14.3 macOS 开发能力
+### 14.3 开发机能力
 
-macOS Host 可以额外提供显式 developer capability，用来编辑源码和构建
-Root/App Bundles。它不属于 ESP32 portable contract。
+开发机可以编辑源码和构建 Root/App Bundles；该构建流程不属于 ESP32
+portable contract，也不是独立的 Pocket Pi Agent Host。
 
 ## 15. Context Assembler
 
@@ -897,18 +896,16 @@ Guest 中运行，但 Root View 暂不产生前台 DrawList。用户仍可操作
 | Chat、Files、keyboard、message reader | Root PocketJS View |
 | Wi-Fi scan/connect/forget、restart | `device.settings` + Root View |
 | simulator/physical contract parity | shared runtime/module contracts |
-| macOS full Pi sessions/extensions | macOS Agent profile |
 
 新增而不是现有的能力包括：App Supervisor、App Catalog、App Tools、AppTask
 Schedules、revision-coalesced projection cache 和 Bundle-based Views。
 
 ## 19. Host profiles 与跨硬件
 
-Pocket Pi 继续保留不同 Agent profile：
+Pocket Pi 保留一个 embedded Agent profile，由两个 Host 实现：
 
 | Host | Agent profile | 额外能力 |
 | --- | --- | --- |
-| macOS | full `pi-coding-agent` | sessions、extensions、可选 Bundle 开发/构建 |
 | ESP32 simulator | embedded `pi-agent-core` | 用 macOS adapter 实现相同 embedded contracts |
 | ESP32-P4 | embedded `pi-agent-core` | LittleFS、touch/LCD、Wi-Fi/NVS 和嵌入式 limits |
 
@@ -926,8 +923,8 @@ Pocket Pi 继续保留不同 Agent profile：
    生成 target-specific `app.js`/`app.pak`。
 
 以 Robinhood 为例，Tool mapping、SQLite schema、refresh Task 和 View source
-保持相同；ESP32 与 macOS 只是在同一 specs 后面提供不同 display、filesystem、
-network 和 credential 实现。
+保持相同；ESP32 与 simulator 只是在同一 specs 后面提供不同 display、
+filesystem、network 和 credential 实现。
 
 ### 19.2 能做到跨硬件的条件
 
@@ -1116,8 +1113,8 @@ isolation 和 lifecycle。App Bundle 拥有名称、schema、provider mapping、
 - release 已有 descriptor/`pocket.json` 校验和 atomic `current` 写入，但由
   PocketJS resolver 生成并校验真实 `plan.json`、完整 artifact hash、migration
   transaction、上一版本回退和独立 recovery UI 还没有完成。
-- macOS full Agent Host 尚未迁到同一个 App Supervisor；当前跨硬件实证是
-  ESP32 simulator + physical ESP32-P4，不代表 macOS parity 已完成。
+- 当前跨硬件实证是 ESP32 simulator + physical ESP32-P4；simulator 证明共享
+  product contract，最终硬件验收仍以实体设备为准。
 - 固定 catalog 的普通 App View 现在全部在 Supervisor 启动时 preload；真实
   ESP32-P4 启动时长已量测，但持续切换仍需人工验收。后续如果 catalog
   扩大，再依据实测在 PocketJS runtime 层设计加载策略，不能先引入 Marketplace、
@@ -1158,7 +1155,7 @@ preload 全部普通 View。Marketplace 是独立的后续项目，不属于当�
    后再实现 live Tool hot-plug。
 6. catalog 规模扩大并取得板上内存/启动时长证据后，再设计 lazy load、pinning、LRU
    或 residency policy，不提前把这些策略写进 v1。
-7. 最后补 distribution index、版本 channel、更新策略，以及 macOS/Simulator/ESP32
+7. 最后补 distribution index、版本 channel、更新策略，以及 Simulator/ESP32
    同一 package 的兼容性验证。
 
 仍明确延后：ESP32 source editing、Agent-authored Tools、通用 live Tool hot-plug，以及
