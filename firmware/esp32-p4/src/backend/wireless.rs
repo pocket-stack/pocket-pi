@@ -69,19 +69,19 @@ impl WirelessBackend {
         body: &str,
         headers: &[(&str, &str)],
         on_event: &mut dyn FnMut(ModelStreamEvent),
-    ) -> Result<String, String> {
+    ) -> Result<String, SendError> {
         let mut request = client
             .request(Method::Post, endpoint, headers)
-            .map_err(|error| format!("create model request: {error}"))?;
+            .map_err(|error| SendError::BeforeResponse(format!("create model request: {error}")))?;
         request
             .write_all(body.as_bytes())
-            .map_err(|error| format!("write model request: {error}"))?;
+            .map_err(|error| SendError::BeforeResponse(format!("write model request: {error}")))?;
         request
             .flush()
-            .map_err(|error| format!("flush model request: {error}"))?;
+            .map_err(|error| SendError::BeforeResponse(format!("flush model request: {error}")))?;
         let mut response = request
             .submit()
-            .map_err(|error| format!("send model request: {error}"))?;
+            .map_err(|error| SendError::BeforeResponse(format!("send model request: {error}")))?;
         let status = response.status();
         let mut decoder = match self.provider {
             WirelessProvider::Anthropic => ProviderStream::Anthropic(Default::default()),
@@ -97,30 +97,32 @@ impl WirelessBackend {
         loop {
             let count = response
                 .read(&mut chunk)
-                .map_err(|error| format!("read model stream: {error}"))?;
+                .map_err(|error| SendError::AfterResponse(format!("read model stream: {error}")))?;
             if count == 0 {
                 break;
             }
             pending.extend_from_slice(&chunk[..count]);
             if (200..300).contains(&status) {
-                drain_sse_lines(&mut pending, &mut decoder, on_event)?;
+                drain_sse_lines(&mut pending, &mut decoder, on_event)
+                    .map_err(SendError::AfterResponse)?;
             }
         }
         if !(200..300).contains(&status) {
-            return Err(format!(
+            return Err(SendError::AfterResponse(format!(
                 "{} returned HTTP {status}: {}",
                 self.provider.id(),
                 String::from_utf8_lossy(&pending)
                     .chars()
                     .take(400)
                     .collect::<String>()
-            ));
+            )));
         }
         if !pending.is_empty() {
             pending.push(b'\n');
-            drain_sse_lines(&mut pending, &mut decoder, on_event)?;
+            drain_sse_lines(&mut pending, &mut decoder, on_event)
+                .map_err(SendError::AfterResponse)?;
         }
-        decoder.finish()
+        decoder.finish().map_err(SendError::AfterResponse)
     }
 }
 
@@ -153,21 +155,44 @@ impl ModelBackend for WirelessBackend {
 
         MODEL_CLIENT.with(|slot| {
             let mut client = slot.borrow_mut();
-            if client.is_none() {
-                *client = Some(Self::connect()?);
+            let mut retried = false;
+            loop {
+                if client.is_none() {
+                    *client = Some(Self::connect()?);
+                }
+                match self.send(
+                    client.as_mut().unwrap(),
+                    endpoint,
+                    &body,
+                    &headers,
+                    on_event,
+                ) {
+                    Ok(value) => return Ok(value),
+                    Err(SendError::BeforeResponse(error)) if !retried => {
+                        log::warn!("model transport retry after: {error}");
+                        *client = None;
+                        retried = true;
+                    }
+                    Err(error) => {
+                        *client = None;
+                        return Err(error.message());
+                    }
+                }
             }
-            let result = self.send(
-                client.as_mut().unwrap(),
-                endpoint,
-                &body,
-                &headers,
-                on_event,
-            );
-            if result.is_err() {
-                *client = None;
-            }
-            result
         })
+    }
+}
+
+enum SendError {
+    BeforeResponse(String),
+    AfterResponse(String),
+}
+
+impl SendError {
+    fn message(self) -> String {
+        match self {
+            Self::BeforeResponse(message) | Self::AfterResponse(message) => message,
+        }
     }
 }
 
