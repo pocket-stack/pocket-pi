@@ -81,3 +81,108 @@ export function wrapPreview(
   visible[last] = visible[last].replace(/[\s.]+$/, "") + "…";
   return visible.join("\n");
 }
+
+export type WrappedTextPage = {
+  text: string;
+  nextOffset: number;
+  startSourceLine: number;
+  nextSourceLine: number;
+  lastSourceLine: number;
+  hasMore: boolean;
+};
+
+type VisualLine = {
+  text: string;
+  nextOffset: number;
+  sourceLineEnded: boolean;
+};
+
+function nextVisualLine(
+  text: string,
+  maxWidth: number,
+  startOffset: number,
+  width: (value: string) => number,
+): VisualLine {
+  let offset = startOffset;
+  while (offset < text.length && text[offset] === " ") offset += 1;
+
+  const lineStart = offset;
+  let line = "";
+  let lineWidth = 0;
+  let lastSpaceOffset = -1;
+  let lastSpaceIndex = -1;
+
+  while (offset < text.length) {
+    const character = text[offset];
+    if (character === "\n" || character === "\r") {
+      const nextOffset = character === "\r" && text[offset + 1] === "\n" ? offset + 2 : offset + 1;
+      return { text: line.replace(/\s+$/, ""), nextOffset, sourceLineEnded: true };
+    }
+
+    const characterWidth = width(character);
+    if (line && lineWidth + characterWidth > maxWidth) {
+      if (lastSpaceOffset > lineStart) {
+        return {
+          text: line.slice(0, lastSpaceIndex).replace(/\s+$/, ""),
+          nextOffset: lastSpaceOffset,
+          sourceLineEnded: false,
+        };
+      }
+      return { text: line, nextOffset: offset, sourceLineEnded: false };
+    }
+
+    line += character;
+    lineWidth += characterWidth;
+    offset += 1;
+    if (character === " ") {
+      lastSpaceOffset = offset;
+      lastSpaceIndex = line.length - 1;
+    }
+  }
+
+  return { text: line.replace(/\s+$/, ""), nextOffset: offset, sourceLineEnded: false };
+}
+
+// Materialize only the visual lines on one page. The cursor advances directly
+// through the source string, so even a multi-megabyte physical line never gets
+// sliced, split, or fully wrapped in memory.
+export function wrapTextPage(
+  text: string,
+  fontSlot: number,
+  maxWidth: number,
+  startOffset: number,
+  startSourceLine: number,
+  maxLines: number,
+): WrappedTextPage {
+  const lineLimit = Math.max(0, Math.floor(maxLines));
+  const lines: string[] = [];
+  let offset = Math.max(0, Math.min(Math.floor(startOffset), text.length));
+  let sourceLine = Math.max(0, Math.floor(startSourceLine));
+  let lastSourceLine = sourceLine;
+  const widths = new Map<string, number>();
+  const width = (value: string) => {
+    let measured = widths.get(value);
+    if (measured === undefined) {
+      measured = getOps().measureText(value, fontSlot);
+      widths.set(value, measured);
+    }
+    return measured;
+  };
+
+  while (offset < text.length && lines.length < lineLimit) {
+    const visualLine = nextVisualLine(text, maxWidth, offset, width);
+    lastSourceLine = sourceLine;
+    lines.push(visualLine.text);
+    offset = visualLine.nextOffset;
+    if (visualLine.sourceLineEnded) sourceLine += 1;
+  }
+
+  return {
+    text: lines.join("\n"),
+    nextOffset: offset,
+    startSourceLine: Math.max(0, Math.floor(startSourceLine)),
+    nextSourceLine: sourceLine,
+    lastSourceLine,
+    hasMore: offset < text.length,
+  };
+}

@@ -33,8 +33,8 @@ body 16→18px；不会引入 runtime font loader 或第二套字体。
 | `EmptyState` | optional icon、title、detail、regular/compact layout | empty 条件、retry action | Exa、Robinhood |
 | `MetricCard` | metric label、formatted value、optional positive/negative tone | 数值计算、currency formatting、time range | Robinhood value/cash/buying power |
 | `StatusBar` | 单行 runtime status、neutral/error tone、light/dark surface | log history、progress model、retry | Exa SQLite state、Robinhood refresh state |
-| `ScrollButtons` | UP/DN controls 的统一文字和视觉 | offset、pagination、tap hit testing | Pi Agent、Robinhood |
-| `wrapLines` / `wrapPreview` | `measureText` 缓存、显式换行、preview ellipsis | rich text、Markdown、scroll state | Pi Agent dynamic text |
+| `ScrollButtons` | UP/DN controls 的统一文字和视觉 | offset、pagination、tap hit testing | Pi Agent、Exa、Robinhood |
+| `wrapLines` / `wrapPreview` / `wrapTextPage` | `measureText` 缓存、显式换行、preview ellipsis、按字符游标只物化可见文件页 | rich text、Markdown、scroll state | Pi Agent dynamic text / Files viewer |
 
 ## App-owned components
 

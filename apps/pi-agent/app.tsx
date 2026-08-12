@@ -3,13 +3,16 @@ import { Text, View } from "@pocketjs/framework/components";
 import { mount } from "@pocketjs/framework";
 import { readFileSync, readdirSync, type DirEntry } from "@pocketjs/framework/fs";
 import { ActionButton, PocketHeader, ScrollButtons } from "../_shared/ui";
-import { wrapLines, wrapPreview } from "../_shared/text";
+import { wrapLines, wrapPreview, wrapTextPage, type WrappedTextPage } from "../_shared/text";
 
 const FONT_BODY = 3;
-const FONT_CAPTION = 2;
+const FONT_CHAT = 4;
+const FONT_READER = 4;
+const FONT_FILE = 2;
 const CHAT_TEXT_WIDTH = 536;
 const READER_TEXT_WIDTH = 544;
-const READER_PAGE_LINES = 39;
+const READER_PAGE_LINES = 36;
+const FILE_PAGE_LINES = 39;
 
 type Message = { role: string; text: string };
 type Network = { ssid: string; rssiDbm: number; secured: boolean };
@@ -38,7 +41,15 @@ type Tab = "chat" | "files" | "apps" | "settings";
 type Screen = Tab | "keyboard" | "viewer" | "reader";
 type KeyboardPurpose = { type: "prompt" } | { type: "wifi"; ssid: string };
 type FileEntry = { name: string; kind: "file" | "dir"; size: number };
-type Reader = { author: "YOU" | "PI"; text: string };
+type ViewerPageStart = { offset: number; sourceLine: number };
+type Viewer = {
+  path: string;
+  text: string;
+  pageIndex: number;
+  pageStarts: ViewerPageStart[];
+  page: WrappedTextPage;
+};
+type Reader = { author: "YOU" | "PI"; lines: string[] };
 
 const [projection, setProjection] = createSignal<Projection>({
   agent: "STARTING",
@@ -52,7 +63,7 @@ const [filePath, setFilePath] = createSignal("");
 const [fileOffset, setFileOffset] = createSignal(0);
 const [files, setFiles] = createSignal<FileEntry[]>([]);
 const [fileError, setFileError] = createSignal("");
-const [viewer, setViewer] = createSignal<{ path: string; text: string; lineOffset: number } | null>(null);
+const [viewer, setViewer] = createSignal<Viewer | null>(null);
 const [reader, setReader] = createSignal<Reader | null>(null);
 const [readerOffset, setReaderOffset] = createSignal(0);
 const [input, setInput] = createSignal("");
@@ -75,6 +86,32 @@ function formatSize(size: number): string {
 
 function joinPath(parent: string, name: string): string {
   return parent ? parent + "/" + name : name;
+}
+
+function filePage(text: string, start: ViewerPageStart): WrappedTextPage {
+  return wrapTextPage(text, FONT_FILE, READER_TEXT_WIDTH, start.offset, start.sourceLine, FILE_PAGE_LINES);
+}
+
+function openViewer(path: string, text: string) {
+  const start = { offset: 0, sourceLine: 0 };
+  setViewer({ path, text, pageIndex: 0, pageStarts: [start], page: filePage(text, start) });
+  setScreen("viewer");
+}
+
+function moveViewerPage(direction: -1 | 1) {
+  const current = viewer();
+  if (!current) return;
+  const nextIndex = current.pageIndex + direction;
+  if (nextIndex < 0 || (direction > 0 && !current.page.hasMore)) return;
+  let start = current.pageStarts[nextIndex];
+  if (!start) {
+    start = {
+      offset: current.page.nextOffset,
+      sourceLine: current.page.nextSourceLine,
+    };
+    current.pageStarts.push(start);
+  }
+  setViewer({ ...current, pageIndex: nextIndex, page: filePage(current.text, start) });
 }
 
 function refreshFiles(path = filePath(), force = false) {
@@ -162,18 +199,18 @@ function ChatScreen() {
       <Header title="ESP32 PI AGENT" />
       <View class="h-[686] px-6 pt-7 flex-col gap-[22]">
         <For each={visibleTurns()}>{(turn) => (
-          <View class="w-[584] h-[298] px-6 py-5 flex-col rounded-xl shadow bg-white border-slate-100">
-              <View class="h-[28] flex-row items-center gap-3">
+          <View class="w-[584] h-[318] px-6 py-5 flex-col rounded-xl shadow bg-white border-slate-100">
+              <View class="h-[30] flex-row items-center gap-3">
                 <View class="w-[10] h-[10] rounded bg-orange-500" />
-                <Text class="text-base text-orange-600 font-bold">YOU</Text>
+                <Text class="text-lg text-orange-600 font-bold">YOU</Text>
               </View>
-              <Text class="h-[76] pt-3 text-lg text-slate-900">{wrapPreview(turn.user, FONT_BODY, CHAT_TEXT_WIDTH, 3)}</Text>
+              <Text class="h-[84] pt-3 text-xl text-slate-900">{wrapPreview(turn.user, FONT_CHAT, CHAT_TEXT_WIDTH, 3)}</Text>
               <View class="h-[2] mx-1 my-4 bg-slate-100" />
-              <View class="h-[28] flex-row items-center gap-3">
+              <View class="h-[30] flex-row items-center gap-3">
                 <View class="w-[10] h-[10] rounded bg-emerald-500" />
-                <Text class="text-base text-emerald-700 font-bold">PI</Text>
+                <Text class="text-lg text-emerald-700 font-bold">PI</Text>
               </View>
-              <Text class="h-[84] pt-3 text-lg text-slate-900">{wrapPreview(turn.assistant, FONT_BODY, CHAT_TEXT_WIDTH, 3)}</Text>
+              <Text class="h-[84] pt-3 text-xl text-slate-900">{wrapPreview(turn.assistant, FONT_CHAT, CHAT_TEXT_WIDTH, 3)}</Text>
           </View>
         )}</For>
         <ScrollButtons
@@ -348,17 +385,17 @@ function KeyboardScreen() {
 
 function ViewerScreen() {
   const current = () => viewer();
-  const lines = () => (current()?.text ?? "").split("\n");
-  const offset = () => current()?.lineOffset ?? 0;
   return (
     <View class="flex-col w-full h-full bg-slate-50">
       <Header title="< FILE VIEWER" />
       <View class="h-[1168] px-6 pt-5 flex-col">
         <View class="h-[82] px-4 justify-center bg-white"><Text class="text-lg text-slate-900 font-bold">{current()?.path ?? "NO FILE OPEN"}</Text></View>
         <View class="w-[584] h-[900] px-5 pt-5 bg-slate-950">
-          <Text class="text-base text-slate-200">{lines().slice(offset(), offset() + 39).join("\n")}</Text>
+          <Text class="text-base text-slate-200">{current()?.page.text ?? ""}</Text>
         </View>
-        <Text class="pt-3 text-base text-slate-500">{"LINES " + String(offset() + 1) + "-" + String(Math.min(offset() + 39, lines().length)) + " / " + String(lines().length)}</Text>
+        <Text class="pt-3 text-base text-slate-500">{current()
+          ? "PAGE " + String(current()!.pageIndex + 1) + "  ·  SOURCE LINES " + String(current()!.page.startSourceLine + 1) + "-" + String(current()!.page.lastSourceLine + 1)
+          : "NO FILE OPEN"}</Text>
         <ScrollButtons
           top="absolute left-[628] top-[58] w-[68] h-[132] items-center justify-center bg-orange-100"
           bottom="absolute left-[628] top-[828] w-[68] h-[132] items-center justify-center bg-orange-100"
@@ -370,13 +407,12 @@ function ViewerScreen() {
 
 function ReaderScreen() {
   const current = () => reader();
-  const lines = () => wrapLines(current()?.text ?? "", FONT_CAPTION, READER_TEXT_WIDTH);
   return (
     <View class="flex-col w-full h-full bg-slate-50">
       <Header title="< MESSAGE READER" />
       <View class="h-[1168] px-6 pt-5 flex-col">
         <View class="h-[82] px-4 justify-center bg-white"><Text class="text-lg text-orange-600 font-bold">{current()?.author ?? "PI"}</Text></View>
-        <View class="w-[584] h-[900] px-5 pt-5 bg-white"><Text class="text-base text-slate-900">{lines().slice(readerOffset(), readerOffset() + READER_PAGE_LINES).join("\n")}</Text></View>
+        <View class="w-[584] h-[900] px-5 pt-5 bg-white"><Text class="text-xl text-slate-900">{(current()?.lines ?? []).slice(readerOffset(), readerOffset() + READER_PAGE_LINES).join("\n")}</Text></View>
         <ScrollButtons
           top="absolute left-[628] top-[58] w-[68] h-[132] items-center justify-center bg-orange-100"
           bottom="absolute left-[628] top-[828] w-[68] h-[132] items-center justify-center bg-orange-100"
@@ -506,9 +542,9 @@ queueMicrotask(() => refreshFiles("", true));
         setViewer(null);
         setScreen("files");
       } else if (current && x >= 620 && y >= 170 && y <= 340) {
-        setViewer({ ...current, lineOffset: Math.max(0, current.lineOffset - 18) });
+        moveViewerPage(-1);
       } else if (current && x >= 620 && y >= 920 && y <= 1100) {
-        setViewer({ ...current, lineOffset: Math.min(Math.max(0, current.text.split("\n").length - 39), current.lineOffset + 18) });
+        moveViewerPage(1);
       }
       return "";
     }
@@ -520,7 +556,7 @@ queueMicrotask(() => refreshFiles("", true));
       } else if (x >= 620 && y >= 170 && y <= 340) {
         setReaderOffset(Math.max(0, readerOffset() - 18));
       } else if (x >= 620 && y >= 920 && y <= 1100) {
-        const lineCount = wrapLines(reader()?.text ?? "", FONT_CAPTION, READER_TEXT_WIDTH).length;
+        const lineCount = reader()?.lines.length ?? 0;
         setReaderOffset(Math.min(Math.max(0, lineCount - READER_PAGE_LINES), readerOffset() + 18));
       }
       return "";
@@ -532,12 +568,13 @@ queueMicrotask(() => refreshFiles("", true));
     if (screen() === "chat") {
       if (x >= 620 && y >= 140 && y <= 272) setChatScroll(chatScroll() + 2);
       else if (x >= 620 && y >= 624 && y <= 756) setChatScroll(Math.max(0, chatScroll() - 2));
-      else if (x < 610 && y >= 140 && y < 738) {
-        const row = Math.floor((y - 140) / 320);
+      else if (x < 610 && y >= 140 && y < 798) {
+        const row = Math.floor((y - 140) / 340);
         const turn = visibleTurns()[row];
         if (turn) {
-          const isPi = y >= 140 + row * 320 + 150;
-          setReader({ author: isPi ? "PI" : "YOU", text: isPi ? turn.assistant : turn.user });
+          const isPi = y >= 140 + row * 340 + 160;
+          const text = isPi ? turn.assistant : turn.user;
+          setReader({ author: isPi ? "PI" : "YOU", lines: wrapLines(text, FONT_READER, READER_TEXT_WIDTH) });
           setReaderOffset(0);
           setScreen("reader");
         }
@@ -571,8 +608,7 @@ queueMicrotask(() => refreshFiles("", true));
             refreshFiles(path);
           } else {
             try {
-              setViewer({ path: "/workspace/" + path, text: readFileSync(path, "utf8"), lineOffset: 0 });
-              setScreen("viewer");
+              openViewer("/workspace/" + path, readFileSync(path, "utf8"));
             } catch (error) {
               setFileError(error instanceof Error ? error.message : String(error));
             }
