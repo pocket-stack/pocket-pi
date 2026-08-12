@@ -1,17 +1,23 @@
-# ESP32-P4 host
+# ESP32-P4 reference target
 
-Pocket Pi has one embedded agent profile and two hosts:
+ESP32-P4 is Pocket Pi's first fully supported hardware target and current
+reference implementation. It demonstrates the complete device runtime:
+resident Pi Agent, `/workspace`, native tools, schedules, Agent-native Apps,
+local state, PocketJS UI and native device lifecycle.
 
-| Target | Agent profile | Runs on |
+The repository also provides one companion development composition:
+
+| Role | Implementation | Runs on |
 |---|---|---|
-| `esp32-p4` | bounded `pi-agent-core` | ESP32-P4 |
-| `esp32-p4-sim` | bounded `pi-agent-core` | macOS |
+| Supported hardware target | `firmware/esp32-p4` | ESP32-P4 |
+| Product-contract simulator | `hosts/esp32-p4-sim` | macOS development host |
 
 The physical host and simulator use the same PocketJS App bundles and
 `pocket-pi-agentos` supervisor at a 720x1280 logical viewport. Simulator mouse
 clicks and physical touch coordinates are both dispatched to the selected App
 View. The Pi Agent Root View displays Chat, Apps, Files and Settings; there is
-no parallel Rust product UI.
+no parallel Rust product UI. The simulator is not a desktop Pocket Pi product,
+a generic Agent harness or a second supported target.
 
 The physical host selects `UartBackend` for a Mac Codex/Claude Code bridge or
 `WirelessBackend` for direct OpenAI/OpenRouter/Anthropic/DeepSeek HTTPS. These remain
@@ -51,15 +57,15 @@ cargo xtask run esp32-p4-sim --backend codex \
   --workspace target/esp32-workspace
 ```
 
-The Mac simulator and physical firmware register the same core tool contracts:
+The development simulator and physical firmware register the same core tool contracts:
 `read/write/edit/find/grep/ls`, bounded `bash`, `device.status`,
 `time.now`, `workspace.context`, and the four `schedule.*` operations.
 The Pi runtime obtains these definitions directly from the executable tool
 registry, so advertised and executable tools cannot drift.
 
-The simulator is a contract-level product simulator, not a CPU or peripheral
+The simulator is a contract-level development tool, not a CPU or peripheral
 emulator. It must exercise the embedded Agent, tools, workspace, schedules and
-plugin contracts, but may use simpler macOS adapters. ESP-IDF, PSRAM, PPA,
+App contracts, but may use simpler macOS adapters. ESP-IDF, PSRAM, PPA,
 LittleFS capacity, MIPI-DSI, touch-controller and Wi-Fi/NVS behavior require a
 physical-board test.
 

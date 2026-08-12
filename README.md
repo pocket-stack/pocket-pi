@@ -1,56 +1,63 @@
 # Pocket Pi
 
-Pocket Pi runs the [Pi coding agent](https://github.com/badlogic/pi-mono) in
-QuickJS. Its touch UI is built with
-[PocketJS](https://github.com/pocket-stack/pocketjs) for the ESP32-P4 product.
+Pocket Pi is a complete Agent-native runtime for embedded and dedicated
+devices. It makes the Agent a resident system actor instead of a user-launched
+application on a general-purpose desktop or mobile OS. One device runtime
+combines a persistent Pi Agent, local `/workspace`, native tools, schedules,
+Agent-native Apps, local SQLite state and a PocketJS UI.
 
-This repository contains one embedded Agent profile with two supported run modes:
+Pocket Pi builds on:
 
-| Run mode | Agent profile | What it is for |
-|---|---|---|
-| ESP32 simulator on macOS | Embedded `pi-agent-core` | Fast development of the ESP32 product UI, tools and Agent flows |
-| Physical ESP32-P4 | Embedded `pi-agent-core` | The real standalone [PocketJS](https://github.com/pocket-stack/pocketjs)/QuickJS device |
+- [`pi-agent-core`](https://github.com/badlogic/pi-mono) for the Agent Loop and
+  Tool Call harness;
+- [PocketJS](https://github.com/pocket-stack/pocketjs) and QuickJS for embedded
+  Apps and device UI;
+- native target hosts for storage, credentials, networking, rendering, device
+  capabilities and lifecycle.
 
-The simulator and firmware compile the same embedded Agent, device UI, tool
-contracts and interaction state. Only their platform adapters differ.
+**ESP32-P4 is the first fully supported hardware target and the current
+reference implementation.** The macOS ESP32-P4 simulator is a development and
+product-contract testing tool; it is not a desktop Pocket Pi product or a
+second hardware target.
 
-> **Project status:** the ESP32 simulator and physical Waveshare ESP32-P4 target
-> have working end-to-end paths. The embedded port is still board-specific and
-> under active development; see
+> **Project status:** the Waveshare ESP32-P4 target has working end-to-end
+> Agent, workspace, schedule, App, display/touch and provider paths. The first
+> target remains board-specific and under active development; see
 > [Current validation](#current-validation) for the exact evidence and limits.
 
-## One product profile, two hosts
+## One complete device runtime
 
-The embedded profile runs upstream `pi-agent-core` in QuickJS and implements Pi
-tools as small native Rust capabilities. The simulator is a product-contract
-host for fast development; the physical ESP32-P4 is the final product host.
-
-The architecture keeps the Pi Harness design in both hosts:
+The current runtime runs upstream `pi-agent-core` in QuickJS and implements Pi
+tools as bounded native capabilities. Its architecture preserves the Pi Harness
+contracts while adding the device-level responsibilities Pocket Pi owns:
 
 - the model decides when to call a tool;
 - tools have explicit schemas and return structured results;
 - the Agent loop is separate from model transports and platform APIs;
-- workspaces and schedules are capabilities, not UI or prompt special cases.
+- workspace and schedules are durable device capabilities;
+- Apps combine Agent-facing Tools, local state, autonomous Tasks and a fixed
+  human-facing View;
+- the native host owns credentials, transport, hardware and lifecycle.
 
-The macOS simulator is a product-contract simulator, not an ESP32 CPU or
-peripheral emulator. It gives the embedded Agent the same UI, tool registry and
-workspace rules while replacing LCD, touch, storage and networking with macOS
-adapters. Physical hardware remains the final acceptance target.
+The companion simulator runs the same AgentOS, PocketJS App bundles, UI, Tool
+registry and workspace contracts while replacing hardware adapters with macOS
+implementations. It is not an ESP32 CPU/peripheral emulator, and simulator
+success never replaces physical-device acceptance.
 
 ## Quick start
 
 ### Prerequisites
 
-- Rust stable for the simulator;
+- Rust stable for the development simulator;
 - Bun for rebuilding the embedded JavaScript guest;
 - a logged-in `codex` CLI for the simulator's local Codex backend;
 - the esp-rs/ESP-IDF toolchain, `nightly-2026-05-01`, and `espflash` for the
-  physical ESP32-P4 target.
+  supported ESP32-P4 target.
 
 The current firmware target is the
 **Waveshare ESP32-P4-WIFI6-Touch-LCD-5**.
 
-### Build both modes
+### Build the device and development simulator
 
 ```sh
 cargo xtask build agentos-apps
@@ -68,43 +75,11 @@ cargo xtask build esp32-p4 --apps exa
 cargo xtask build esp32-p4 --apps none
 ```
 
-### 1. ESP32 Pocket Pi simulator on macOS
+`--apps none` builds the smallest Pocket Pi device image: the resident Pi Agent,
+workspace, native tools, schedules and Root View without ordinary Apps. It is
+not a generic `pi-agent-core` SDK or desktop harness.
 
-The simulator defaults to the Mac's existing Codex Coding Plan login:
-
-```sh
-cargo xtask run esp32-p4-sim \
-  --backend codex \
-  --workspace target/esp32-workspace
-```
-
-Direct API-key backends are also available:
-
-```sh
-OPENAI_API_KEY=... \
-  cargo xtask run esp32-p4-sim --backend openai --model gpt-5.6
-
-OPENROUTER_API_KEY=... \
-  cargo xtask run esp32-p4-sim \
-  --backend openrouter --model openai/gpt-5.6
-
-ANTHROPIC_API_KEY=... \
-  cargo xtask run esp32-p4-sim \
-  --backend anthropic --model claude-sonnet-4-6
-
-DEEPSEEK_API_KEY=... DEEPSEEK_THINKING_LEVEL=xhigh \
-  cargo xtask run esp32-p4-sim --backend deepseek
-```
-
-The window uses the ESP32's 720x1280 coordinate system. Mouse input is mapped
-through the same hit-testing code as physical touch input. Generate a
-deterministic UI snapshot with:
-
-```sh
-cargo xtask snapshot esp32-p4-sim
-```
-
-### 2. Physical Pocket Pi on ESP32-P4
+### 1. Pocket Pi on ESP32-P4
 
 Build and flash the release firmware:
 
@@ -155,6 +130,42 @@ The UART bridge automatically reuses an existing authorized Robinhood session
 from Keychain and injects its access token into the board's RAM-only boot
 configuration. `--provision-robinhood` is only the interactive fallback when no
 saved authorization exists.
+
+### 2. Develop with the ESP32-P4 simulator on macOS
+
+The simulator defaults to the Mac's existing Codex Coding Plan login:
+
+```sh
+cargo xtask run esp32-p4-sim \
+  --backend codex \
+  --workspace target/esp32-workspace
+```
+
+Direct API-key backends are also available:
+
+```sh
+OPENAI_API_KEY=... \
+  cargo xtask run esp32-p4-sim --backend openai --model gpt-5.6
+
+OPENROUTER_API_KEY=... \
+  cargo xtask run esp32-p4-sim \
+  --backend openrouter --model openai/gpt-5.6
+
+ANTHROPIC_API_KEY=... \
+  cargo xtask run esp32-p4-sim \
+  --backend anthropic --model claude-sonnet-4-6
+
+DEEPSEEK_API_KEY=... DEEPSEEK_THINKING_LEVEL=xhigh \
+  cargo xtask run esp32-p4-sim --backend deepseek
+```
+
+The window uses the ESP32-P4 product's 720x1280 coordinate system. Mouse input
+is mapped through the same hit-testing code as physical touch input. Generate a
+deterministic UI snapshot with:
+
+```sh
+cargo xtask snapshot esp32-p4-sim
+```
 
 ## Model backends
 
@@ -213,13 +224,13 @@ credentials, transport and hardware adapters.
 ## Repository map
 
 ```text
-crates/pocket-pi-embedded/    embedded pi-agent-core guest and host traits
+crates/pocket-pi-embedded/    bounded Agent Loop bridge used by device runtimes
 crates/pocket-pi-tools/       portable workspace, shell, time and schedule tools
 crates/pocket-pi-protocols/   model request, response and streaming codecs
 crates/pocket-pi-agentos/     App Supervisor, System App lifecycle and App contracts
 crates/pocket-pi-app-pack/    build-selected embedded App composition
-hosts/esp32-p4-sim/           macOS adapters for the embedded product
-firmware/esp32-p4/            ESP-IDF hardware composition root and adapters
+hosts/esp32-p4-sim/           macOS development simulator for ESP32-P4 contracts
+firmware/esp32-p4/            first supported device and reference implementation
 tools/uart_bridge/            Mac Codex and Claude Code streaming adapters
 tools/uart-model-bridge.py    UART framing and provisioning CLI
 ```
@@ -257,10 +268,12 @@ require physical-board acceptance.
 
 ## Non-goals
 
+- providing a macOS/Windows/Linux desktop Pocket Pi product;
+- providing a generic `pi-agent-core` SDK or standalone harness;
 - Emulating the ESP32 CPU or peripherals on macOS;
 - exposing arbitrary desktop shell or Node APIs on the microcontroller;
 - coupling model providers, UI, trading services or research services into Pi
-  Harness core;
+  Agent Loop core;
 - claiming that an API codec compile proves a live provider connection.
 
 ## License

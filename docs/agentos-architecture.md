@@ -1,5 +1,15 @@
 # Pocket Pi AgentOS 架构设计
 
+Pocket Pi 是面向嵌入式设备和专用设备的完整 Agent-native runtime。Agent 是设备
+上的常驻 system actor，而不是运行在通用桌面或移动操作系统上的用户应用；设备的
+workspace、native tools、schedules、Agent-native Apps、本地状态、UI 和生命周期共同
+构成 Pocket Pi。
+
+ESP32-P4 是第一台完整支持的硬件和当前 reference implementation。macOS 上的
+`esp32-p4-sim` 只用于开发和 product-contract 验证，不是 Pocket Pi 桌面产品、通用
+`pi-agent-core` SDK 或第二个硬件 target。本文件定义的是完整设备 runtime 的
+AgentOS/App 语义，不定义 standalone Agent harness。
+
 状态：架构基线 + v1 实现记录（以“常驻 Pi Agent System App”为当前实现）。
 
 截至 2026-08-12，当前工作树已经实现可运行的第一版：Pi Agent Root App、App
@@ -16,10 +26,10 @@ Registry 启动和一次完整 UART model turn。运行中切换普通 App 的�
 
 ## 1. 一句话结论
 
-Pocket Pi 是一套面向 Agent 的本地 App Runtime：Rust 固件提供稳定的硬件和
-能力层；Pi Agent 拥有顶层 `/workspace`；每个 App 是一个预编译 PocketJS
-Bundle，里面包含暴露给 Agent 的 Tools、内部 Tasks、Schedules、SQLite
-数据和绑定这些数据的固定 View。
+Pocket Pi 是一套设备级 Agent-native Runtime：Rust/native host 提供稳定的硬件、
+安全和生命周期机制；Pi Agent 作为常驻 System App 拥有顶层 `/workspace`；每个 App
+是一个预编译 PocketJS Bundle，里面包含暴露给 Agent 的 Tools、内部 Tasks、
+Schedules、SQLite 数据和绑定这些数据的固定 View。
 
 最短的理解方式是：
 
@@ -64,8 +74,8 @@ catalog、Agent Tool ownership 或后台任务生命周期。如果其中某个 
 
 ## 2. 设计目标
 
-1. 完整保留当前 Pocket Pi 的 Agent、模型、workspace、schedule、设备和
-   Settings 能力。
+1. 在嵌入式和专用设备上提供完整常驻 Agent runtime，而不是构建通用桌面 Agent、
+   Node compatibility layer 或 standalone `pi-agent-core` SDK。
 2. Robinhood、Exa 等产品逻辑和 UI 不再进入通用 Rust 固件。
 3. App 可以给 Pi Agent 暴露 Tools，但不需要暴露内部表结构、凭据、网络协议
    和 UI 实现。
@@ -909,14 +919,14 @@ Guest 中运行，但 Root View 暂不产生前台 DrawList。用户仍可操作
 新增而不是现有的能力包括：App Supervisor、App Catalog、App Tools、AppTask
 Schedules、revision-coalesced projection cache 和 Bundle-based Views。
 
-## 19. Host profiles 与跨硬件
+## 19. 设备 Target、开发 Simulator 与跨硬件
 
-Pocket Pi 保留一个 embedded Agent profile，由两个 Host 实现：
+Pocket Pi 当前有一个完整支持的硬件 composition，以及一个配套开发 simulator：
 
-| Host | Agent profile | 额外能力 |
+| 角色 | Composition | 说明 |
 | --- | --- | --- |
-| ESP32 simulator | embedded `pi-agent-core` | 用 macOS adapter 实现相同 embedded contracts |
-| ESP32-P4 | embedded `pi-agent-core` | LittleFS、touch/LCD、Wi-Fi/NVS 和嵌入式 limits |
+| Reference hardware | ESP32-P4 firmware | 第一台完整支持的设备；实现 LittleFS、touch/LCD、Wi-Fi/NVS 和嵌入式 limits |
+| Development tool | ESP32-P4 simulator | 用 macOS adapter 验证相同 product contracts；不是桌面产品或硬件 target |
 
 ### 19.1 “一次适配，不同硬件跑”的准确含义
 
@@ -956,7 +966,8 @@ filesystem、network 和 credential 实现。
 3. App 原生暴露语义化 Tools 给 Agent。
 4. App 同时提供人类可见的 View。
 5. 本地 Schedule 让系统能自主工作，不需要模型参与每个循环。
-6. Host 统一管理 capabilities、credentials、lifecycle 和 hardware。
+6. Native target composition 统一管理 capabilities、credentials、lifecycle 和
+   hardware。
 7. Tools、Tasks、State 和 View 可以作为 App 单元演进，不改 firmware。
 8. Agent 的执行生命周期独立于当前前台 View，用户和 Agent 可以并行操作同一
    套 App platform。
@@ -964,9 +975,10 @@ filesystem、network 和 credential 实现。
 但它不是传统通用 OS：它不提供任意进程、多用户安全、POSIX 兼容或通用
 desktop。准确说法应当是：
 
-> Pocket Pi 是一套 embedded AgentOS runtime：Agent 拥有 workspace；本地
-> App 通过 Agent Tools、durable state、autonomous Tasks 和 human View 同时
-> 服务 Agent 与用户。
+> Pocket Pi 是一套面向嵌入式和专用设备的完整 Agent-native runtime：Agent 作为
+> 常驻 system actor 拥有 workspace；本地 App 通过 Agent Tools、durable state、
+> autonomous Tasks 和 human View 同时服务 Agent 与用户。ESP32-P4 是它的第一台
+> 完整支持硬件。
 
 这比“Agent UI”更准确，也比“替代传统操作系统”更克制。
 
@@ -1130,8 +1142,8 @@ isolation 和 lifecycle。App Bundle 拥有名称、schema、provider mapping、
 - release 已有 descriptor/`pocket.json` 校验和 atomic `current` 写入，但由
   PocketJS resolver 生成并校验真实 `plan.json`、完整 artifact hash、migration
   transaction、上一版本回退和独立 recovery UI 还没有完成。
-- 当前跨硬件实证是 ESP32 simulator + physical ESP32-P4；simulator 证明共享
-  product contract，最终硬件验收仍以实体设备为准。
+- 当前唯一完整支持的硬件 target 是 physical ESP32-P4；配套 simulator 只证明共享
+  product contract，不能计作第二个硬件实现，最终验收仍以实体设备为准。
 - build-selected catalog 的普通 App View 现在全部在 Supervisor 启动时 preload；真实
   ESP32-P4 启动时长已量测，但持续切换仍需人工验收。后续如果 catalog
   扩大，再依据实测在 PocketJS runtime 层设计加载策略，不能先引入 Marketplace、
