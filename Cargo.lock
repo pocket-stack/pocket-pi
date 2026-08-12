@@ -1978,6 +1978,7 @@ name = "pocket-pi-app-pack"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "pocket-db",
  "pocket-pi-agentos",
  "pocket-pi-embedded",
  "serde_json",

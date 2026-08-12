@@ -175,7 +175,11 @@ impl AppServiceHost for SimAppServices {
         service: &str,
         operation: &str,
         args: &Value,
+        deadline: Instant,
     ) -> Result<Value, String> {
+        if Instant::now() >= deadline {
+            return Err("App Data Action deadline expired".into());
+        }
         let tool_name = args.get("name").and_then(Value::as_str).unwrap_or("");
         let tool_args = args.get("arguments").unwrap_or(&Value::Null);
         if app_id == "robinhood"
@@ -196,7 +200,7 @@ impl AppServiceHost for SimAppServices {
                         "name":name,
                         "arguments":call.get("arguments").unwrap_or(&Value::Null)
                     });
-                    match self.call(app_id, service, "callTool", &single) {
+                    match self.call(app_id, service, "callTool", &single, deadline) {
                         Ok(value) => json!({"name":name,"ok":true,"value":value}),
                         Err(error) => json!({"name":name,"ok":false,"error":error}),
                     }
@@ -267,7 +271,14 @@ impl AppServiceHost for SimAppServices {
         &self,
         app_id: &str,
         request: HttpRequest,
+        deadline: Instant,
     ) -> std::result::Result<TransportCompletion, NetFailure> {
+        if Instant::now() >= deadline {
+            return Err(NetFailure::new(
+                "timeout",
+                "App Data Action deadline expired",
+            ));
+        }
         if app_id != "exa" || request.method != "POST" {
             return Err(NetFailure::new(
                 "invalid_request",
@@ -474,7 +485,7 @@ impl Product {
 
     fn poll(&mut self) -> Result<()> {
         while let Ok(request) = self.app_rx.try_recv() {
-            request.handle(&mut self.supervisor);
+            request.handle(&self.supervisor);
             self.projection_dirty = true;
         }
         if self.last_schedule_poll.elapsed() >= Duration::from_secs(1) {
@@ -819,6 +830,7 @@ impl ApplicationHandler for WindowApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pocket_pi_embedded::ToolResult;
 
     fn init_logs() {
         let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -835,10 +847,45 @@ mod tests {
             service: &str,
             operation: &str,
             _args: &Value,
+            _deadline: Instant,
         ) -> Result<Value, String> {
             let _ = (service, operation);
             Err("simulated Robinhood outage".into())
         }
+    }
+
+    struct NoTools;
+
+    impl ToolHost for NoTools {
+        fn definitions(&self) -> Vec<Value> {
+            Vec::new()
+        }
+
+        fn execute(&self, _call_id: &str, name: &str, _args_json: &str) -> ToolResult {
+            ToolResult {
+                text: format!("unexpected Tool {name}"),
+                is_error: true,
+                ..ToolResult::default()
+            }
+        }
+    }
+
+    fn route_tool(supervisor: &mut AppSupervisor, name: &str, args_json: &str) -> ToolResult {
+        let (tools, requests) =
+            RoutedToolHost::new(Arc::new(NoTools), supervisor.catalog().clone());
+        let name = name.to_owned();
+        let args_json = args_json.to_owned();
+        let call = std::thread::spawn(move || tools.execute("test", &name, &args_json));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !call.is_finished() {
+            while let Ok(request) = requests.try_recv() {
+                request.handle(supervisor);
+            }
+            supervisor.frame_render(true).unwrap();
+            assert!(Instant::now() < deadline, "timed out routing App Tool");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        call.join().unwrap()
     }
 
     fn wait_for(mut ready: impl FnMut() -> bool) {
@@ -851,33 +898,57 @@ mod tests {
         panic!("timed out waiting for background App Data Action");
     }
 
+    fn try_query_app_database(
+        workspace: &Path,
+        app_id: &str,
+        database_name: &str,
+        sql: &str,
+    ) -> Option<Vec<Value>> {
+        let mut database = pocket_db::DbModule::new(pocket_db::Storage::Dir(
+            workspace.join("apps").join(app_id).join("data"),
+        ));
+        let handle = database.open(database_name);
+        if handle < 0 {
+            return None;
+        }
+        let value: Value = serde_json::from_str(&database.query(handle, sql, "[]")).ok()?;
+        database.close(handle);
+        if value.get("error").is_some() {
+            return None;
+        }
+        value["rows"].as_array().cloned()
+    }
+
+    fn query_app_database(
+        workspace: &Path,
+        app_id: &str,
+        database_name: &str,
+        sql: &str,
+    ) -> Vec<Value> {
+        try_query_app_database(workspace, app_id, database_name, sql)
+            .unwrap_or_else(|| panic!("query {app_id}/{database_name}: {sql}"))
+    }
+
     #[test]
     fn exa_tool_writes_app_owned_sqlite() {
         init_logs();
         let temp = tempfile::tempdir().unwrap();
         let mut supervisor =
             AppSupervisor::new(temp.path(), catalog().unwrap(), Arc::new(SimAppServices)).unwrap();
-        let result = supervisor.invoke_tool(
+        let result = route_tool(
+            &mut supervisor,
             "research.search",
             r#"{"query":"NVIDIA FY2026 annual report 10-K revenue data center guidance","numResults":5,"includeDomains":["investor.nvidia.com","sec.gov"]}"#,
         );
         assert!(!result.is_error, "{}", result.text);
-        assert_eq!(result.details["status"], "queued");
-        wait_for(|| {
-            let storage = supervisor.invoke_tool("research.storage_status", "{}");
-            storage.details["searches"] == 1
-        });
         assert!(temp.path().join("apps/exa/data/exa.sqlite").exists());
-        let storage = supervisor.invoke_tool("research.storage_status", "{}");
-        assert!(!storage.is_error, "{}", storage.text);
-        assert_eq!(storage.details["searches"], 1);
-        assert_eq!(storage.details["retentionDays"], 7);
-        assert_eq!(storage.details["schemaVersion"], 5);
-        assert_eq!(storage.details["expectedSchemaVersion"], 5);
-        assert_eq!(storage.details["latestSearch"]["status"], "ok");
-        assert!(storage.text.len() < 240, "{}", storage.text);
-        assert!(storage.details.get("tables").is_none());
-        assert!(storage.details.get("latestSearches").is_none());
+        let rows = query_app_database(
+            temp.path(),
+            "exa",
+            "exa",
+            "SELECT status,result_count FROM searches ORDER BY id DESC LIMIT 1",
+        );
+        assert_eq!(rows, vec![json!(["ok", 2])]);
     }
 
     #[test]
@@ -886,14 +957,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut supervisor =
             AppSupervisor::new(temp.path(), catalog().unwrap(), Arc::new(SimAppServices)).unwrap();
-        let first = supervisor.invoke_tool("research.search", r#"{"query":"expired search"}"#);
+        let first = route_tool(
+            &mut supervisor,
+            "research.search",
+            r#"{"query":"expired search"}"#,
+        );
         assert!(!first.is_error, "{}", first.text);
-        wait_for(|| {
-            supervisor
-                .invoke_tool("research.storage_status", "{}")
-                .details["searches"]
-                == 1
-        });
 
         let mut database =
             pocket_db::DbModule::new(pocket_db::Storage::Dir(temp.path().join("apps/exa/data")));
@@ -907,16 +976,19 @@ mod tests {
         );
         database.close(handle);
 
-        let second = supervisor.invoke_tool("research.search", r#"{"query":"new search"}"#);
+        let second = route_tool(
+            &mut supervisor,
+            "research.search",
+            r#"{"query":"new search"}"#,
+        );
         assert!(!second.is_error, "{}", second.text);
-        wait_for(|| {
-            supervisor
-                .invoke_tool("research.storage_status", "{}")
-                .details["latestSearch"]["id"]
-                == 2
-        });
-        let storage = supervisor.invoke_tool("research.storage_status", "{}");
-        assert_eq!(storage.details["searches"], 1);
+        let rows = query_app_database(
+            temp.path(),
+            "exa",
+            "exa",
+            "SELECT id,query FROM searches ORDER BY id",
+        );
+        assert_eq!(rows, vec![json!([2, "new search"])]);
     }
 
     #[test]
@@ -931,24 +1003,23 @@ mod tests {
         let failed = supervisor.invoke_active_task("refreshPortfolio", &Value::Null);
         assert!(!failed.is_error);
         wait_for(|| {
-            let storage = supervisor.invoke_tool("robinhood.storage_status", "{}");
-            storage.details["latestRefreshes"]
-                .as_array()
-                .and_then(|rows| rows.first())
-                .is_some_and(|row| row["status"] == "failed")
+            try_query_app_database(
+                temp.path(),
+                "robinhood",
+                "robinhood",
+                "SELECT status FROM refresh_runs ORDER BY id DESC LIMIT 1",
+            )
+            .is_some_and(|rows| rows.first() == Some(&json!(["failed"])))
         });
-        supervisor.frame().unwrap();
+        supervisor.frame_render(true).unwrap();
 
-        let storage = supervisor.invoke_tool("robinhood.storage_status", "{}");
-        assert!(!storage.is_error, "{}", storage.text);
-        assert_eq!(storage.details["latestRefreshes"][0]["status"], "failed");
-        let values = storage.details["tables"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|table| table["name"] == "total_value")
-            .unwrap();
-        assert_eq!(values["rowCount"], 0);
+        let rows = query_app_database(
+            temp.path(),
+            "robinhood",
+            "robinhood",
+            "SELECT COUNT(*) FROM total_value",
+        );
+        assert_eq!(rows, vec![json!([0])]);
     }
 
     #[test]
@@ -958,48 +1029,23 @@ mod tests {
         let mut supervisor =
             AppSupervisor::new(temp.path(), catalog().unwrap(), Arc::new(SimAppServices)).unwrap();
         supervisor.open("robinhood").unwrap();
-        let refreshed = supervisor.invoke_tool("robinhood.refresh_portfolio", "{}");
+        let refreshed = route_tool(&mut supervisor, "robinhood.refresh_portfolio", "{}");
         assert!(!refreshed.is_error, "{}", refreshed.text);
-        wait_for(|| {
-            let storage = supervisor.invoke_tool("robinhood.storage_status", "{}");
-            storage.details["latestRefreshes"]
-                .as_array()
-                .and_then(|rows| rows.first())
-                .is_some_and(|row| row["status"] == "succeeded")
-        });
-        supervisor.frame().unwrap();
+        supervisor.frame_render(true).unwrap();
 
-        let storage = supervisor.invoke_tool("robinhood.storage_status", "{}");
-        assert!(!storage.is_error, "{}", storage.text);
-        assert_eq!(
-            storage.details["latestRefreshes"].as_array().unwrap().len(),
-            1
+        let rows = query_app_database(
+            temp.path(),
+            "robinhood",
+            "robinhood",
+            "SELECT status,operation_count,success_count FROM refresh_runs ORDER BY id DESC LIMIT 1",
         );
-        assert_eq!(storage.details["latestRefreshes"][0]["status"], "succeeded");
-        assert_eq!(storage.details["latestRefreshes"][0]["operation_count"], 16);
-        assert_eq!(storage.details["latestRefreshes"][0]["success_count"], 16);
-        let tables = storage.details["tables"].as_array().unwrap();
-        assert!(tables.iter().all(|table| table["name"] != "tool_events"));
-        assert_eq!(
-            tables
-                .iter()
-                .find(|table| table["name"] == "accounts")
-                .unwrap()["rowCount"],
-            3
+        assert_eq!(rows, vec![json!(["succeeded", 16, 16])]);
+        let rows = query_app_database(
+            temp.path(),
+            "robinhood",
+            "robinhood",
+            "SELECT (SELECT COUNT(*) FROM accounts),(SELECT COUNT(*) FROM portfolio_current),(SELECT COUNT(*) FROM total_value)",
         );
-        assert_eq!(
-            tables
-                .iter()
-                .find(|table| table["name"] == "portfolio_current")
-                .unwrap()["rowCount"],
-            3
-        );
-        assert_eq!(
-            tables
-                .iter()
-                .find(|table| table["name"] == "total_value")
-                .unwrap()["rowCount"],
-            3
-        );
+        assert_eq!(rows, vec![json!([3, 3, 3])]);
     }
 }

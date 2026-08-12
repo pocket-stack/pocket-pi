@@ -14,6 +14,8 @@ The authoritative detailed design is
 
 - `crates/pocket-pi-agentos` owns App catalog, runtime lifecycle, foreground
   selection, schedules, App Tool routing, and App-scoped FS/SQLite mounts.
+- `crates/pocket-pi-app-pack` composes the build-selected App artifacts without
+  moving their product logic into the AgentOS runtime or host adapters.
 - `crates/pocket-pi-embedded` provides the bounded JavaScript Agent Loop bridge.
   In AgentOS hosts, the loop is loaded from the Pi Agent System App release into
   the same PocketJS Guest as its Root View.
@@ -45,6 +47,7 @@ top-level `/workspace` and cross-App Tool Registry.
 ```text
 apps/                       PocketJS System/ordinary App sources and bundles
 crates/pocket-pi-agentos/   App Supervisor and AgentOS contracts
+crates/pocket-pi-app-pack/  build-selected embedded App composition
 crates/pocket-pi-embedded/  embedded pi-agent-core bridge and host traits
 crates/pocket-pi-tools/     native workspace/shell/time/schedule Tools
 crates/pocket-pi-protocols/ provider codecs

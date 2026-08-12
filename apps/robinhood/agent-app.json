@@ -141,15 +141,6 @@
         "properties": {},
         "additionalProperties": false
       }
-    },
-    {
-      "name": "robinhood.storage_status",
-      "description": "Inspect bounded Robinhood App SQLite table counts and recent run summaries without contacting Robinhood. Account numbers are returned only as suffixes.",
-      "parameters": {
-        "type": "object",
-        "properties": {},
-        "additionalProperties": false
-      }
     }
   ],
   "tasks": [

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context as _, Result};
 use pocket_db::{DbModule, Storage as DbStorage};
@@ -25,10 +25,14 @@ pub const ROOT_APP_ID: &str = "pi-agent";
 const BUILTIN_RELEASE: &str = "builtin-v1";
 const VIEWPORT: (f32, f32) = (720.0, 1280.0);
 
-// App tools must enqueue remote work quickly. Keep a defensive bound for the
-// Tool Router handoff and local read-only diagnostics; remote work itself runs
-// in the Data Action runner and never holds the App/UI owner.
-const TOOL_TIMEOUT: Duration = Duration::from_secs(45);
+// One end-to-end budget starts when the Agent routes an App Tool. Queueing,
+// Data Action execution and native transport all consume this same deadline.
+pub const APP_ACTION_TIMEOUT: Duration = Duration::from_secs(80);
+
+fn new_action_deadline() -> Instant {
+    Instant::now() + APP_ACTION_TIMEOUT
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppDescriptor {
@@ -155,6 +159,11 @@ impl AppCatalog {
                 .filter(|title| !title.is_empty())
                 .ok_or_else(|| anyhow!("App {} pocket.json is missing title", descriptor.id))?
                 .to_owned();
+            anyhow::ensure!(
+                pocket.get("version").and_then(Value::as_str) == Some(descriptor.version.as_str()),
+                "App {} version differs between agent-app.json and pocket.json",
+                descriptor.id
+            );
             if descriptor.tool_namespace.is_empty() {
                 descriptor.tool_namespace.clone_from(&descriptor.id);
             }
@@ -211,15 +220,6 @@ impl AppCatalog {
                 {
                     anyhow::bail!("duplicate App tool: {name}");
                 }
-                if let Some(operation) = tool.get("providerOperation") {
-                    let operation = operation
-                        .as_str()
-                        .ok_or_else(|| anyhow!("{name} providerOperation must be a string"))?;
-                    anyhow::ensure!(
-                        name == format!("{}.{}", app.descriptor.id, operation),
-                        "{name} providerOperation must match its namespaced Tool name"
-                    );
-                }
             }
         }
         Ok(Self { apps, tool_owner })
@@ -242,18 +242,6 @@ impl AppCatalog {
 
     pub fn descriptor(&self, id: &str) -> Option<&AppDescriptor> {
         self.apps.get(id).map(|app| &app.descriptor)
-    }
-
-    /// Provider operations are declared by the App release and consumed by a
-    /// native credential/transport owner as its exact allowlist. Local-only
-    /// App Tools omit `providerOperation` and can never cross this boundary.
-    pub fn provider_operations(&self, app_id: &str) -> BTreeSet<String> {
-        self.apps
-            .get(app_id)
-            .into_iter()
-            .flat_map(|app| &app.descriptor.provider_operations)
-            .cloned()
-            .collect()
     }
 
     pub fn provider_operation_allowed(&self, app_id: &str, operation: &str) -> bool {
@@ -306,12 +294,15 @@ impl AppCatalog {
 /// own TLS, credentials and MCP sessions; Apps own operation selection,
 /// normalization, SQLite and View behavior.
 pub trait AppServiceHost: Send + Sync {
+    /// Execute one policy-checked synchronous service call without outliving
+    /// the App Data Action's absolute deadline.
     fn call(
         &self,
         app_id: &str,
         service: &str,
         operation: &str,
         args: &Value,
+        deadline: Instant,
     ) -> Result<Value, String>;
 
     /// Execute one policy-checked PocketJS HTTP request. This is called only
@@ -320,6 +311,7 @@ pub trait AppServiceHost: Send + Sync {
         &self,
         _app_id: &str,
         request: HttpRequest,
+        _deadline: Instant,
     ) -> std::result::Result<TransportCompletion, NetFailure> {
         Err(NetFailure::new(
             "unavailable",
@@ -357,6 +349,8 @@ struct DataActionRequest {
     kind: DataActionKind,
     name: String,
     args: Value,
+    deadline: Instant,
+    response: Option<mpsc::Sender<ToolResult>>,
 }
 
 #[derive(Clone)]
@@ -368,15 +362,25 @@ struct DataAppConfig {
     net: bool,
 }
 
+struct AppHttpRequest {
+    request: HttpRequest,
+    deadline: Instant,
+}
+
 struct AppNetTransport {
-    requests: mpsc::SyncSender<HttpRequest>,
+    requests: mpsc::SyncSender<AppHttpRequest>,
     completions: mpsc::Receiver<TransportCompletion>,
     cancelled: BTreeSet<i32>,
+    action_deadline: Rc<Cell<Option<Instant>>>,
 }
 
 impl AppNetTransport {
-    fn start(app_id: String, services: Arc<dyn AppServiceHost>) -> Result<Self> {
-        let (request_tx, request_rx) = mpsc::sync_channel::<HttpRequest>(NET_COMPLETION_QUEUE);
+    fn start(
+        app_id: String,
+        services: Arc<dyn AppServiceHost>,
+        action_deadline: Rc<Cell<Option<Instant>>>,
+    ) -> Result<Self> {
+        let (request_tx, request_rx) = mpsc::sync_channel::<AppHttpRequest>(NET_COMPLETION_QUEUE);
         let (completion_tx, completion_rx) =
             mpsc::sync_channel::<TransportCompletion>(NET_COMPLETION_QUEUE);
         let worker_name = format!("net-{app_id}");
@@ -384,11 +388,20 @@ impl AppNetTransport {
             .name(worker_name)
             .stack_size(NET_WORKER_STACK_BYTES)
             .spawn(move || {
-                while let Ok(request) = request_rx.recv() {
-                    let handle = request.handle;
-                    let completion = services
-                        .http(&app_id, request)
-                        .unwrap_or_else(|failure| TransportCompletion::Error { handle, failure });
+                while let Ok(mut work) = request_rx.recv() {
+                    let handle = work.request.handle;
+                    let completion = match remaining_timeout_ms(work.deadline) {
+                        Ok(remaining_ms) => {
+                            work.request.timeout_ms = work.request.timeout_ms.min(remaining_ms);
+                            services
+                                .http(&app_id, work.request, work.deadline)
+                                .unwrap_or_else(|failure| TransportCompletion::Error {
+                                    handle,
+                                    failure,
+                                })
+                        }
+                        Err(failure) => TransportCompletion::Error { handle, failure },
+                    };
                     if completion_tx.send(completion).is_err() {
                         break;
                     }
@@ -399,14 +412,20 @@ impl AppNetTransport {
             requests: request_tx,
             completions: completion_rx,
             cancelled: BTreeSet::new(),
+            action_deadline,
         })
     }
 }
 
 impl HttpTransport for AppNetTransport {
-    fn start(&mut self, request: HttpRequest) -> std::result::Result<(), NetFailure> {
+    fn start(&mut self, mut request: HttpRequest) -> std::result::Result<(), NetFailure> {
+        let deadline = self.action_deadline.get().ok_or_else(|| {
+            NetFailure::new("unavailable", "HTTP request has no active App Data Action")
+        })?;
+        let remaining_ms = remaining_timeout_ms(deadline)?;
+        request.timeout_ms = request.timeout_ms.min(remaining_ms);
         self.requests
-            .try_send(request)
+            .try_send(AppHttpRequest { request, deadline })
             .map_err(|_| NetFailure::new("busy", "native HTTP worker queue is full"))
     }
 
@@ -427,9 +446,18 @@ impl HttpTransport for AppNetTransport {
     }
 }
 
+fn remaining_timeout_ms(deadline: Instant) -> std::result::Result<u32, NetFailure> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|duration| !duration.is_zero())
+        .ok_or_else(|| NetFailure::new("timeout", "App Data Action deadline expired"))?;
+    Ok(remaining.as_millis().clamp(1, u128::from(u32::MAX)) as u32)
+}
+
 struct DataActionRuntime {
     guest: Guest,
     net: Option<NetSurface<AppNetTransport>>,
+    action_deadline: Rc<Cell<Option<Instant>>>,
     _database: SharedDb,
     _revision: AppRevision,
 }
@@ -438,13 +466,23 @@ impl DataActionRuntime {
     fn load(config: &DataAppConfig, services: Arc<dyn AppServiceHost>) -> Result<Self> {
         let guest = Guest::new()?;
         mount_shared_db(&guest, config.database.clone())?;
-        mount_data_lifecycle(&guest, config.revision.clone())?;
+        let action_deadline = Rc::new(Cell::new(None));
+        mount_data_lifecycle(&guest, config.revision.clone(), action_deadline.clone())?;
         let net = if config.net {
-            let surface = NetSurface::new(AppNetTransport::start(config.app_id.clone(), services)?);
+            let surface = NetSurface::new(AppNetTransport::start(
+                config.app_id.clone(),
+                services,
+                action_deadline.clone(),
+            )?);
             surface.mount(&guest)?;
             Some(surface)
         } else {
-            mount_services(&guest, config.app_id.clone(), services)?;
+            mount_services(
+                &guest,
+                config.app_id.clone(),
+                services,
+                action_deadline.clone(),
+            )?;
             None
         };
         let source = std::fs::read_to_string(&config.source_path)
@@ -458,33 +496,43 @@ impl DataActionRuntime {
         Ok(Self {
             guest,
             net,
+            action_deadline,
             _database: config.database.clone(),
             _revision: config.revision.clone(),
         })
     }
 
     fn invoke(&self, request: &DataActionRequest) -> Result<ToolResult> {
-        if let Some(net) = &self.net {
-            return self.invoke_net(request, net);
-        }
-        let method = match request.kind {
-            DataActionKind::Task => "invokeTask",
-            DataActionKind::Tool => "invokeTool",
+        anyhow::ensure!(
+            Instant::now() < request.deadline,
+            "{} timed out before its Data Action started",
+            request.name
+        );
+        self.action_deadline.set(Some(request.deadline));
+        let result = if let Some(net) = &self.net {
+            self.invoke_net(request, net)
+        } else {
+            let method = match request.kind {
+                DataActionKind::Task => "invokeTask",
+                DataActionKind::Tool => "invokeTool",
+            };
+            let line: Result<String> = self.guest.with(|ctx| {
+                let data: Object = ctx
+                    .globals()
+                    .get("PocketPiData")
+                    .map_err(|error| anyhow!("PocketPiData missing: {error}"))?;
+                let function: Function = data
+                    .get(method)
+                    .map_err(|error| anyhow!("PocketPiData.{method} missing: {error}"))?;
+                function
+                    .call::<_, String>((request.name.clone(), request.args.to_string()))
+                    .catch(&ctx)
+                    .map_err(|error| anyhow!("PocketPiData.{method}: {error}"))
+            });
+            line.and_then(|line| parse_data_result(&line))
         };
-        let line: String = self.guest.with(|ctx| {
-            let data: Object = ctx
-                .globals()
-                .get("PocketPiData")
-                .map_err(|error| anyhow!("PocketPiData missing: {error}"))?;
-            let function: Function = data
-                .get(method)
-                .map_err(|error| anyhow!("PocketPiData.{method} missing: {error}"))?;
-            function
-                .call::<_, String>((request.name.clone(), request.args.to_string()))
-                .catch(&ctx)
-                .map_err(|error| anyhow!("PocketPiData.{method}: {error}"))
-        })?;
-        parse_data_result(&line)
+        self.action_deadline.set(None);
+        result
     }
 
     fn invoke_net(
@@ -502,7 +550,6 @@ impl DataActionRuntime {
             function.call::<_, ()>((request.name.clone(), request.args.to_string()))?;
             Ok(())
         })?;
-        let deadline = std::time::Instant::now() + TOOL_TIMEOUT;
         loop {
             net.begin_tick();
             let line = self.guest.with(|ctx| -> Result<Option<String>> {
@@ -517,7 +564,7 @@ impl DataActionRuntime {
                 return parse_data_result(&line);
             }
             anyhow::ensure!(
-                std::time::Instant::now() < deadline,
+                Instant::now() < request.deadline,
                 "PocketPiData.{method} timed out"
             );
             yield_scheduler_tick();
@@ -542,14 +589,8 @@ fn parse_data_result(line: &str) -> Result<ToolResult> {
     })
 }
 
-struct DataActionCompletion {
-    run_id: u64,
-    result: ToolResult,
-}
-
 struct AppDataRunner {
     tx: mpsc::SyncSender<DataActionRequest>,
-    completions: Mutex<mpsc::Receiver<DataActionCompletion>>,
     next_run_id: AtomicU32,
     busy: Arc<AtomicBool>,
 }
@@ -557,7 +598,6 @@ struct AppDataRunner {
 impl AppDataRunner {
     fn start(configs: Vec<DataAppConfig>, services: Arc<dyn AppServiceHost>) -> Result<Self> {
         let (tx, rx) = mpsc::sync_channel::<DataActionRequest>(DATA_ACTION_QUEUE);
-        let (completion_tx, completion_rx) = mpsc::channel::<DataActionCompletion>();
         let busy = Arc::new(AtomicBool::new(false));
         let worker_busy = busy.clone();
         std::thread::Builder::new()
@@ -586,6 +626,11 @@ impl AppDataRunner {
                             .expect("Data Action runtime inserted")
                             .invoke(&request)
                     })();
+                    if result.is_err() && Instant::now() >= request.deadline {
+                        // Drop the timed-out Guest and its pending promises.
+                        // The next request gets a clean runtime and NET worker.
+                        runtimes.remove(&request.app_id);
+                    }
                     let result = match result {
                         Ok(result) if result.is_error => {
                             log::warn!(
@@ -608,23 +653,29 @@ impl AppDataRunner {
                             tool_error(format!("{}: {error:#}", request.name))
                         }
                     };
-                    let _ = completion_tx.send(DataActionCompletion {
-                        run_id: request.run_id,
-                        result,
-                    });
+                    if let Some(response) = request.response {
+                        let _ = response.send(result);
+                    }
                     worker_busy.store(false, Ordering::Release);
                 }
             })
             .context("start App Data Action runner")?;
         Ok(Self {
             tx,
-            completions: Mutex::new(completion_rx),
             next_run_id: AtomicU32::new(1),
             busy,
         })
     }
 
-    fn enqueue(&self, app_id: &str, kind: DataActionKind, name: &str, args: Value) -> Result<u64> {
+    fn enqueue(
+        &self,
+        app_id: &str,
+        kind: DataActionKind,
+        name: &str,
+        args: Value,
+        deadline: Instant,
+        response: Option<mpsc::Sender<ToolResult>>,
+    ) -> Result<u64> {
         let run_id = u64::from(self.next_run_id.fetch_add(1, Ordering::Relaxed));
         self.tx
             .try_send(DataActionRequest {
@@ -633,6 +684,8 @@ impl AppDataRunner {
                 kind,
                 name: name.to_owned(),
                 args,
+                deadline,
+                response,
             })
             .map_err(|error| anyhow!("queue App Data Action: {error}"))?;
         Ok(run_id)
@@ -640,17 +693,6 @@ impl AppDataRunner {
 
     fn busy(&self) -> bool {
         self.busy.load(Ordering::Acquire)
-    }
-
-    fn poll_completions(&self) -> Vec<DataActionCompletion> {
-        let Ok(completions) = self.completions.lock() else {
-            return Vec::new();
-        };
-        let mut ready = Vec::new();
-        while let Ok(completion) = completions.try_recv() {
-            ready.push(completion);
-        }
-        ready
     }
 }
 
@@ -681,6 +723,10 @@ impl AppRuntime {
         anyhow::ensure!(
             descriptor.id == app.descriptor.id,
             "installed App id mismatch"
+        );
+        anyhow::ensure!(
+            descriptor.version == app.descriptor.version,
+            "installed App version mismatch"
         );
         let manifest: Value = serde_json::from_slice(
             &std::fs::read(release_dir.join("pocket.json")).context("read pocket.json")?,
@@ -801,31 +847,8 @@ impl AppRuntime {
         self.call_optional_method("pointerUp", ())
     }
 
-    fn invoke_tool(&self, name: &str, args_json: &str) -> Result<ToolResult> {
-        let line: String =
-            self.call_method("invokeTool", (name.to_owned(), args_json.to_owned()))?;
-        self.tool_result(&line)
-    }
-
     fn with_ui<R>(&self, f: impl FnOnce(&mut pocketjs_core::Ui) -> R) -> R {
         self.surface.with_ui(f)
-    }
-
-    fn tool_result(&self, line: &str) -> Result<ToolResult> {
-        let value: Value = serde_json::from_str(line).context("parse App result")?;
-        Ok(ToolResult {
-            text: value
-                .get("text")
-                .and_then(Value::as_str)
-                .unwrap_or(line)
-                .to_owned(),
-            details: value.get("details").cloned().unwrap_or(Value::Null),
-            is_error: value
-                .get("isError")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            terminate: false,
-        })
     }
 
     fn call_method<A, R>(&self, name: &str, args: A) -> Result<R>
@@ -935,7 +958,12 @@ fn mount_shared_db(guest: &Guest, db: SharedDb) -> Result<()> {
     })
 }
 
-fn mount_services(guest: &Guest, app_id: String, services: Arc<dyn AppServiceHost>) -> Result<()> {
+fn mount_services(
+    guest: &Guest,
+    app_id: String,
+    services: Arc<dyn AppServiceHost>,
+    action_deadline: Rc<Cell<Option<Instant>>>,
+) -> Result<()> {
     guest.mount("services", |ctx, ns| {
         ns.set(
             "call",
@@ -943,7 +971,17 @@ fn mount_services(guest: &Guest, app_id: String, services: Arc<dyn AppServiceHos
                 ctx.clone(),
                 move |service: String, operation: String, args_json: String| -> String {
                     let args = serde_json::from_str(&args_json).unwrap_or(Value::Null);
-                    match services.call(&app_id, &service, &operation, &args) {
+                    let result = action_deadline
+                        .get()
+                        .ok_or_else(|| "App service call has no active Data Action".to_owned())
+                        .and_then(|deadline| {
+                            if Instant::now() >= deadline {
+                                Err("App Data Action deadline expired".to_owned())
+                            } else {
+                                services.call(&app_id, &service, &operation, &args, deadline)
+                            }
+                        });
+                    match result {
                         Ok(value) => json!({"ok":true,"value":value}).to_string(),
                         Err(error) => json!({"ok":false,"error":error}).to_string(),
                     }
@@ -959,8 +997,8 @@ fn yield_scheduler_tick() {
     unsafe extern "C" {
         fn vTaskDelay(ticks: u32);
     }
-    // The firmware runs FreeRTOS at 100 Hz. Sub-tick sleeps remain runnable,
-    // so block for one actual scheduler tick and let the IDLE task run.
+    // The firmware runs FreeRTOS at 100 Hz. Block through one scheduler tick
+    // instead of sub-tick polling so the IDLE task gets a scheduling chance.
     unsafe { vTaskDelay(1) };
 }
 
@@ -977,7 +1015,11 @@ fn yield_after_db_call() {
 #[cfg(not(target_os = "espidf"))]
 fn yield_after_db_call() {}
 
-fn mount_data_lifecycle(guest: &Guest, revision: AppRevision) -> Result<()> {
+fn mount_data_lifecycle(
+    guest: &Guest,
+    revision: AppRevision,
+    action_deadline: Rc<Cell<Option<Instant>>>,
+) -> Result<()> {
     guest.mount("app", |ctx, ns| {
         ns.set(
             "commit",
@@ -985,6 +1027,18 @@ fn mount_data_lifecycle(guest: &Guest, revision: AppRevision) -> Result<()> {
                 // Called only after a successful App-owned SQLite COMMIT.
                 // Release pairs with the foreground View's Acquire load.
                 revision.fetch_add(1, Ordering::Release).saturating_add(1) as f64
+            })?,
+        )?;
+        ns.set(
+            "remainingMs",
+            Function::new(ctx.clone(), move || -> f64 {
+                action_deadline.get().map_or(1, |deadline| {
+                    deadline
+                        .checked_duration_since(Instant::now())
+                        .map_or(1, |remaining| {
+                            remaining.as_millis().clamp(1, u128::from(u32::MAX)) as u32
+                        })
+                }) as f64
             })?,
         )?;
         Ok(())
@@ -996,7 +1050,6 @@ pub struct AppSupervisor {
     catalog: AppCatalog,
     services: Arc<dyn AppServiceHost>,
     data_runner: AppDataRunner,
-    pending_tool_responses: Mutex<BTreeMap<u64, mpsc::Sender<ToolResult>>>,
     /// The Pi Agent System App is booted once and remains resident for the
     /// entire supervisor lifetime. Foreground navigation never replaces it.
     system: AppRuntime,
@@ -1086,7 +1139,6 @@ impl AppSupervisor {
             catalog,
             services,
             data_runner,
-            pending_tool_responses: Mutex::new(BTreeMap::new()),
             system,
             agent: None,
             runtimes,
@@ -1157,8 +1209,7 @@ impl AppSupervisor {
             .map_err(|error| anyhow!(error))
     }
 
-    /// Advance the resident System App and cheap View bookkeeping. Only the
-    /// selected surface is rendered; Data Actions progress on their own runner.
+    /// Advance the resident System App and render the selected View.
     pub fn frame(&self) -> Result<Vec<AgentEvent>> {
         self.frame_render(true)
     }
@@ -1166,7 +1217,6 @@ impl AppSupervisor {
     /// Advance the Agent every host tick, but only ask the selected PocketJS
     /// View to produce a new DrawList when the host knows it is dirty.
     pub fn frame_render(&self, render_selected: bool) -> Result<Vec<AgentEvent>> {
-        self.deliver_data_action_completions();
         let events = match &self.agent {
             Some(agent) => agent
                 .tick(&self.system.guest)
@@ -1180,18 +1230,6 @@ impl AppSupervisor {
                 .advance(render_selected && self.active_app.as_deref() == Some(app_id.as_str()))?;
         }
         Ok(events)
-    }
-
-    fn deliver_data_action_completions(&self) {
-        let completions = self.data_runner.poll_completions();
-        let Ok(mut pending) = self.pending_tool_responses.lock() else {
-            return;
-        };
-        for completion in completions {
-            if let Some(response) = pending.remove(&completion.run_id) {
-                let _ = response.send(completion.result);
-            }
-        }
     }
 
     pub fn update_root(&self, projection: &Value) -> Result<()> {
@@ -1220,60 +1258,27 @@ impl AppSupervisor {
         self.active().projection_is_stale()
     }
 
-    pub fn invoke_tool(&mut self, name: &str, args_json: &str) -> ToolResult {
-        let Some(app_id) = self.catalog.app_for_tool(name).map(str::to_owned) else {
-            return tool_error(format!("unknown App tool: {name}"));
-        };
-        if name.ends_with(".storage_status") {
-            return self
-                .with_runtime(&app_id, |runtime| runtime.invoke_tool(name, args_json))
-                .unwrap_or_else(|error| tool_error(format!("{name}: {error:#}")));
-        }
-        let args = serde_json::from_str(args_json).unwrap_or(Value::Null);
-        match self
-            .data_runner
-            .enqueue(&app_id, DataActionKind::Tool, name, args)
-        {
-            Ok(run_id) => ToolResult {
-                text: format!("Queued {name} as App Data Action {run_id}"),
-                details: json!({"status":"queued","runId":run_id,"app":app_id}),
-                is_error: false,
-                terminate: false,
-            },
-            Err(error) => tool_error(format!("{name}: {error:#}")),
-        }
-    }
-
     fn begin_agent_tool(
-        &mut self,
+        &self,
         name: &str,
         args_json: &str,
+        deadline: Instant,
         response: mpsc::Sender<ToolResult>,
     ) {
         let Some(app_id) = self.catalog.app_for_tool(name).map(str::to_owned) else {
             let _ = response.send(tool_error(format!("unknown App tool: {name}")));
             return;
         };
-        if name.ends_with(".storage_status") {
-            let _ = response.send(
-                self.with_runtime(&app_id, |runtime| runtime.invoke_tool(name, args_json))
-                    .unwrap_or_else(|error| tool_error(format!("{name}: {error:#}"))),
-            );
-            return;
-        }
         let args = serde_json::from_str(args_json).unwrap_or(Value::Null);
-        match self
-            .data_runner
-            .enqueue(&app_id, DataActionKind::Tool, name, args)
-        {
-            Ok(run_id) => {
-                if let Ok(mut pending) = self.pending_tool_responses.lock() {
-                    pending.insert(run_id, response);
-                } else {
-                    let _ =
-                        response.send(tool_error("App Tool completion registry is unavailable"));
-                }
-            }
+        match self.data_runner.enqueue(
+            &app_id,
+            DataActionKind::Tool,
+            name,
+            args,
+            deadline,
+            Some(response.clone()),
+        ) {
+            Ok(_) => {}
             Err(error) => {
                 let _ = response.send(tool_error(format!("{name}: {error:#}")));
             }
@@ -1285,10 +1290,14 @@ impl AppSupervisor {
     /// native services never hide touch feedback.
     pub fn invoke_active_task(&mut self, name: &str, args: &Value) -> ToolResult {
         let app_id = self.active_id().to_owned();
-        match self
-            .data_runner
-            .enqueue(&app_id, DataActionKind::Task, name, args.clone())
-        {
+        match self.data_runner.enqueue(
+            &app_id,
+            DataActionKind::Task,
+            name,
+            args.clone(),
+            new_action_deadline(),
+            None,
+        ) {
             Ok(run_id) => ToolResult {
                 text: format!("Queued {app_id}.{name} as App Data Action {run_id}"),
                 details: json!({"status":"queued","runId":run_id,"app":app_id}),
@@ -1308,6 +1317,8 @@ impl AppSupervisor {
                 DataActionKind::Task,
                 &due.task,
                 due.args.clone(),
+                new_action_deadline(),
+                None,
             ) {
                 Ok(run_id) => ToolResult {
                     text: format!("Queued {label} as App Data Action {run_id}"),
@@ -1321,25 +1332,6 @@ impl AppSupervisor {
             results.push((label, result));
         }
         results
-    }
-
-    fn with_runtime<R>(
-        &mut self,
-        app_id: &str,
-        f: impl FnOnce(&AppRuntime) -> Result<R>,
-    ) -> Result<R> {
-        if app_id == ROOT_APP_ID {
-            let result = f(&self.system)?;
-            self.system.advance(self.active_app.is_none())?;
-            return Ok(result);
-        }
-        let runtime = self
-            .runtimes
-            .get(app_id)
-            .ok_or_else(|| anyhow!("unknown App: {app_id}"))?;
-        let result = f(runtime)?;
-        runtime.advance(self.active_app.as_deref() == Some(app_id))?;
-        Ok(result)
     }
 
     fn active(&self) -> &AppRuntime {
@@ -1499,8 +1491,9 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 pub struct AppToolRequest {
-    pub name: String,
-    pub args_json: String,
+    name: String,
+    args_json: String,
+    deadline: Instant,
     response: mpsc::Sender<ToolResult>,
 }
 
@@ -1539,26 +1532,37 @@ impl ToolHost for RoutedToolHost {
             return self.native.execute(call_id, name, args_json);
         }
         let (response, response_rx) = mpsc::channel();
+        let deadline = new_action_deadline();
         if self
             .app_tx
             .send(AppToolRequest {
                 name: name.to_owned(),
                 args_json: args_json.to_owned(),
+                deadline,
                 response,
             })
             .is_err()
         {
             return tool_error("App Supervisor is unavailable");
         }
-        response_rx
-            .recv_timeout(TOOL_TIMEOUT)
-            .unwrap_or_else(|_| tool_error(format!("App Tool timed out after {TOOL_TIMEOUT:?}")))
+        loop {
+            if Instant::now() >= deadline {
+                return tool_error(format!("App Tool timed out after {APP_ACTION_TIMEOUT:?}"));
+            }
+            match response_rx.try_recv() {
+                Ok(result) => return result,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return tool_error("App Data Action response channel closed");
+                }
+                Err(mpsc::TryRecvError::Empty) => yield_scheduler_tick(),
+            }
+        }
     }
 }
 
 impl AppToolRequest {
-    pub fn handle(self, supervisor: &mut AppSupervisor) {
-        supervisor.begin_agent_tool(&self.name, &self.args_json, self.response);
+    pub fn handle(self, supervisor: &AppSupervisor) {
+        supervisor.begin_agent_tool(&self.name, &self.args_json, self.deadline, self.response);
     }
 }
 
@@ -1659,9 +1663,7 @@ impl AppScheduleStore {
             .filter(|item| item.next_run_at <= now)
             .min_by_key(|item| item.next_run_at)?;
         let scheduled_at = item.next_run_at;
-        while item.next_run_at <= now {
-            item.next_run_at = item.next_run_at.saturating_add(item.every_seconds);
-        }
+        item.next_run_at = next_schedule_run(item.next_run_at, item.every_seconds, now);
         let due = DueTask {
             app_id: item.app_id.clone(),
             schedule_id: item.schedule_id.clone(),
@@ -1710,9 +1712,41 @@ fn unix_seconds() -> u64 {
         .unwrap_or(0)
 }
 
+fn next_schedule_run(current: u64, interval: u64, now: u64) -> u64 {
+    let elapsed_intervals = now.saturating_sub(current) / interval;
+    current.saturating_add(interval.saturating_mul(elapsed_intervals.saturating_add(1)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct NoServices;
+
+    impl AppServiceHost for NoServices {
+        fn call(
+            &self,
+            _app_id: &str,
+            _service: &str,
+            _operation: &str,
+            _args: &Value,
+            _deadline: Instant,
+        ) -> std::result::Result<Value, String> {
+            Err("unexpected App service call".into())
+        }
+    }
+
+    struct NoTools;
+
+    impl ToolHost for NoTools {
+        fn definitions(&self) -> Vec<Value> {
+            Vec::new()
+        }
+
+        fn execute(&self, _call_id: &str, name: &str, _args_json: &str) -> ToolResult {
+            tool_error(format!("unexpected native Tool: {name}"))
+        }
+    }
 
     #[test]
     fn catalog_uses_each_apps_declared_tool_namespace() {
@@ -1777,6 +1811,45 @@ mod tests {
     }
 
     #[test]
+    fn app_tool_request_carries_the_single_80_second_deadline() {
+        assert_eq!(APP_ACTION_TIMEOUT, Duration::from_secs(80));
+        let catalog = AppCatalog::new([
+            fixture(
+                r#"{"id":"pi-agent","description":"System","version":"1","tools":[],"tasks":[],"schedules":[]}"#,
+                Some("agent"),
+            ),
+            fixture(
+                r#"{"id":"search","description":"Research","version":"1","toolNamespace":"research","tools":[{"name":"research.query","parameters":{"type":"object"}}],"tasks":[],"schedules":[]}"#,
+                None,
+            ),
+        ])
+        .unwrap();
+        let (tools, requests) = RoutedToolHost::new(Arc::new(NoTools), catalog);
+        let call = std::thread::spawn(move || tools.execute("call", "research.query", "{}"));
+        let request = requests.recv().unwrap();
+        let remaining = request.deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero());
+        assert!(remaining <= APP_ACTION_TIMEOUT);
+        request
+            .response
+            .send(ToolResult {
+                text: "done".into(),
+                ..ToolResult::default()
+            })
+            .unwrap();
+        assert_eq!(call.join().unwrap().text, "done");
+    }
+
+    #[test]
+    fn missed_schedules_advance_in_constant_time() {
+        let hour = 60 * 60;
+        let ten_years = 10 * 365 * 24 * hour;
+        let next = next_schedule_run(hour, hour, ten_years);
+        assert!(next > ten_years);
+        assert_eq!(next % hour, 0);
+    }
+
+    #[test]
     fn data_version_resets_only_that_apps_database_once() {
         let temp = tempfile::tempdir().unwrap();
         let db_root = temp.path().join("apps/notes/data");
@@ -1811,14 +1884,78 @@ mod tests {
         assert!(!database.exists());
     }
 
+    #[test]
+    fn app_revisions_coalesce_at_the_foreground_frame_boundary() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog = AppCatalog::new([pi_agent_bundle(), exa_bundle()]).unwrap();
+        let mut supervisor =
+            AppSupervisor::new(temp.path(), catalog, Arc::new(NoServices)).unwrap();
+        supervisor.open("exa").unwrap();
+
+        let revision = supervisor.runtimes["exa"].revision.clone();
+        revision.fetch_add(1, Ordering::Release);
+        revision.fetch_add(1, Ordering::Release);
+        revision.fetch_add(1, Ordering::Release);
+        assert!(supervisor.active_projection_is_stale());
+
+        supervisor.frame_render(false).unwrap();
+        assert_eq!(supervisor.runtimes["exa"].projection_refreshes.get(), 0);
+        assert_eq!(supervisor.runtimes["exa"].last_seen_revision.get(), 0);
+
+        supervisor.frame_render(true).unwrap();
+        assert_eq!(supervisor.runtimes["exa"].projection_refreshes.get(), 1);
+        assert_eq!(supervisor.runtimes["exa"].last_seen_revision.get(), 3);
+        assert!(!supervisor.active_projection_is_stale());
+
+        for _ in 0..5 {
+            supervisor.frame_render(true).unwrap();
+        }
+        assert_eq!(supervisor.runtimes["exa"].projection_refreshes.get(), 1);
+
+        supervisor.open(ROOT_APP_ID).unwrap();
+        revision.fetch_add(1, Ordering::Release);
+        revision.fetch_add(1, Ordering::Release);
+        for _ in 0..3 {
+            supervisor.frame_render(true).unwrap();
+        }
+        assert_eq!(supervisor.runtimes["exa"].projection_refreshes.get(), 1);
+
+        supervisor.open("exa").unwrap();
+        supervisor.frame_render(true).unwrap();
+        assert_eq!(supervisor.runtimes["exa"].projection_refreshes.get(), 2);
+        assert_eq!(supervisor.runtimes["exa"].last_seen_revision.get(), 5);
+    }
+
     fn fixture(descriptor_json: &'static str, agent_js: Option<&'static str>) -> EmbeddedApp {
         EmbeddedApp::new(
             descriptor_json,
-            r#"{"pocket":2,"name":"fixture","title":"Fixture","engine":{"capabilities":{"requires":[]}}}"#,
+            r#"{"pocket":2,"name":"fixture","title":"Fixture","version":"1","engine":{"capabilities":{"requires":[]}}}"#,
             "",
             None,
             agent_js,
             &[],
+        )
+    }
+
+    fn pi_agent_bundle() -> EmbeddedApp {
+        EmbeddedApp::new(
+            include_str!("../../../apps/pi-agent/agent-app.json"),
+            include_str!("../../../apps/pi-agent/pocket.json"),
+            include_str!("../../../apps/pi-agent/dist/app.js"),
+            None,
+            Some(include_str!("../../../apps/pi-agent/dist/agent.js")),
+            include_bytes!("../../../apps/pi-agent/dist/app.pak"),
+        )
+    }
+
+    fn exa_bundle() -> EmbeddedApp {
+        EmbeddedApp::new(
+            include_str!("../../../apps/exa/agent-app.json"),
+            include_str!("../../../apps/exa/pocket.json"),
+            include_str!("../../../apps/exa/dist/app.js"),
+            Some(include_str!("../../../apps/exa/dist/data-action.js")),
+            None,
+            include_bytes!("../../../apps/exa/dist/app.pak"),
         )
     }
 }

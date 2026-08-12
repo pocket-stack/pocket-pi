@@ -17,8 +17,11 @@ use pocket_pi_agentos::{
 };
 use serde_json::{json, Value};
 
+use super::delay_current_task;
+
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MAX_MCP_RESPONSE: usize = 160 * 1024;
+const MCP_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 pub struct EspAppServices {
     inner: Arc<EspAppServicesInner>,
@@ -60,6 +63,7 @@ impl EspAppServicesInner {
         &self,
         app_id: &str,
         request: HttpRequest,
+        deadline: Instant,
     ) -> std::result::Result<TransportCompletion, NetFailure> {
         let policy = self
             .catalog
@@ -76,10 +80,15 @@ impl EspAppServicesInner {
                 "App supplied a forbidden HTTP header",
             ));
         }
-        execute_http(request, policy.credential.as_ref(), &self.credentials)
+        execute_http(
+            request,
+            policy.credential.as_ref(),
+            &self.credentials,
+            deadline,
+        )
     }
 
-    fn mcp_call(&self, app_id: &str, args: &Value) -> Result<Value, String> {
+    fn mcp_call(&self, app_id: &str, args: &Value, deadline: Instant) -> Result<Value, String> {
         let connection = args
             .get("connection")
             .and_then(Value::as_str)
@@ -116,18 +125,25 @@ impl EspAppServicesInner {
                 next_id: 1,
             });
         for attempt in 0..2 {
-            let result =
-                self.mcp_once(&policy, &credential, state, operation, arguments, retryable);
+            let result = self.mcp_once(
+                &policy,
+                &credential,
+                state,
+                operation,
+                arguments,
+                retryable,
+                deadline,
+            );
             match result {
                 Ok(value) => return Ok(value),
                 Err(error) if attempt == 0 && stale_mcp_session(&error) => {
                     log::warn!("MCP reconnecting after: {error}");
                     state.session_id = None;
-                    std::thread::sleep(Duration::from_millis(250));
+                    wait_to_retry(deadline)?;
                 }
                 Err(error) if attempt == 0 && retryable && transient_mcp_connect(&error) => {
                     log::warn!("MCP transport retry after: {error}");
-                    std::thread::sleep(Duration::from_millis(250));
+                    wait_to_retry(deadline)?;
                 }
                 Err(error) => return Err(error),
             }
@@ -135,7 +151,7 @@ impl EspAppServicesInner {
         unreachable!()
     }
 
-    fn mcp_calls(&self, app_id: &str, args: &Value) -> Result<Value, String> {
+    fn mcp_calls(&self, app_id: &str, args: &Value, deadline: Instant) -> Result<Value, String> {
         let connection = args
             .get("connection")
             .and_then(Value::as_str)
@@ -175,17 +191,18 @@ impl EspAppServicesInner {
                 next_id: 1,
             });
         for attempt in 0..2 {
-            let result = self.mcp_batch_once(&policy, &credential, state, calls, retryable);
+            let result =
+                self.mcp_batch_once(&policy, &credential, state, calls, retryable, deadline);
             match result {
                 Ok(value) => return Ok(value),
                 Err(error) if attempt == 0 && stale_mcp_session(&error) => {
                     log::warn!("MCP batch reconnecting after: {error}");
                     state.session_id = None;
-                    std::thread::sleep(Duration::from_millis(250));
+                    wait_to_retry(deadline)?;
                 }
                 Err(error) if attempt == 0 && retryable && transient_mcp_connect(&error) => {
                     log::warn!("MCP batch transport retry after: {error}");
-                    std::thread::sleep(Duration::from_millis(250));
+                    wait_to_retry(deadline)?;
                 }
                 Err(error) => return Err(error),
             }
@@ -207,8 +224,9 @@ impl EspAppServicesInner {
         state: &mut McpState,
         calls: &[Value],
         retryable: bool,
+        deadline: Instant,
     ) -> Result<Value, String> {
-        self.ensure_mcp_session(policy, credential, state)?;
+        self.ensure_mcp_session(policy, credential, state, deadline)?;
         let mut requests = Vec::with_capacity(calls.len());
         let mut request_ids = Vec::with_capacity(calls.len());
         for call in calls {
@@ -233,6 +251,7 @@ impl EspAppServicesInner {
             &requests,
             request_ids.len(),
             retryable,
+            deadline,
         )?;
         if returned_session.is_some() {
             state.session_id = returned_session;
@@ -267,6 +286,7 @@ impl EspAppServicesInner {
         policy: &McpServicePolicy,
         credential: &str,
         state: &mut McpState,
+        deadline: Instant,
     ) -> Result<(), String> {
         if state.session_id.is_some() {
             return Ok(());
@@ -278,13 +298,20 @@ impl EspAppServicesInner {
             "params":{"protocolVersion":MCP_PROTOCOL_VERSION,"capabilities":{},"clientInfo":{"name":"pocket-pi-agentos","version":"0.1.0"}}
         });
         state.next_id = state.next_id.saturating_add(1);
-        let (body, session) = post_mcp(policy, credential, None, &request, true)?;
+        let (body, session) = post_mcp(policy, credential, None, &request, true, deadline)?;
         if let Some(error) = body.get("error") {
             return Err(format!("MCP initialize failed: {error}"));
         }
         let session = session.ok_or_else(|| "MCP omitted session id".to_owned())?;
         let notification = json!({"jsonrpc":"2.0","method":"notifications/initialized"});
-        let _ = post_mcp(policy, credential, Some(&session), &notification, true)?;
+        let _ = post_mcp(
+            policy,
+            credential,
+            Some(&session),
+            &notification,
+            true,
+            deadline,
+        )?;
         state.session_id = Some(session);
         log::info!("MCP session initialized");
         Ok(())
@@ -298,10 +325,11 @@ impl EspAppServicesInner {
         operation: &str,
         args: &Value,
         retryable: bool,
+        deadline: Instant,
     ) -> Result<Value, String> {
         let operation_started = Instant::now();
         log::info!("MCP {operation} started");
-        self.ensure_mcp_session(policy, credential, state)?;
+        self.ensure_mcp_session(policy, credential, state, deadline)?;
         let request = json!({
             "jsonrpc":"2.0",
             "id":state.next_id,
@@ -315,6 +343,7 @@ impl EspAppServicesInner {
             state.session_id.as_deref(),
             &request,
             retryable,
+            deadline,
         )?;
         if returned_session.is_some() {
             state.session_id = returned_session;
@@ -335,13 +364,14 @@ impl AppServiceHost for EspAppServices {
         service: &str,
         operation: &str,
         args: &Value,
+        deadline: Instant,
     ) -> Result<Value, String> {
         if !self.inner.network_ready.load(Ordering::Acquire) {
             return Err("Network is not connected; App data was not changed".to_owned());
         }
         match (service, operation) {
-            ("mcp.client", "callTool") => self.inner.mcp_call(app_id, args),
-            ("mcp.client", "callTools") => self.inner.mcp_calls(app_id, args),
+            ("mcp.client", "callTool") => self.inner.mcp_call(app_id, args, deadline),
+            ("mcp.client", "callTools") => self.inner.mcp_calls(app_id, args, deadline),
             _ => Err(format!("App {app_id} cannot access service {service}")),
         }
     }
@@ -350,11 +380,12 @@ impl AppServiceHost for EspAppServices {
         &self,
         app_id: &str,
         request: HttpRequest,
+        deadline: Instant,
     ) -> std::result::Result<TransportCompletion, NetFailure> {
         if !self.inner.network_ready.load(Ordering::Acquire) {
             return Err(NetFailure::new("unavailable", "network is not connected"));
         }
-        self.inner.http(app_id, request)
+        self.inner.http(app_id, request, deadline)
     }
 }
 
@@ -382,10 +413,28 @@ fn transient_mcp_connect(error: &str) -> bool {
     error.contains("ESP_ERR_HTTP_CONNECT")
 }
 
+fn remaining(deadline: Instant) -> Result<Duration, String> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|duration| !duration.is_zero())
+        .ok_or_else(|| "App Data Action deadline expired".to_owned())
+}
+
+fn yield_current_task() {
+    unsafe { esp_idf_svc::sys::vTaskDelay(1) };
+}
+
+fn wait_to_retry(deadline: Instant) -> Result<(), String> {
+    let delay = remaining(deadline)?.min(MCP_RETRY_DELAY);
+    delay_current_task(delay);
+    remaining(deadline).map(|_| ())
+}
+
 fn execute_http(
     meta: HttpRequest,
     credential: Option<&CredentialBinding>,
     credentials: &BTreeMap<String, String>,
+    deadline: Instant,
 ) -> std::result::Result<TransportCompletion, NetFailure> {
     let length = meta.body.len().to_string();
     let mut values = meta.headers;
@@ -408,8 +457,7 @@ fn execute_http(
         .iter()
         .map(|(name, value)| (name.as_str(), value.as_str()))
         .collect::<Vec<_>>();
-    let mut client =
-        client(Duration::from_millis(u64::from(meta.timeout_ms))).map_err(net_failure)?;
+    let mut client = client(remaining(deadline).map_err(net_failure)?).map_err(net_failure)?;
     let mut request = client
         .request(http_method(&meta.method)?, &meta.url, &headers)
         .map_err(|error| net_failure(format!("create HTTPS request: {error}")))?;
@@ -427,7 +475,8 @@ fn execute_http(
     let expected_length = response
         .header("content-length")
         .and_then(|value| value.parse::<usize>().ok());
-    let body = read_bounded(&mut response, meta.max_bytes, expected_length).map_err(net_failure)?;
+    let body = read_bounded(&mut response, meta.max_bytes, expected_length, deadline)
+        .map_err(net_failure)?;
     let mut response_headers = BTreeMap::new();
     if let Some(content_type) = content_type {
         response_headers.insert("content-type".to_owned(), content_type);
@@ -478,6 +527,7 @@ fn submit_mcp(
     payload: &str,
     request_label: &str,
     retryable: bool,
+    deadline: Instant,
 ) -> Result<Response<EspHttpConnection>, String> {
     let length = payload.len().to_string();
     for attempt in 0..2 {
@@ -491,7 +541,7 @@ fn submit_mcp(
         if let Some(session) = session {
             headers.push(("mcp-session-id", session));
         }
-        let mut connection = connection(Duration::from_secs(12))?;
+        let mut connection = connection(remaining(deadline)?)?;
         connection
             .initiate_request(Method::Post, &policy.url, &headers)
             .map_err(|error| format!("create MCP request: {error:?}"))?;
@@ -521,6 +571,7 @@ fn submit_mcp(
                     "MCP {request_label} received no response headers in {}ms; reconnecting once",
                     started.elapsed().as_millis()
                 );
+                wait_to_retry(deadline)?;
             }
             Err(error) => {
                 return Err(format!("send MCP request: {error:?}"));
@@ -536,6 +587,7 @@ fn post_mcp(
     session: Option<&str>,
     body: &Value,
     retryable: bool,
+    deadline: Instant,
 ) -> Result<(Value, Option<String>), String> {
     let request_label = body
         .get("params")
@@ -551,6 +603,7 @@ fn post_mcp(
         &payload,
         request_label,
         retryable,
+        deadline,
     )?;
     let status = response.status();
     let returned_session = response.header("Mcp-Session-Id").map(str::to_owned);
@@ -564,12 +617,12 @@ fn post_mcp(
     }
     let body_started = Instant::now();
     let bytes = if is_event_stream {
-        read_sse_event(&mut response, MAX_MCP_RESPONSE)?
+        read_sse_event(&mut response, MAX_MCP_RESPONSE, deadline)?
     } else {
         let expected_length = response
             .header("content-length")
             .and_then(|value| value.parse::<usize>().ok());
-        read_bounded(&mut response, MAX_MCP_RESPONSE, expected_length)?
+        read_bounded(&mut response, MAX_MCP_RESPONSE, expected_length, deadline)?
     };
     log::info!(
         "MCP HTTP {request_label} body bytes={} in {}ms",
@@ -593,21 +646,35 @@ fn post_mcp_batch(
     bodies: &[Value],
     expected_responses: usize,
     retryable: bool,
+    deadline: Instant,
 ) -> Result<(Vec<Value>, Option<String>), String> {
     let payload =
         serde_json::to_string(bodies).map_err(|error| format!("encode MCP batch: {error}"))?;
-    let mut response = submit_mcp(policy, credential, session, &payload, "batch", retryable)?;
+    let mut response = submit_mcp(
+        policy,
+        credential,
+        session,
+        &payload,
+        "batch",
+        retryable,
+        deadline,
+    )?;
     let status = response.status();
     let returned_session = response.header("Mcp-Session-Id").map(str::to_owned);
     if !(200..300).contains(&status) {
-        let bytes = read_bounded(&mut response, MAX_MCP_RESPONSE, None)?;
+        let bytes = read_bounded(&mut response, MAX_MCP_RESPONSE, None, deadline)?;
         return Err(format!(
             "MCP batch HTTP {status}: {}",
             String::from_utf8_lossy(&bytes)
         ));
     }
     let body_started = Instant::now();
-    let responses = read_sse_values(&mut response, MAX_MCP_RESPONSE, expected_responses)?;
+    let responses = read_sse_values(
+        &mut response,
+        MAX_MCP_RESPONSE,
+        expected_responses,
+        deadline,
+    )?;
     log::info!(
         "MCP HTTP batch responses={} in {}ms",
         responses.len(),
@@ -620,6 +687,7 @@ fn read_bounded(
     reader: &mut impl embedded_svc::io::Read,
     limit: usize,
     expected_length: Option<usize>,
+    deadline: Instant,
 ) -> Result<Vec<u8>, String> {
     if expected_length.is_some_and(|length| length > limit) {
         return Err(format!("HTTPS response exceeded {limit} bytes"));
@@ -627,6 +695,7 @@ fn read_bounded(
     let mut out = Vec::with_capacity(8 * 1024);
     let mut chunk = [0u8; 2048];
     loop {
+        remaining(deadline)?;
         let count = reader
             .read(&mut chunk)
             .map_err(|error| format!("read HTTPS response: {error:?}"))?;
@@ -655,6 +724,7 @@ fn read_bounded(
 fn read_sse_event(
     reader: &mut impl embedded_svc::io::Read,
     limit: usize,
+    deadline: Instant,
 ) -> Result<Vec<u8>, String> {
     let mut out = Vec::with_capacity(8 * 1024);
     // Stop after the first complete SSE event because the server keeps this
@@ -663,6 +733,7 @@ fn read_sse_event(
     // already available from esp_http_client in bounded chunks instead.
     let mut chunk = [0u8; 512];
     loop {
+        remaining(deadline)?;
         let count = reader
             .read(&mut chunk)
             .map_err(|error| format!("read MCP SSE response: {error:?}"))?;
@@ -681,7 +752,12 @@ fn read_sse_event(
     Ok(out)
 }
 
-fn read_sse_values<R>(reader: &mut R, limit: usize, expected: usize) -> Result<Vec<Value>, String>
+fn read_sse_values<R>(
+    reader: &mut R,
+    limit: usize,
+    expected: usize,
+    deadline: Instant,
+) -> Result<Vec<Value>, String>
 where
     R: embedded_svc::io::Read<Error = EspIOError>,
 {
@@ -689,18 +765,23 @@ where
     let mut consumed = 0;
     let mut values = Vec::with_capacity(expected);
     let mut chunk = [0u8; 2048];
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let mut waiting_logged = false;
     while values.len() < expected {
+        remaining(deadline)?;
         let count = match reader.read(&mut chunk) {
             Ok(count) => count,
             Err(error)
                 if error.0.code() == -esp_idf_svc::sys::ESP_ERR_HTTP_EAGAIN
                     && Instant::now() < deadline =>
             {
-                log::info!(
-                    "MCP batch waiting for SSE responses ({}/{expected})",
-                    values.len()
-                );
+                if !waiting_logged {
+                    log::info!(
+                        "MCP batch waiting for SSE responses ({}/{expected})",
+                        values.len()
+                    );
+                    waiting_logged = true;
+                }
+                yield_current_task();
                 continue;
             }
             Err(error) if error.0.code() == -esp_idf_svc::sys::ESP_ERR_HTTP_EAGAIN => {

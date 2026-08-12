@@ -68,7 +68,8 @@ physical-board test.
 The thin bridge CLI provisions the boot-time model choice and routes framed
 model decisions. Its `uart_bridge` adapters reuse a logged-in Codex Coding Plan
 through the persistent Codex app-server, or Claude Code through `stream-json`.
-Both paths forward real text deltas instead of waiting for the whole reply.
+Both paths consume provider deltas internally, then coalesce them into one
+final `PPI-RPC-STREAM` result for the current device-side `UartBackend`.
 Wi-Fi can be selected later from the on-device Settings page.
 
 ```sh

@@ -164,8 +164,10 @@ Backends belong to their host composition, not to the Agent core:
 | ESP32 simulator | local Codex, OpenAI, OpenRouter, Anthropic, DeepSeek V4 |
 | Physical ESP32-P4 | UART to Mac Codex or Claude Code; wireless OpenAI, OpenRouter, Anthropic or DeepSeek V4 |
 
-`UartBackend` and `WirelessBackend` expose the same streaming model boundary to
-the embedded Agent. Provider request/streaming codecs live in
+`UartBackend` and `WirelessBackend` implement the same model-completion
+contract. Wireless providers may emit progress events internally; the current
+UART bridge coalesces provider chunks into one final framed result before it
+reaches the device. Provider request/streaming codecs live in
 `pocket-pi-protocols`; serial framing, desktop CLIs and ESP-IDF HTTPS stay in
 their platform layers.
 
@@ -195,7 +197,8 @@ memory and can create or revise its own recurring schedules.
 
 The shared PocketJS device UI includes:
 
-- Chat with streamed replies, recent-turn history and a full-message reader;
+- Chat with provider-dependent incremental replies, recent-turn history and a
+  full-message reader;
 - Files with workspace metadata, file viewing and scrolling;
 - Settings with Wi-Fi scanning, selection and password entry;
 - touch keyboard and next-schedule status.
@@ -229,9 +232,10 @@ and [docs/esp32-p4-port.md](docs/esp32-p4-port.md) for board-specific details.
 
 ## Current validation
 
-On **2026-08-11**, the embedded-only workspace completed 28 tests with no
-failures, passed workspace Clippy with warnings denied, and built the ESP32-P4
-simulator with none, Exa-only, Robinhood-only and combined App catalogs.
+On **2026-08-12**, the embedded-only workspace completed 30 Rust tests and 3
+App text behavior tests with no failures, passed workspace Clippy with warnings
+denied, and built the ESP32-P4 simulator with none, Exa-only, Robinhood-only and
+combined App catalogs.
 
 Physical firmware, boot, Wi-Fi/DHCP, provider calls and unattended memory
 pressure remain separate evidence tiers. A successful simulator build is not a
@@ -241,10 +245,11 @@ substitute for fresh physical-board acceptance.
 
 ```sh
 cargo test --workspace
+bun test apps/_shared/text.test.ts
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-CI runs the workspace build, tests and clippy checks. LCD scanout, touch,
+CI runs the workspace build, Rust/App behavior tests and clippy checks. LCD scanout, touch,
 LittleFS, Wi-Fi/NVS, memory pressure and real UART/wireless behavior still
 require physical-board acceptance.
 

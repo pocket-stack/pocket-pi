@@ -3,34 +3,13 @@ import { Text, View } from "@pocketjs/framework/components";
 // Pi Design v0.2. These are product-wide visual contracts built only from
 // PocketJS public primitives. App data, navigation and side effects stay with
 // the consuming App.
-export const type = {
+const type = {
   appTitle: "text-2xl text-white font-bold",
   pageTitle: "text-2xl text-slate-950 font-bold",
   heading: "text-xl text-slate-900 font-bold",
   label: "text-base text-slate-600 font-bold",
-  body: "text-lg text-slate-900",
-  bodyStrong: "text-lg text-slate-900 font-bold",
-  caption: "text-base text-slate-500",
   captionStrong: "text-base text-slate-500 font-bold",
 } as const;
-
-export const space = {
-  screenX: "px-6",
-  card: "px-6 py-5",
-  stack: "gap-4",
-} as const;
-
-// Generic containers with arbitrary children remain recipes instead of
-// wrappers: this keeps the Solid/PocketJS native tree literal and predictable.
-export const surface = {
-  card: "rounded-xl shadow bg-white border-slate-100",
-  selectedCard: "rounded-xl shadow bg-emerald-100 border-emerald-500",
-  row: "bg-white",
-  muted: "bg-slate-100",
-  shell: "bg-slate-950",
-} as const;
-
-export type Tone = "neutral" | "info" | "success" | "warning" | "danger";
 
 export const statusBadge = {
   neutral: { surface: "px-3 py-2 rounded-lg bg-slate-100", text: "text-base text-slate-600 font-bold" },

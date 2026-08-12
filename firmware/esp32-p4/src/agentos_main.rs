@@ -21,6 +21,9 @@ use super::{
     BOARD_NAME, PANEL_HEIGHT, PANEL_WIDTH,
 };
 
+const AGENTOS_FREERTOS_HZ: u32 = 100;
+const _: () = assert!(esp_idf_svc::sys::configTICK_RATE_HZ == AGENTOS_FREERTOS_HZ);
+
 #[derive(Clone)]
 struct Message {
     role: &'static str,
@@ -504,9 +507,9 @@ pub fn run() -> anyhow::Result<()> {
             );
             last_heartbeat = Instant::now();
         }
-        // AgentOS is a native FreeRTOS task, not a pthread. The firmware uses
-        // a 100 Hz tick, so one tick polls touch every 10 ms while still
-        // giving CPU0's idle task a watchdog-feeding scheduling window.
+        // AgentOS is a native FreeRTOS task, not a pthread. With a 100 Hz tick,
+        // delaying one tick keeps the loop at scheduler granularity and gives
+        // CPU0's idle task a watchdog-feeding scheduling opportunity.
         unsafe { esp_idf_svc::sys::vTaskDelay(1) };
     }
 }

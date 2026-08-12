@@ -2,7 +2,7 @@
 
 状态：架构基线 + v1 实现记录（以“常驻 Pi Agent System App”为当前实现）。
 
-截至 2026-08-11，当前工作树已经实现可运行的第一版：Pi Agent Root App、App
+截至 2026-08-12，当前工作树已经实现可运行的第一版：Pi Agent Root App、App
 Supervisor、App Tool Catalog/Router、`AppTask` Schedule、`data.fs`、
 `data.sqlite`、后台 Data Action、revision-coalesced projection cache，以及
 Robinhood 和 Exa 两个可选 App，以及 build-time App selection。
@@ -357,7 +357,6 @@ export default defineApp({
     search_tools: { parameters: searchSchema, action: "searchTools" },
     call: { parameters: deferredCallSchema, action: "validatedProviderCall" },
     refresh_portfolio: { parameters: {}, action: "refreshPortfolio" },
-    storage_status: { parameters: {}, action: "storageStatus" },
   },
   providerOperations: checkedInRobinhoodAllowlist,
   actions: { searchTools, validatedProviderCall, refreshPortfolio },
@@ -548,8 +547,7 @@ App Tools
   robinhood.search_tools
   robinhood.call
   robinhood.refresh_portfolio
-  robinhood.storage_status
-  research.search · research.fetch · research.storage_status
+  research.search · research.fetch
 ```
 
 Workspace 动态自定义 Tools 不属于 v1。
@@ -573,7 +571,7 @@ Model 产生 Tool call
        App name    -> App Supervisor.enqueue_data_action(app, tool, args)
                       -> data-action.js -> native transport
                       -> 仅在 Fixed View 消费结果时写 SQLite + app.commit()
-                      -> completion registry 返回真实 ToolResult
+                      -> Data Action worker 直接返回真实 ToolResult
   -> normalized ToolResult
   -> Model
 ```
@@ -581,10 +579,11 @@ Model 产生 Tool call
 Public Tool 参数先由 Agent Tool layer 按 `agent-app.json` schema 校验；Robinhood
 `robinhood.call` 的 deferred upstream schema 再由 Data Action 使用
 `tool-catalog.json` 校验。Tool Router 只负责 ownership、namespaced routing 和 bounded
-completion wait，不声称实现通用结果截断。会改变数据或调用 provider 的 App Tool
-不在 View Guest 执行；纯只读的诊断 Tool（例如 `storage_status`）可以直接读取
-bounded SQLite projection。Agent 发起的 App Tool 等待 Data Action 的真实 completion；
-UI Task 和 Schedule 只需要快速 enqueue receipt。
+completion wait，不声称实现通用结果截断。所有 App Tool 都进入 headless Data Action，
+不在 View Guest 执行。Agent 发起的 App Tool 等待 Data Action 的真实 completion；
+UI Task 和 Schedule 只需要快速 enqueue receipt。一次 Agent App Tool 从进入 Router
+起只有一个 80 秒绝对 deadline；排队、Data Action、PocketJS `fetch()` 和 native MCP
+共同消费剩余时间，不能各自维护另一套业务 timeout。
 
 ## 12. Robinhood MCP 如何接入
 
@@ -607,8 +606,7 @@ Firmware 负责：
 App 负责：
 
 - checked in 54 个 upstream operation snapshot 与 allowlist；
-- 只向 Agent 常驻暴露 `search_tools`、`call`、`refresh_portfolio`、`storage_status`
-  四个小 Tool；
+- 只向 Agent 常驻暴露 `search_tools`、`call`、`refresh_portfolio` 三个小 Tool；
 - 按需返回某个 upstream Tool 的描述与完整 JSON Schema，并在调用前本地校验；
 - 把本地 Tool/Task 映射到 MCP call；
 - normalize provider response；
@@ -742,9 +740,9 @@ bounded projection，不能重读整个数据库。
 - Robinhood 1D/1W chart 固定为 20 个 time buckets；一次 indexed SQLite query
   恰好返回 20 行，View 只绘制这些 bucket 的 point projection；
 - migrations 必须创建必要索引；
-- provider 的模型 stream 只在 transport/decoder 内部消费；Pi Agent 等完整结果
-  后只向 Root View 发一次文本更新，不能让每个 token 触发 JS event、layout 或
-  flash write；
+- provider 的模型 progress 在一次 host poll 内合并为至多一次 Guest delta，不能让
+  每个 token 触发 JS event、layout 或 flash write；当前 UART bridge 则进一步把
+  provider chunks 合并为一个 final result；
 - schema version 和 migrations 由 App 管理。
 
 ### 13.4 App 数据库保存业务事实，不保存原始 Tool payload
@@ -791,6 +789,10 @@ Pi Agent 是拥有更宽 filesystem mount 的特殊 System App，负责：
 - 发现和调用已安装 App Tools；
 - Files、Runs/Schedules、Device Settings View；
 - `agent.sqlite` 中的 conversation、message、run、Tool call。
+
+这是 Root Runtime 的目标职责。当前 v1 已实现 Chat、Files、Apps、Settings 与
+Chat 内的 next AgentWake 摘要；独立 Runs/Schedules View 和 `agent.sqlite` 持久化仍
+以 22.2 的未实现状态为准。
 
 Agent Loop 由 System App release 中的 JavaScript `agent.js`（`pi-agent-core`）
 提供，并与 `app.js` Root View eval 到同一个 PocketJS Guest。Rust 只提供
@@ -854,7 +856,7 @@ Context Assembler 把选定 workspace files 组装成有严格上限的 Agent co
 | `data.fs` | confinement、quota、atomic replace | App files 和 config |
 | `net.http` | TLS、credential、policy allowlist、limits、non-blocking transport | `fetch()`、endpoint 选择和 domain decoding |
 | `mcp.client` | auth、session、framing、limits | safe operation mapping 和 domain semantics |
-| `model.stream` | provider transport、内部 stream decode 和完整 result | Agent policy；thinking/text delta 在每次 host poll 合并后进入 Guest，Root View 只渲染正文 delta |
+| `model.stream` | provider transport、可选的内部 stream decode 和完整 result | Agent policy；wireless progress 可在 host poll 合并后进入 Guest，当前 UART bridge 则把 provider chunks 合并为一个 final result |
 | `schedule.wake` | clock、persistence、claiming | AgentWake 或 AppTask declaration |
 | `shell.bounded` | allowlisted device/workspace operations | Agent 决定何时调用 |
 | `device.settings` | Wi-Fi、NVS、restart | Settings View |
@@ -869,7 +871,8 @@ Native 层拥有稀缺资源、硬件和 secrets；Bundle 拥有产品行为。
 
 ### 17.1 Root/Home
 
-Pi Agent Root View 提供 Chat、Apps、Files、Runs/Schedules 和 Settings。它会
+Pi Agent Root View 当前提供 Chat、Apps、Files、Settings，以及 Chat 内的 next
+AgentWake 摘要。独立 Runs/Schedules View 尚未实现。Root View 会
 替代当前产品 UI 的 Rust `ScreenState`。产品 UI 不保留 legacy Rust 实现或
 双轨 fallback；固件只负责渲染 PocketJS DrawList 和必要的底层硬件错误日志。
 
@@ -1029,8 +1032,8 @@ isolation 和 lifecycle。App Bundle 拥有名称、schema、provider mapping、
    合并成一次 `dataChanged`。普通 frame 与后台 App 不读 SQLite。
 9. Robinhood Data Action 拥有 54 个 operation 的 checked-in deferred catalog、schema
    validation、MCP operation mapping、完整 response decode 和单次 refresh transaction；
-   Pi Agent 常驻只看到 `search_tools`、`call`、`refresh_portfolio`、`storage_status`
-   四个 Tool。每个 provider 结果都返回 Agent，但只有 Fixed View 消费的数据才更新
+   Pi Agent 常驻只看到 `search_tools`、`call`、`refresh_portfolio` 三个 Tool。每个
+   provider 结果都返回 Agent，但只有 Fixed View 消费的数据才更新
    domain table，不保存原始 Tool payload。View 只拥有 accounts/portfolio/positions/
    activity/chart 的 bounded projection 和 cache。chart 的 1D/1W 窗口固定为 20 个
    time buckets，SQLite query 最多返回 20 行，render 不读取 DB。
@@ -1039,11 +1042,11 @@ isolation 和 lifecycle。App Bundle 拥有名称、schema、provider mapping、
     `/contents` 并注入 API key。View 从 `searches` 先读取最新 10 条搜索历史，滚动
     到边界后再按 10 条增量读取；每次 provider search 使用 Exa 标准的最多 10 条
     结果，fetch 不落库。
-11. Root View 已提供 Chat、App 入口、Files、Runs/Schedules、Settings 摘要和
+11. Root View 已提供 Chat、App 入口、Files、Settings 与 next AgentWake 摘要和
    屏幕键盘；Agent policy/loop 在 JS，workspace/App Tools 的受限底层实现和
    AgentWake 由 Rust host 提供。Pocket Pi 的小型 shared Design System inventory
    单独记录在 `docs/pocket-pi-design-system.md`；它只包含 PocketJS 上的基础
-   typography/tokens/components，不包含 App-specific View 或 native UI logic。
+   typography/recipes/components，不包含 App-specific View 或 native UI logic。
 12. ESP32-P4 使用 4 KiB PSRAM launcher，待 ESP-IDF entry task 退出后创建 64
     KiB internal AgentOS runtime stack；App bundle 构建后会 minify 以降低固件
     footprint，但不会把 minify 当作 stack isolation。App Data pthread 使用 128
@@ -1051,8 +1054,8 @@ isolation 和 lifecycle。App Bundle 拥有名称、schema、provider mapping、
     worker；常驻 model worker 使用 64 KiB PSRAM stack。System App 的其他线程仍
     使用恢复后的 platform default。
 13. AgentOS 核心 contract tests 已证明：Agent turn 进行中打开 Robinhood，仍能收到完整回复
-    和 `agent_end`；前后台切换前后 System App Guest identity 不变；Exa 在前台
-    时 Agent 仍能路由 Robinhood App Tool、写 SQLite 并完成 turn。revision contract
+    和 `agent_end`；普通 App 在前台时 Agent 仍能路由另一 App 的 Tool、写 SQLite
+    并完成 turn。revision contract
     test 证明 3 次 commit 在下一前台 frame 只 reload 一次，5 个普通 frame 不
     reload，后台 2 次 commit 在重新打开时只 reload 一次。
 14. Simulator 的核心 Data Action tests 已证明：Exa search 用一次 transaction 写入
@@ -1064,9 +1067,10 @@ isolation 和 lifecycle。App Bundle 拥有名称、schema、provider mapping、
 16. 删除全部 legacy Rust UI 后的基线固件已刷入 ESP32-P4；实机从 System App
     release 的 `agent.js` 在 Root Guest 中启动 Agent，并经 UART Codex backend
     完成 prompt 和 `agent_end`。当前 embedded presentation contract 已进一步改为：
-    provider 可以在 host/transport 内部 stream，但一次 model request 只给 Root View
-    一个完整文本更新。实机长回复测试在 bridge 内部合并 409 个 provider chunks、
-    615 个字符后只发送一个 UART result；完成后继续观察 30 秒没有 task watchdog。
+    provider 可以在 host/transport 内部 stream。wireless host 会在每次 poll 内合并
+    progress；当前实机 UART presentation 则在 bridge 内部合并 409 个 provider
+    chunks、615 个字符后只发送一个 final result；完成后继续观察 30 秒没有 task
+    watchdog。
 17. ESP32-P4 的 PocketJS View 已接入真实 PPA backend，矩形填充、A8 字形混合和
     SRM 图像转换不再走全屏 CPU software fallback；每个 triple-buffer framebuffer
     保留独立 incremental render state。实机启动日志已确认
@@ -1079,7 +1083,13 @@ isolation 和 lifecycle。App Bundle 拥有名称、schema、provider mapping、
     dirty 时才执行 UI `frame()`、更新 retained DrawList 和提交 panel render。
     ESP32 owner 是原生 FreeRTOS task，主循环必须用
     `vTaskDelay` 明确让出 CPU，不能用 pthread 语义的 `std::thread::sleep` 代替；
-    否则即使总 CPU/内存数字不高，CPU0 idle task 仍可能无法喂 watchdog。
+    否则即使总 CPU/内存数字不高，CPU0 idle task 仍可能无法喂 watchdog。固件把
+    FreeRTOS 固定为 100 Hz，因此 scheduler tick 周期是 10 ms；所有等待至少用
+    `vTaskDelay(1)` 跨过一个调度点。App deadline 使用 monotonic `Instant` 计时，
+    不改变 scheduler tick，也不创建亚 tick 轮询。MCP
+    `EAGAIN` 重试必须先让出一个 tick，并限制重复日志。ESP32 Router 不使用受
+    wall-clock 校准影响的 pthread timed condition wait；它每 tick 检查一次 result
+    channel 和 monotonic deadline。
 20. 当前自动化只保留 Tool catalog、安全边界、App state ownership、Data Action
     transaction、resident Agent lifecycle、Tool routing 和 revision coalescing 等核心
     contract；不保留 UI 坐标、按压视觉状态或重复 smoke tests。对应实现已通过
@@ -1093,8 +1103,7 @@ isolation 和 lifecycle。App Bundle 拥有名称、schema、provider mapping、
 22. Exa schema v5 只保存固定 View 消费的 bounded search-history row：query、时间、
     terminal status、result count、top title 和 error；provider 原始 JSON、其余结果
     和 fetched document 都只返回 Agent，不进入 SQLite。每次 search transaction
-    删除 7 天前的 searches；不自动执行 `VACUUM`。`research.storage_status` 只返回
-    search count、allocated/reusable bytes、retention policy 和最近一次运行状态。
+    删除 7 天前的 searches；不自动执行 `VACUUM`。
 23. 正式 `pocket-net` 路径曾在 schema v4 镜像的实体 ESP32-P4 上完成 Exa provider
     success、SQLite 持久化、重启恢复和 30 秒稳定性观察。schema v5 只收窄 App-owned
     projection，不改变已验证的 `/search`、`/contents` transport contract。
@@ -1103,10 +1112,12 @@ isolation 和 lifecycle。App Bundle 拥有名称、schema、provider mapping、
     saved authorization 时交互补录。未传该 flag 的实机 `get_accounts` 已完成 MCP
     initialize 与 provider HTTP 200，收到 7222-byte body，不再出现
     `OAuth token not provided`。
-25. Agent 发起 App Tool 时，`RoutedToolHost` 通过 completion registry 等待真实
-    Data Action 结果，不再把 queued receipt 当作模型结果。Exa 和 Robinhood 的
-    provider payload 都只放进 ToolResult `text`；不再同时复制到 `details`。View 内
-    的小型 `storage_status` 诊断仍可使用结构化 `details`。
+25. Agent 发起 App Tool 时，`RoutedToolHost` 与 Data Action 共用从 Router 创建的
+    80 秒绝对 deadline；worker 直接把真实结果返回等待方，不再经过 Supervisor frame
+    转发，也不把 queued receipt 当作模型结果。PocketJS HTTP 和 native
+    MCP 都只能使用剩余 budget，超时的 Data Action Guest 会被丢弃，避免 pending
+    Promise 在后续调用中恢复。Exa 和 Robinhood 的 provider payload 都只放进
+    ToolResult `text`，不再同时复制到 `details`。
 26. 最新实机链路已完成 Exa search → fetch → DeepSeek 最终总结；模型 worker 内复用
     HTTPS client 后，该轮没有 TLS `-0x3000`、pthread 创建失败或重启。大 Tool Result
     同步进入 QuickJS context 时仍出现 task-watchdog warning，所以持续无人值守稳定性
@@ -1136,9 +1147,6 @@ isolation 和 lifecycle。App Bundle 拥有名称、schema、provider mapping、
 - 通用 Data Action runner 已在当前实机验证 FreeRTOS pthread stack、断网
   failure transaction、SQLite dump、network fail-fast 与 provider success；持续
   触摸切换和成功/失败交替 retry 仍待验证。
-- Agent Tool completion 已实现，但当前 Router 的 bounded wait 为 45 秒；Exa transport
-  自身允许 60 秒。两层 timeout 需要在后续统一，避免深度搜索仍在进行时 Agent 先收到
-  Router timeout。
 - v1 是一个 App-level revision。Robinhood 已将 DB read 限制在 initial/
   `dataChanged` 和 account/span 的 bounded cache miss，但所有 projection cache 的
   `loadedRevision` 仍需继续显式化，随后再用板上 query 计数确认交互路径为零重读。

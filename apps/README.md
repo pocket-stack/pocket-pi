@@ -2,7 +2,8 @@
 
 Each directory is one independently versioned PocketJS App source. The checked
 in `dist/app.js` and `dist/app.pak` files are target artifacts embedded into the
-firmware as the recovery release, then seeded into `/workspace` on boot.
+firmware as the built-in release, then seeded into `/workspace` on boot. This
+is not yet a signed install, rollback, or recovery-UI mechanism.
 
 - `pi-agent`: the privileged Root View; its filesystem mount is `/workspace`.
 - `robinhood`: curated MCP tools, `refreshPortfolio` AppTask, SQLite and View.

@@ -1192,7 +1192,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "pocket-pi-agentos",
- "serde_json",
 ]
 
 [[package]]

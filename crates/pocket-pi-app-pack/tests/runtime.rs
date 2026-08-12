@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use pocket_pi_agentos::{
     AppServiceHost, AppSupervisor, HttpRequest, NetFailure, RoutedToolHost, TransportCompletion,
-    ROOT_APP_ID,
+    APP_ACTION_TIMEOUT, ROOT_APP_ID,
 };
 use pocket_pi_app_pack::catalog;
 use pocket_pi_embedded::{AgentEvent, ModelBackend, ToolHost, ToolResult};
@@ -20,14 +20,23 @@ impl AppServiceHost for Services {
         _service: &str,
         _operation: &str,
         _args: &Value,
+        _deadline: Instant,
     ) -> Result<Value, String> {
         Err("unexpected App service call".into())
     }
 
-    fn http(&self, app_id: &str, request: HttpRequest) -> Result<TransportCompletion, NetFailure> {
+    fn http(
+        &self,
+        app_id: &str,
+        request: HttpRequest,
+        deadline: Instant,
+    ) -> Result<TransportCompletion, NetFailure> {
         assert_eq!(app_id, "exa");
         assert_eq!(request.url, "https://api.exa.ai/search");
         assert_eq!(request.method, "POST");
+        let total_ms = APP_ACTION_TIMEOUT.as_millis() as u32;
+        assert!((1..=total_ms).contains(&request.timeout_ms));
+        assert!(deadline.saturating_duration_since(Instant::now()) <= APP_ACTION_TIMEOUT);
         let body: Value = serde_json::from_slice(&request.body).unwrap();
         assert_eq!(body["query"], "Pocket Pi architecture");
         let response = serde_json::json!({
@@ -122,9 +131,9 @@ fn agent_routes_a_background_app_tool_through_http_and_sqlite() {
     let mut finished = false;
     while Instant::now() < deadline && !finished {
         while let Ok(request) = requests.try_recv() {
-            request.handle(&mut supervisor);
+            request.handle(&supervisor);
         }
-        for event in supervisor.frame().unwrap() {
+        for event in supervisor.frame_render(true).unwrap() {
             match event {
                 AgentEvent::ResponseText(delta) => response.push_str(&delta),
                 AgentEvent::Done => finished = true,
@@ -138,9 +147,21 @@ fn agent_routes_a_background_app_tool_through_http_and_sqlite() {
     assert!(finished);
     assert_eq!(response, "research complete");
     assert_eq!(supervisor.active_id(), "robinhood");
-    let storage = supervisor.invoke_tool("research.storage_status", "{}");
-    assert!(!storage.is_error, "{}", storage.text);
-    assert_eq!(storage.details["searches"], 1);
+    let mut database =
+        pocket_db::DbModule::new(pocket_db::Storage::Dir(temp.path().join("apps/exa/data")));
+    let handle = database.open("exa");
+    assert!(handle >= 0);
+    let query: Value = serde_json::from_str(&database.query(
+        handle,
+        "SELECT query,status,result_count FROM searches",
+        "[]",
+    ))
+    .unwrap();
+    database.close(handle);
+    assert_eq!(
+        query["rows"],
+        serde_json::json!([["Pocket Pi architecture", "ok", 1]])
+    );
     supervisor.open(ROOT_APP_ID).unwrap();
     assert_eq!(supervisor.active_id(), ROOT_APP_ID);
 }

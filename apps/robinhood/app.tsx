@@ -320,29 +320,6 @@ function tick(): string {
   return "";
 }
 
-function storageStatus(): any {
-  const tables = db.query("SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as unknown as Array<{ name: string; sql: string }>;
-  const names = new Set(tables.map((table) => table.name));
-  const tableSummary = tables.map((table) => {
-    const rowCount = (db.query("SELECT COUNT(*) AS count FROM " + table.name).get() as unknown as { count: number }).count;
-    return { name: table.name, rowCount, schema: table.sql };
-  });
-  const latestRefreshes = names.has("refresh_runs")
-    ? db.query("SELECT id,started_at,completed_at,operation_count,success_count,status,error FROM refresh_runs ORDER BY id DESC LIMIT 3").all() : [];
-  const latestPortfolios = names.has("portfolio_current")
-    ? db.query("SELECT substr(account_number,-4) AS account_suffix,cash,buying_power,day_pnl,week_pnl,observed_at FROM portfolio_current ORDER BY observed_at DESC LIMIT 4").all() : [];
-  const latestValues = names.has("total_value")
-    ? db.query("SELECT substr(account_number,-4) AS account_suffix,observed_at,value FROM total_value ORDER BY observed_at DESC LIMIT 8").all() : [];
-  return {
-    database: "robinhood.sqlite",
-    schemaVersion: DB_SCHEMA_VERSION,
-    tables: tableSummary,
-    latestRefreshes,
-    latestPortfolios,
-    latestValues,
-  };
-}
-
 function trend(): { change: string; percent: string; positive: boolean } {
   return chartTrend();
 }
@@ -504,13 +481,6 @@ mount(() => <Robinhood />);
       : currentRevision;
     loadView(revision);
     return "";
-  },
-  invokeTool(name: string) {
-    try {
-      const value = name === "robinhood.storage_status" ? storageStatus()
-        : (() => { throw new Error("Data-writing tools run in the background App Data Action"); })();
-      return JSON.stringify({ text: JSON.stringify(value), details: value, isError: false });
-    } catch (error) { return JSON.stringify({ text: error instanceof Error ? error.message : String(error), isError: true }); }
   },
   tap(x: number, y: number) {
     if (screen() !== "dashboard") {

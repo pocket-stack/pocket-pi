@@ -78,38 +78,6 @@ function loadView(revision: number) {
   }
 }
 
-function storageStatus(): { text: string; details: any } {
-  const pageSize = Number((db.query("PRAGMA page_size").get() as unknown as { page_size?: number } | null)?.page_size ?? 0);
-  const pageCount = Number((db.query("PRAGMA page_count").get() as unknown as { page_count?: number } | null)?.page_count ?? 0);
-  const freelistCount = Number((db.query("PRAGMA freelist_count").get() as unknown as { freelist_count?: number } | null)?.freelist_count ?? 0);
-  const schemaVersion = Number((db.query("PRAGMA user_version").get() as unknown as { user_version?: number } | null)?.user_version ?? 0);
-  const searches = schemaVersion === DB_SCHEMA_VERSION
-    ? Number((db.query("SELECT COUNT(*) AS count FROM searches").get() as unknown as { count?: number } | null)?.count ?? 0)
-    : 0;
-  const latestSearch = schemaVersion === DB_SCHEMA_VERSION ? db.query(`
-    SELECT id,searched_at,status,result_count,error
-    FROM searches ORDER BY id DESC LIMIT 1
-  `).get() : null;
-  const details = {
-    database: "exa.sqlite",
-    schemaVersion,
-    expectedSchemaVersion: DB_SCHEMA_VERSION,
-    retentionDays: RETENTION_DAYS,
-    searches,
-    allocatedBytes: pageSize * pageCount,
-    reusableBytes: pageSize * freelistCount,
-    latestSearch,
-  };
-  const latest = latestSearch as null | { id?: number; status?: string; result_count?: number };
-  const latestText = latest
-    ? ` Latest #${latest.id ?? "?"}: ${latest.status ?? "unknown"}, ${latest.result_count ?? 0} results.`
-    : " No searches yet.";
-  return {
-    text: `Exa storage (schema ${schemaVersion}/${DB_SCHEMA_VERSION}): ${searches} searches; ${RETENTION_DAYS}-day retention; ${details.allocatedBytes} bytes allocated (${details.reusableBytes} reusable).${latestText}`,
-    details,
-  };
-}
-
 function Exa() {
   return (
     <View class="flex-col w-full h-full bg-slate-50">
@@ -167,15 +135,6 @@ mount(() => <Exa />);
       : loadedRevision;
     loadView(revision);
     return "";
-  },
-  invokeTool(name: string) {
-    try {
-      const value = name === "research.storage_status" ? storageStatus()
-        : (() => { throw new Error("Data-writing tools run in the background App Data Action"); })();
-      return JSON.stringify({ text: value.text, details: value.details, isError: false });
-    } catch (error) {
-      return JSON.stringify({ text: error instanceof Error ? error.message : String(error), isError: true });
-    }
   },
   tap(x: number, y: number) {
     if (y < 112 && x < 100) return JSON.stringify({ type: "navigate", app: "pi-agent" });

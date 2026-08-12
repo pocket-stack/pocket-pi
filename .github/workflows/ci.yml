@@ -22,6 +22,9 @@ jobs:
           rustup component add clippy
           rustup default stable
 
+      - name: Bun
+        uses: oven-sh/setup-bun@v2
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -41,3 +44,6 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+      - name: App text behavior tests
+        run: bun test apps/_shared/text.test.ts

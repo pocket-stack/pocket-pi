@@ -28,6 +28,13 @@ const WIFI_NVS_PASSWORD_KEY: &str = "wifi_pass";
 const AGENTOS_LAUNCHER_STACK_BYTES: u32 = 4 * 1024;
 const AGENTOS_TASK_STACK_BYTES: u32 = 64 * 1024;
 
+fn delay_current_task(delay: Duration) {
+    let ticks = esp_idf_svc::hal::delay::TickType::from(delay)
+        .ticks()
+        .max(1);
+    unsafe { esp_idf_svc::sys::vTaskDelay(ticks) };
+}
+
 fn main() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
@@ -56,7 +63,7 @@ unsafe extern "C" fn agentos_launcher_task(_argument: *mut core::ffi::c_void) {
     // Let ESP-IDF delete its entry task first. That releases enough contiguous
     // internal RAM for the large runtime stack required by QuickJS. The tiny
     // launcher itself lives in PSRAM and never performs flash I/O.
-    esp_idf_svc::sys::vTaskDelay(10);
+    delay_current_task(Duration::from_millis(100));
     let mut task = core::ptr::null_mut();
     let result = esp_idf_svc::sys::xTaskCreatePinnedToCoreWithCaps(
         Some(agentos_task),
@@ -77,7 +84,7 @@ unsafe extern "C" fn agentos_launcher_task(_argument: *mut core::ffi::c_void) {
         log::error!("could not create AgentOS runtime task (result={result})");
     }
     loop {
-        esp_idf_svc::sys::vTaskDelay(1000);
+        delay_current_task(Duration::from_secs(10));
     }
 }
 
@@ -86,7 +93,7 @@ unsafe extern "C" fn agentos_task(_argument: *mut core::ffi::c_void) {
         log::error!("AgentOS runtime stopped: {error:#}");
     }
     loop {
-        esp_idf_svc::sys::vTaskDelay(1000);
+        delay_current_task(Duration::from_secs(10));
     }
 }
 
@@ -128,7 +135,7 @@ impl PlatformTools for EspPlatform {
             .name("delayed-reboot".to_owned())
             .stack_size(4 * 1024)
             .spawn(|| {
-                std::thread::sleep(Duration::from_millis(750));
+                delay_current_task(Duration::from_millis(750));
                 unsafe { esp_idf_svc::sys::esp_restart() }
             })
             .map_err(|error| format!("schedule reboot: {error}"))?;
@@ -152,7 +159,7 @@ fn init_wifi(
         if Instant::now() >= deadline {
             anyhow::bail!("C6 Wi-Fi driver did not stop before lwIP attach")
         }
-        std::thread::sleep(Duration::from_millis(25));
+        delay_current_task(Duration::from_millis(25));
     }
     let sta_netif = EspNetif::new(NetifStack::Sta)?;
     esp_result("esp_netif_attach_wifi_station", unsafe {
@@ -228,7 +235,7 @@ impl WifiConnection {
             // driver's connecting state even though is_connected() is false.
             // Clear that state before every explicit attempt or retry.
             let _ = self.driver.disconnect();
-            std::thread::sleep(Duration::from_millis(50));
+            delay_current_task(Duration::from_millis(50));
         }
         self.driver
             .set_configuration(&Configuration::Client(ClientConfiguration {

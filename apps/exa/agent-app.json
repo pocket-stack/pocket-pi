@@ -129,15 +129,6 @@
         "required": ["url"],
         "additionalProperties": false
       }
-    },
-    {
-      "name": "research.storage_status",
-      "description": "Return compact local SQLite counts, space usage, the 7-day retention policy, and latest search status without contacting Exa.",
-      "parameters": {
-        "type": "object",
-        "properties": {},
-        "additionalProperties": false
-      }
     }
   ],
   "tasks": [],

@@ -9,7 +9,6 @@ if (handle < 0) throw new Error("open exa.sqlite");
 const SCHEMA_VERSION = 5;
 const RETENTION_DAYS = 7;
 const RETENTION_SECONDS = RETENTION_DAYS * 24 * 60 * 60;
-const HTTP_TIMEOUT_MS = 60_000;
 
 function dbError(): string { return String(nativeDb.lastError(handle) || "SQLite operation failed"); }
 function exec(sql: string): void { if (nativeDb.exec(handle, sql) !== 0) throw new Error(dbError()); }
@@ -49,7 +48,7 @@ async function post(path: "/search" | "/contents", body: any): Promise<any> {
     method: "POST",
     headers: { accept: "application/json", "content-type": "application/json" },
     body: JSON.stringify(body),
-    timeoutMs: HTTP_TIMEOUT_MS,
+    timeoutMs: (globalThis as any).app.remainingMs(),
     maxBytes: 96 * 1024,
   });
   const value = await response.json<any>();

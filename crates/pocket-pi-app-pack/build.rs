@@ -57,9 +57,7 @@ fn bundle(root: &Path, app: &str, system: bool) -> String {
     }
     let data = app.join("dist/data-action.js");
     let agent = app.join("dist/agent.js");
-    if data.is_file() {
-        println!("cargo:rerun-if-changed={}", data.display());
-    }
+    println!("cargo:rerun-if-changed={}", data.display());
     if system {
         println!("cargo:rerun-if-changed={}", agent.display());
     }

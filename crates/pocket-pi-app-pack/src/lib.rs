@@ -22,8 +22,8 @@ mod tests {
         actual.sort_unstable();
         let mut expected = vec!["pi-agent"];
         let selected = option_env!("POCKET_PI_APPS").unwrap_or("robinhood,exa");
-        if selected != "none" {
-            expected.extend(selected.split(','));
+        if selected != "none" && !selected.is_empty() {
+            expected.extend(selected.split(',').map(str::trim));
         }
         expected.sort_unstable();
         assert_eq!(actual, expected);
@@ -44,30 +44,13 @@ mod tests {
             .iter()
             .map(|tool| tool["name"].as_str().unwrap().to_owned())
             .collect::<BTreeSet<_>>();
-        assert_eq!(catalog.provider_operations("robinhood"), upstream);
-        assert_eq!(upstream.len(), 54);
-        assert_eq!(descriptor.tools.len(), 4);
-    }
-
-    #[test]
-    fn exa_search_exposes_category_dates_and_depth() {
-        let catalog = catalog().unwrap();
-        let Some(descriptor) = catalog.descriptor("exa") else {
-            return;
-        };
-        let search = descriptor
-            .tools
+        let allowed = descriptor
+            .provider_operations
             .iter()
-            .find(|tool| tool["name"] == "research.search")
-            .unwrap();
-        let properties = search["parameters"]["properties"].as_object().unwrap();
-        for name in [
-            "category",
-            "startPublishedDate",
-            "endPublishedDate",
-            "searchType",
-        ] {
-            assert!(properties.contains_key(name), "missing search field {name}");
-        }
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(allowed, upstream);
+        assert_eq!(upstream.len(), 54);
+        assert_eq!(descriptor.tools.len(), 3);
     }
 }

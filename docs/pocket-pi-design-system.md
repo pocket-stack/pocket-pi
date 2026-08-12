@@ -11,10 +11,10 @@ PocketJS framework primitives，不能调用 ESP-IDF、Pocket Pi Rust 私有接�
 
 | Foundation | 包含 | 当前规则 |
 | --- | --- | --- |
-| `type` | app title、page title、heading、label、body、caption | ESP 主阅读文本由 14/16px 提升到 16/18px；24px title 保持不变 |
-| `space` | 24px screen gutter、card padding、stack gap | 720x1280 screen density |
-| `surface` | card、selected card、row、muted、shell recipes | arbitrary children 的容器保持 literal View，不增加不稳定 wrapper |
-| `Tone` | neutral、info、success、warning、danger | 统一背景色、文字色和状态语义 |
+| type hierarchy | app title、page title、heading、label、body、caption | 只保留 shared components 实际消费的 class recipe；ESP 主阅读文本由 14/16px 提升到 16/18px，24px title 保持不变 |
+| spacing | 24px screen gutter、card padding、stack gap | 直接写在当前 concrete component recipe 中，不导出无人消费的 token map |
+| surfaces | card、selected card、row、muted、shell recipes | arbitrary children 的容器保持 literal View；当前没有单独的 unused surface registry |
+| `statusBadge` | neutral、info、success、warning、danger | 统一背景色、文字色和状态语义；保留为当前 shared component recipe |
 | dynamic glyphs | curly quotes、en/em dash、ellipsis、bullet | 进入现有 Inter subset atlas |
 
 PocketJS 当前只提供 12 / 14 / 16 / 18 / 20 / 24 / 36px 的 baked font

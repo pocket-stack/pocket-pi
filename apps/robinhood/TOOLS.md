@@ -2,7 +2,7 @@
 
 Pocket Pi snapshots the upstream Robinhood Trading MCP catalog, but does not put
 all upstream schemas in every model request. The checked-in snapshot currently
-contains 54 upstream Tools. The initial Agent catalog contains four small Pocket
+contains 54 upstream Tools. The initial Agent catalog contains three small Pocket
 Pi Tools:
 
 - `robinhood.search_tools` returns matching upstream descriptions and exact JSON
@@ -10,7 +10,6 @@ Pi Tools:
 - `robinhood.call` validates one upstream call against that schema and routes it
   through the native static allowlist.
 - `robinhood.refresh_portfolio` refreshes the bounded fixed-View projection.
-- `robinhood.storage_status` inspects local projection health.
 
 This is Pocket Pi's cross-model fallback for deferred Tool loading. It follows
 the same load-on-demand design as OpenAI client-executed Tool Search, but is not

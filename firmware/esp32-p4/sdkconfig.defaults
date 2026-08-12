@@ -34,6 +34,15 @@ CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
 CONFIG_FREERTOS_IDLE_TASK_STACKSIZE=4096
 CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=4096
 
+# AgentOS deliberately yields one scheduler tick in its native loops. Pin the
+# 10 ms tick period so vTaskDelay(1) keeps yielding across builds.
+CONFIG_FREERTOS_HZ=100
+CONFIG_ESP_TASK_WDT_EN=y
+CONFIG_ESP_TASK_WDT_INIT=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=5
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=y
+
 # Expose per-task runtime counters so the status bar can report real average
 # CPU utilization across both ESP32-P4 cores.
 

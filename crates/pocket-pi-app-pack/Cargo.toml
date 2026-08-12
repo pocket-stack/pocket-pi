@@ -10,8 +10,9 @@ build = "build.rs"
 [dependencies]
 anyhow.workspace = true
 pocket-pi-agentos = { path = "../pocket-pi-agentos" }
-serde_json.workspace = true
 
 [dev-dependencies]
+pocket-db.workspace = true
 pocket-pi-embedded = { path = "../pocket-pi-embedded" }
+serde_json.workspace = true
 tempfile = "3"
