@@ -16,3 +16,4 @@ ESP_IDF_TOOLS_INSTALL_DIR = "workspace"
 CC_riscv32imafc_esp_espidf = { value = "tools/esp32p4-cc", relative = true }
 AR_riscv32imafc_esp_espidf = { value = "tools/esp32p4-ar", relative = true }
 CFLAGS_riscv32imafc_esp_espidf = "-mabi=ilp32f -march=rv32imafc_zicsr_zifencei_xesppie -fno-pic -fno-PIC -Wno-error=incompatible-pointer-types"
+LIBSQLITE3_FLAGS = "-DSQLITE_TEMP_STORE=3 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_MAX_MMAP_SIZE=0 -DSQLITE_OMIT_WAL -DSQLITE_OMIT_LOAD_EXTENSION -Dlstat=stat"

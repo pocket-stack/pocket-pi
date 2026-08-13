@@ -25,14 +25,14 @@ opt-level = "z"
 anyhow = "1"
 log = "0.4"
 serde_json = "1"
-pocket-pi-device-ui = { path = "../../crates/pocket-pi-device-ui" }
+pocket-pi-agentos = { path = "../../crates/pocket-pi-agentos" }
+pocket-pi-app-pack = { path = "../../crates/pocket-pi-app-pack" }
 pocket-pi-embedded = { path = "../../crates/pocket-pi-embedded" }
 pocket-pi-protocols = { path = "../../crates/pocket-pi-protocols" }
 pocket-pi-tools = { path = "../../crates/pocket-pi-tools" }
 esp-idf-svc = { version = "0.52.1", features = ["critical-section"] }
 embedded-svc = "0.29"
-pocketjs-core = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "4c5dc9ef1dd26e6f49b036c210931d399f2b52b2" }
-pocketjs-esp32p4-ppa = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "4c5dc9ef1dd26e6f49b036c210931d399f2b52b2" }
+pocketjs-esp32p4-ppa = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "9c809bbd047ddc75c27caa4990951a78d942477a", features = ["esp-idf"] }
 
 [build-dependencies]
 embuild = "0.33"
@@ -40,6 +40,12 @@ embuild = "0.33"
 [[package.metadata.esp-idf-sys.extra_components]]
 component_dirs = ["components/esp32_p4_wifi6_touch_lcd_5"]
 bindings_header = "src/waveshare_bindings.h"
+
+[[package.metadata.esp-idf-sys.extra_components]]
+component_dirs = ["components/pocketjs_ppa"]
+
+[[package.metadata.esp-idf-sys.extra_components]]
+component_dirs = ["components/esp_hosted_late_response_fix"]
 
 [[package.metadata.esp-idf-sys.extra_components]]
 remote_component = { name = "espressif/esp_wifi_remote", version = "0.14.*" }

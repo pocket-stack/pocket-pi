@@ -1,15 +1,18 @@
 use core::time::Duration;
+use std::cell::RefCell;
 
 use embedded_svc::http::{client::Client as HttpClient, Method};
 use embedded_svc::io::Write;
 use esp_idf_svc::http::client::{Configuration, EspHttpConnection};
 use pocket_pi_embedded::ModelBackend;
 use pocket_pi_protocols::anthropic_messages;
-use pocket_pi_protocols::model::WirelessProvider;
+use pocket_pi_protocols::model::{ModelStreamEvent, WirelessProvider};
 use pocket_pi_protocols::openai_chat;
 
-const MAX_REQUEST_BYTES: usize = 128 * 1024;
-const MAX_RESPONSE_BYTES: usize = 128 * 1024;
+// EspHttpConnection is thread-affine, so the resident model worker owns it.
+thread_local! {
+    static MODEL_CLIENT: RefCell<Option<HttpClient<EspHttpConnection>>> = const { RefCell::new(None) };
+}
 
 pub struct WirelessBackend {
     provider: WirelessProvider,
@@ -34,11 +37,92 @@ impl WirelessBackend {
                 "https://openrouter.ai/api/v1/chat/completions",
                 openai_chat::build_request_for(pi_request, openai_chat::Dialect::OpenRouter)?,
             )),
+            WirelessProvider::DeepSeek => Ok((
+                "https://api.deepseek.com/chat/completions",
+                openai_chat::build_request_for(pi_request, openai_chat::Dialect::DeepSeek)?,
+            )),
             WirelessProvider::Anthropic => Ok((
                 "https://api.anthropic.com/v1/messages",
                 anthropic_messages::build_request(pi_request)?,
             )),
         }
+    }
+
+    fn connect() -> Result<HttpClient<EspHttpConnection>, String> {
+        let configuration = Configuration {
+            buffer_size: Some(4 * 1024),
+            buffer_size_tx: Some(4 * 1024),
+            timeout: Some(Duration::from_secs(180)),
+            crt_bundle_attach: Some(esp_idf_svc::sys::esp_crt_bundle_attach),
+            ..Default::default()
+        };
+        Ok(HttpClient::wrap(
+            EspHttpConnection::new(&configuration)
+                .map_err(|error| format!("initialize HTTPS: {error}"))?,
+        ))
+    }
+
+    fn send(
+        &self,
+        client: &mut HttpClient<EspHttpConnection>,
+        endpoint: &str,
+        body: &str,
+        headers: &[(&str, &str)],
+        on_event: &mut dyn FnMut(ModelStreamEvent),
+    ) -> Result<String, SendError> {
+        let mut request = client
+            .request(Method::Post, endpoint, headers)
+            .map_err(|error| SendError::BeforeResponse(format!("create model request: {error}")))?;
+        request
+            .write_all(body.as_bytes())
+            .map_err(|error| SendError::BeforeResponse(format!("write model request: {error}")))?;
+        request
+            .flush()
+            .map_err(|error| SendError::BeforeResponse(format!("flush model request: {error}")))?;
+        let mut response = request
+            .submit()
+            .map_err(|error| SendError::BeforeResponse(format!("send model request: {error}")))?;
+        let status = response.status();
+        let mut decoder = match self.provider {
+            WirelessProvider::Anthropic => ProviderStream::Anthropic(Default::default()),
+            WirelessProvider::DeepSeek => {
+                ProviderStream::Chat(openai_chat::Stream::new(openai_chat::Dialect::DeepSeek))
+            }
+            WirelessProvider::OpenAi | WirelessProvider::OpenRouter => {
+                ProviderStream::Chat(Default::default())
+            }
+        };
+        let mut pending = Vec::with_capacity(4 * 1024);
+        let mut chunk = [0u8; 2 * 1024];
+        loop {
+            let count = response
+                .read(&mut chunk)
+                .map_err(|error| SendError::AfterResponse(format!("read model stream: {error}")))?;
+            if count == 0 {
+                break;
+            }
+            pending.extend_from_slice(&chunk[..count]);
+            if (200..300).contains(&status) {
+                drain_sse_lines(&mut pending, &mut decoder, on_event)
+                    .map_err(SendError::AfterResponse)?;
+            }
+        }
+        if !(200..300).contains(&status) {
+            return Err(SendError::AfterResponse(format!(
+                "{} returned HTTP {status}: {}",
+                self.provider.id(),
+                String::from_utf8_lossy(&pending)
+                    .chars()
+                    .take(400)
+                    .collect::<String>()
+            )));
+        }
+        if !pending.is_empty() {
+            pending.push(b'\n');
+            drain_sse_lines(&mut pending, &mut decoder, on_event)
+                .map_err(SendError::AfterResponse)?;
+        }
+        decoder.finish().map_err(SendError::AfterResponse)
     }
 }
 
@@ -46,12 +130,9 @@ impl ModelBackend for WirelessBackend {
     fn complete(
         &self,
         request_json: &str,
-        on_delta: &mut dyn FnMut(&str),
+        on_event: &mut dyn FnMut(ModelStreamEvent),
     ) -> Result<String, String> {
         let (endpoint, body) = self.request(request_json)?;
-        if body.len() > MAX_REQUEST_BYTES {
-            return Err("model request exceeded 128 KiB".into());
-        }
         let content_length = body.len().to_string();
         let bearer = format!("Bearer {}", self.api_key);
         let mut headers = vec![
@@ -65,82 +146,60 @@ impl ModelBackend for WirelessBackend {
                 headers.push(("x-api-key", self.api_key.as_str()));
                 headers.push(("anthropic-version", "2023-06-01"));
             }
-            WirelessProvider::OpenAi | WirelessProvider::OpenRouter => {
+            WirelessProvider::OpenAi
+            | WirelessProvider::OpenRouter
+            | WirelessProvider::DeepSeek => {
                 headers.push(("authorization", bearer.as_str()));
             }
         }
 
-        let configuration = Configuration {
-            buffer_size: Some(4 * 1024),
-            buffer_size_tx: Some(4 * 1024),
-            timeout: Some(Duration::from_secs(180)),
-            crt_bundle_attach: Some(esp_idf_svc::sys::esp_crt_bundle_attach),
-            ..Default::default()
-        };
-        let mut client = HttpClient::wrap(
-            EspHttpConnection::new(&configuration)
-                .map_err(|error| format!("initialize HTTPS: {error}"))?,
-        );
-        let mut request = client
-            .request(Method::Post, endpoint, &headers)
-            .map_err(|error| format!("create model request: {error}"))?;
-        request
-            .write_all(body.as_bytes())
-            .map_err(|error| format!("write model request: {error}"))?;
-        request
-            .flush()
-            .map_err(|error| format!("flush model request: {error}"))?;
-        let mut response = request
-            .submit()
-            .map_err(|error| format!("send model request: {error}"))?;
-        let status = response.status();
-        let mut decoder = match self.provider {
-            WirelessProvider::Anthropic => ProviderStream::Anthropic(Default::default()),
-            WirelessProvider::OpenAi | WirelessProvider::OpenRouter => {
-                ProviderStream::Chat(Default::default())
+        MODEL_CLIENT.with(|slot| {
+            let mut client = slot.borrow_mut();
+            let mut retried = false;
+            loop {
+                if client.is_none() {
+                    *client = Some(Self::connect()?);
+                }
+                match self.send(
+                    client.as_mut().unwrap(),
+                    endpoint,
+                    &body,
+                    &headers,
+                    on_event,
+                ) {
+                    Ok(value) => return Ok(value),
+                    Err(SendError::BeforeResponse(error)) if !retried => {
+                        log::warn!("model transport retry after: {error}");
+                        *client = None;
+                        retried = true;
+                    }
+                    Err(error) => {
+                        *client = None;
+                        return Err(error.message());
+                    }
+                }
             }
-        };
-        let mut received = 0usize;
-        let mut pending = Vec::with_capacity(4 * 1024);
-        let mut chunk = [0u8; 2 * 1024];
-        loop {
-            let count = response
-                .read(&mut chunk)
-                .map_err(|error| format!("read model stream: {error}"))?;
-            if count == 0 {
-                break;
-            }
-            received = received.saturating_add(count);
-            if received > MAX_RESPONSE_BYTES {
-                return Err("model response exceeded 128 KiB".into());
-            }
-            pending.extend_from_slice(&chunk[..count]);
-            if (200..300).contains(&status) {
-                drain_sse_lines(&mut pending, &mut decoder, on_delta)?;
-            }
+        })
+    }
+}
+
+enum SendError {
+    BeforeResponse(String),
+    AfterResponse(String),
+}
+
+impl SendError {
+    fn message(self) -> String {
+        match self {
+            Self::BeforeResponse(message) | Self::AfterResponse(message) => message,
         }
-        if !(200..300).contains(&status) {
-            return Err(format!(
-                "{} returned HTTP {status}: {}",
-                self.provider.id(),
-                String::from_utf8_lossy(&pending)
-                    .chars()
-                    .take(400)
-                    .collect::<String>()
-            ));
-        }
-        if !pending.is_empty() {
-            pending.push(b'\n');
-            drain_sse_lines(&mut pending, &mut decoder, on_delta)?;
-        }
-        decoder.finish()
     }
 }
 
 fn drain_sse_lines(
     pending: &mut Vec<u8>,
     decoder: &mut ProviderStream,
-    on_delta: &mut dyn FnMut(&str),
+    on_event: &mut dyn FnMut(ModelStreamEvent),
 ) -> Result<(), String> {
     while let Some(end) = pending.iter().position(|byte| *byte == b'\n') {
         let mut line = pending.drain(..=end).collect::<Vec<_>>();
@@ -154,8 +213,8 @@ fn drain_sse_lines(
         };
         let data = data.trim_start();
         if !data.is_empty() && data != "[DONE]" {
-            if let Some(delta) = decoder.push(data)? {
-                on_delta(&delta);
+            for event in decoder.push(data)? {
+                on_event(event);
             }
         }
     }
@@ -168,7 +227,7 @@ enum ProviderStream {
 }
 
 impl ProviderStream {
-    fn push(&mut self, data: &str) -> Result<Option<String>, String> {
+    fn push(&mut self, data: &str) -> Result<Vec<ModelStreamEvent>, String> {
         match self {
             Self::Chat(stream) => stream.push(data),
             Self::Anthropic(stream) => stream.push(data),

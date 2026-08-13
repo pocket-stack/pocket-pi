@@ -27,15 +27,24 @@ CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 CONFIG_BSP_LCD_DPI_BUFFER_NUMS=3
 CONFIG_BSP_LCD_COLOR_FORMAT_RGB565=y
 
+# The IDF entry task only queues the small AgentOS launcher. Keeping this small
+# releases enough contiguous internal RAM for the full runtime task afterward.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
 CONFIG_FREERTOS_IDLE_TASK_STACKSIZE=4096
 CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=4096
 
+# AgentOS deliberately yields one scheduler tick in its native loops. Pin the
+# 10 ms tick period so vTaskDelay(1) keeps yielding across builds.
+CONFIG_FREERTOS_HZ=100
+CONFIG_ESP_TASK_WDT_EN=y
+CONFIG_ESP_TASK_WDT_INIT=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=5
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=y
+
 # Expose per-task runtime counters so the status bar can report real average
 # CPU utilization across both ESP32-P4 cores.
-CONFIG_FREERTOS_USE_TRACE_FACILITY=y
-CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
 
 # HTTPS clients need the ESP-IDF certificate bundle. Model endpoints
 # still perform normal hostname verification.

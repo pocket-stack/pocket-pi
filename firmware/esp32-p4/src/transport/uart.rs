@@ -70,8 +70,6 @@ impl LineTransport for UartLineTransport {
                 } else {
                     frame.clear();
                 }
-            } else {
-                std::thread::sleep(Duration::from_millis(1));
             }
         }
         Err(format!("timed out waiting for {prefix}"))

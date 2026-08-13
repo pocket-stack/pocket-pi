@@ -1,5 +1,0 @@
-{
-  "name": "@earendil-works/pi-coding-agent",
-  "version": "0.81.1",
-  "bin": { "pi": "cli.js" }
-}

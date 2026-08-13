@@ -1,0 +1,24 @@
+[package]
+name = "pocket-pi-agentos"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pocket Pi AgentOS app supervisor, bundle runtime and app tool router"
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+pocket-db.workspace = true
+pocket-fs.workspace = true
+pocket-mod.workspace = true
+pocket-net.workspace = true
+pocket-ui-surface.workspace = true
+pocket-pi-embedded = { path = "../pocket-pi-embedded" }
+pocketjs-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

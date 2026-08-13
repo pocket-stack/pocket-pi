@@ -22,6 +22,9 @@ jobs:
           rustup component add clippy
           rustup default stable
 
+      - name: Bun
+        uses: oven-sh/setup-bun@v2
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -39,9 +42,8 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-targets
 
-      # Runs the unit + module-system suite. The Path B integration tests are
-      # #[ignore]: they need the ~13 MB esbuild bundle (git-ignored; built with
-      # `node js/build-pi-full.mjs`) and, for the turn tests, an API key + proxy —
-      # so they're driven locally, not in CI.
       - name: Test
         run: cargo test --workspace
+
+      - name: App text behavior tests
+        run: bun test apps/_shared/text.test.ts

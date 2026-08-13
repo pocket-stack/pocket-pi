@@ -25,7 +25,7 @@ def decision_prompt(request: dict[str, object]) -> tuple[str, list[object]]:
             "You are the model decision backend for a Pi Agent running on an ESP32-P4.",
             "Do not call Mac tools. The registered tools below run only on the ESP32.",
             "Return exactly one compact JSON object and no Markdown: "
-            '{"toolCall":{"name":"registered.name","arguments":{...}}} for one action, or '
+            '{"toolCalls":[{"name":"registered.name","arguments":{...}}]} for actions, or '
             '{"text":"final response"} when the turn is complete. Never claim success before '
             "the corresponding tool result appears in the conversation.",
             f"System instruction: {system}" if system else "",
@@ -49,29 +49,45 @@ def parse_decision(raw: str, tools: list[object], provider: str) -> dict[str, ob
         raise ValueError(f"{provider} returned invalid decision JSON: {error}") from error
     if not isinstance(value, dict):
         raise ValueError(f"{provider} decision must be a JSON object")
-    call = value.get("toolCall")
-    if isinstance(call, dict):
+    calls = value.get("toolCalls")
+    if isinstance(calls, list) and calls:
         registered = {
             tool.get("name")
             for tool in tools
             if isinstance(tool, dict) and isinstance(tool.get("name"), str)
         }
-        name = call.get("name")
-        arguments = call.get("arguments", {})
-        if name not in registered:
-            raise ValueError(f"{provider} requested unregistered ESP32 tool: {name}")
-        if not isinstance(arguments, dict):
-            raise ValueError("toolCall.arguments must be a JSON object")
-        return {
-            "toolCall": {
-                "id": f"esp_{int(time.time() * 1000)}",
+        result_calls: list[dict[str, object]] = []
+        base_id = int(time.time() * 1000)
+        for index, call in enumerate(calls):
+            if not isinstance(call, dict):
+                raise ValueError(f"{provider} toolCalls entries must be objects")
+            name = call.get("name")
+            arguments = call.get("arguments", {})
+            if name not in registered:
+                raise ValueError(f"{provider} requested unregistered ESP32 tool: {name}")
+            if not isinstance(arguments, dict):
+                raise ValueError("toolCalls arguments must be JSON objects")
+            result_calls.append({
+                "id": f"esp_{base_id}_{index}",
                 "name": name,
                 "arguments": arguments,
-            }
+            })
+        return {
+            "thinking": "",
+            "text": "",
+            "toolCalls": result_calls,
+            "usage": {},
+            "stopReason": "toolUse",
         }
     if isinstance(value.get("text"), str):
-        return {"text": value["text"]}
-    raise ValueError(f"{provider} decision needs text or toolCall")
+        return {
+            "thinking": "",
+            "text": value["text"],
+            "toolCalls": [],
+            "usage": {},
+            "stopReason": "stop",
+        }
+    raise ValueError(f"{provider} decision needs text or non-empty toolCalls")
 
 
 def _partial_text(raw: str) -> str | None:

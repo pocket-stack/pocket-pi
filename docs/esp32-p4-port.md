@@ -1,26 +1,29 @@
-# ESP32-P4 host
+# ESP32-P4 reference target
 
-Pocket Pi has two agent profiles and three hosts:
+ESP32-P4 is Pocket Pi's first fully supported hardware target and current
+reference implementation. It demonstrates the complete device runtime:
+resident Pi Agent, `/workspace`, native tools, schedules, Agent-native Apps,
+local state, PocketJS UI and native device lifecycle.
 
-| Target | Agent profile | Runs on |
+The repository also provides one companion development composition:
+
+| Role | Implementation | Runs on |
 |---|---|---|
-| `macos` | full `pi-coding-agent` | macOS |
-| `esp32-p4` | bounded `pi-agent-core` | ESP32-P4 |
-| `esp32-p4-sim` | bounded `pi-agent-core` | macOS |
+| Supported hardware target | `firmware/esp32-p4` | ESP32-P4 |
+| Product-contract simulator | `hosts/esp32-p4-sim` | macOS development host |
 
-The physical host and simulator use the same
-`pocket-pi-device-ui` crate: one 720x1280 draw list, one set of fonts, and one
-touch hit map. Simulator mouse clicks are converted to physical panel
-coordinates and dispatched through the same `ScreenState::handle_tap` method.
-The shared embedded UI displays Chat, Files and Settings. Settings is not part
-of the normal macOS host.
+The physical host and simulator use the same PocketJS App bundles and
+`pocket-pi-agentos` supervisor at a 720x1280 logical viewport. Simulator mouse
+clicks and physical touch coordinates are both dispatched to the selected App
+View. The Pi Agent Root View displays Chat, Apps, Files and Settings; there is
+no parallel Rust product UI. The simulator is not a desktop Pocket Pi product,
+a generic Agent harness or a second supported target.
 
 The physical host selects `UartBackend` for a Mac Codex/Claude Code bridge or
-`WirelessBackend` for direct OpenAI/OpenRouter/Anthropic HTTPS. These remain
+`WirelessBackend` for direct OpenAI/OpenRouter/Anthropic/DeepSeek HTTPS. These remain
 host adapters; they do not belong in the UI or embedded Agent core.
 
 ```sh
-cargo xtask build macos
 cargo xtask build esp32-p4
 cargo xtask build esp32-p4-sim
 cargo xtask run esp32-p4-sim
@@ -46,21 +49,23 @@ OPENROUTER_API_KEY=... cargo xtask run esp32-p4-sim \
   --backend openrouter --model openai/gpt-5.6
 ANTHROPIC_API_KEY=... cargo xtask run esp32-p4-sim \
   --backend anthropic --model claude-sonnet-4-6
+DEEPSEEK_API_KEY=... DEEPSEEK_THINKING_LEVEL=xhigh \
+  cargo xtask run esp32-p4-sim --backend deepseek
 
 # Real Agent -> native write tool -> simulated LittleFS workspace
 cargo xtask run esp32-p4-sim --backend codex \
   --workspace target/esp32-workspace
 ```
 
-The Mac simulator and physical firmware register the same core tool contracts:
+The development simulator and physical firmware register the same core tool contracts:
 `read/write/edit/find/grep/ls`, bounded `bash`, `device.status`,
 `time.now`, `workspace.context`, and the four `schedule.*` operations.
 The Pi runtime obtains these definitions directly from the executable tool
 registry, so advertised and executable tools cannot drift.
 
-The simulator is a contract-level product simulator, not a CPU or peripheral
+The simulator is a contract-level development tool, not a CPU or peripheral
 emulator. It must exercise the embedded Agent, tools, workspace, schedules and
-plugin contracts, but may use simpler macOS adapters. ESP-IDF, PSRAM, PPA,
+App contracts, but may use simpler macOS adapters. ESP-IDF, PSRAM, PPA,
 LittleFS capacity, MIPI-DSI, touch-controller and Wi-Fi/NVS behavior require a
 physical-board test.
 
@@ -69,7 +74,8 @@ physical-board test.
 The thin bridge CLI provisions the boot-time model choice and routes framed
 model decisions. Its `uart_bridge` adapters reuse a logged-in Codex Coding Plan
 through the persistent Codex app-server, or Claude Code through `stream-json`.
-Both paths forward real text deltas instead of waiting for the whole reply.
+Both paths consume provider deltas internally, then coalesce them into one
+final `PPI-RPC-STREAM` result for the current device-side `UartBackend`.
 Wi-Fi can be selected later from the on-device Settings page.
 
 ```sh
@@ -92,9 +98,9 @@ UART provisioning also seeds the board clock from the Mac for development.
 Standalone operation uses ESP-IDF SNTP after Wi-Fi connects. Both feed the same
 native time and persistent schedule implementation.
 
-## Shared UI boundary
+## App UI boundary
 
-`pocket-pi-device-ui` owns rendering, interaction state and the portable
-workspace browser. Each host supplies a mounted workspace root and its model
-adapter. External applications own their UI adapters, provider clients and
-credentials; Pocket Pi core contains no Robinhood or Exa domain code.
+`apps/pi-agent`, `apps/robinhood`, and `apps/exa` own their PocketJS Views.
+`pocket-pi-agentos` selects the foreground View and keeps the Pi Agent System
+App resident. Each host supplies the mounted workspace, capabilities, model
+adapter, and renderer; product UI and domain logic do not live in Rust firmware.

@@ -1,8 +1,11 @@
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use serde_json::{json, Map, Value};
+
+use crate::model::ModelStreamEvent;
 
 pub fn build_request(request_json: &str) -> Result<String, String> {
     let request: Value = serde_json::from_str(request_json)
@@ -74,16 +77,21 @@ pub fn build_request(request_json: &str) -> Result<String, String> {
 }
 
 #[derive(Default)]
+struct PendingToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+#[derive(Default)]
 pub struct Stream {
     text: String,
-    tool_id: String,
-    tool_name: String,
-    tool_arguments: String,
+    tool_calls: BTreeMap<u64, PendingToolCall>,
     stop_reason: Option<String>,
 }
 
 impl Stream {
-    pub fn push(&mut self, data_json: &str) -> Result<Option<String>, String> {
+    pub fn push(&mut self, data_json: &str) -> Result<Vec<ModelStreamEvent>, String> {
         let event: Value = serde_json::from_str(data_json)
             .map_err(|error| format!("parse Anthropic stream event: {error}"))?;
         match event.get("type").and_then(Value::as_str) {
@@ -97,14 +105,16 @@ impl Stream {
                     .and_then(Value::as_object)
                     .ok_or_else(|| "Anthropic content block is missing".to_string())?;
                 if block.get("type").and_then(Value::as_str) == Some("tool_use") {
-                    self.tool_id = block.get("id").and_then(Value::as_str).unwrap_or("").into();
-                    self.tool_name = block
+                    let index = event.get("index").and_then(Value::as_u64).unwrap_or(0);
+                    let call = self.tool_calls.entry(index).or_default();
+                    call.id = block.get("id").and_then(Value::as_str).unwrap_or("").into();
+                    call.name = block
                         .get("name")
                         .and_then(Value::as_str)
                         .unwrap_or("")
                         .into();
                 }
-                Ok(None)
+                Ok(Vec::new())
             }
             Some("content_block_delta") => {
                 let delta = event
@@ -115,15 +125,24 @@ impl Stream {
                     Some("text_delta") => {
                         let text = delta.get("text").and_then(Value::as_str).unwrap_or("");
                         self.text.push_str(text);
-                        Ok((!text.is_empty()).then(|| text.to_string()))
+                        Ok(if text.is_empty() {
+                            Vec::new()
+                        } else {
+                            alloc::vec![ModelStreamEvent::Text(text.to_string())]
+                        })
                     }
                     Some("input_json_delta") => {
                         if let Some(json) = delta.get("partial_json").and_then(Value::as_str) {
-                            self.tool_arguments.push_str(json);
+                            let index = event.get("index").and_then(Value::as_u64).unwrap_or(0);
+                            self.tool_calls
+                                .entry(index)
+                                .or_default()
+                                .arguments
+                                .push_str(json);
                         }
-                        Ok(None)
+                        Ok(Vec::new())
                     }
-                    _ => Ok(None),
+                    _ => Ok(Vec::new()),
                 }
             }
             Some("message_delta") => {
@@ -131,41 +150,51 @@ impl Stream {
                     .pointer("/delta/stop_reason")
                     .and_then(Value::as_str)
                     .map(ToString::to_string);
-                Ok(None)
+                Ok(Vec::new())
             }
-            _ => Ok(None),
+            _ => Ok(Vec::new()),
         }
     }
 
     pub fn finish(self) -> Result<String, String> {
-        if !self.tool_name.is_empty() {
-            if self.tool_id.is_empty() {
-                return Err("Anthropic tool use is missing id".into());
+        let stop_reason = match self.stop_reason.as_deref() {
+            Some("end_turn" | "stop_sequence") => "stop",
+            Some("tool_use") => "toolUse",
+            Some("max_tokens") if self.tool_calls.is_empty() => "length",
+            Some("max_tokens") => return Err("Anthropic truncated streamed tool calls".into()),
+            Some(reason) => return Err(format!("unsupported Anthropic stop reason: {reason}")),
+            None => return Err("Anthropic stream ended without stop_reason".into()),
+        };
+        let mut tool_calls = Vec::new();
+        for (_, call) in self.tool_calls {
+            if call.id.is_empty() || call.name.is_empty() {
+                return Err("Anthropic tool use is missing id or name".into());
             }
-            let arguments: Value = serde_json::from_str(if self.tool_arguments.is_empty() {
+            let arguments: Value = serde_json::from_str(if call.arguments.is_empty() {
                 "{}"
             } else {
-                &self.tool_arguments
+                &call.arguments
             })
             .map_err(|error| format!("parse Anthropic tool input: {error}"))?;
             if !arguments.is_object() {
                 return Err("Anthropic tool input must be an object".into());
             }
-            return serde_json::to_string(&json!({
-                "toolCall":{"id":self.tool_id,"name":self.tool_name,"arguments":arguments}
-            }))
-            .map_err(|error| format!("serialize Pi tool call: {error}"));
+            tool_calls.push(json!({"id":call.id,"name":call.name,"arguments":arguments}));
         }
-        if self.text.is_empty() {
+        if self.text.is_empty() && tool_calls.is_empty() {
             return Err("Anthropic stream contained no model decision".into());
         }
-        let stop_reason = if self.stop_reason.as_deref() == Some("max_tokens") {
-            "length"
-        } else {
-            "stop"
-        };
-        serde_json::to_string(&json!({"text":self.text,"stopReason":stop_reason}))
-            .map_err(|error| format!("serialize Pi text result: {error}"))
+        serde_json::to_string(&json!({
+            "thinking":"",
+            "text":self.text,
+            "toolCalls":tool_calls,
+            "usage":{
+                "input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,
+                "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}
+            },
+            "stopReason":stop_reason
+        }))
+        .map_err(|error| format!("serialize Anthropic model result: {error}"))
     }
 }
 
@@ -234,6 +263,7 @@ fn content_text(content: Option<&Value>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn streams_text() {
@@ -242,9 +272,29 @@ mod tests {
             stream
                 .push(r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}"#)
                 .unwrap(),
-            Some("hi".into())
+            vec![ModelStreamEvent::Text("hi".into())]
         );
+        stream
+            .push(r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#)
+            .unwrap();
         let result: Value = serde_json::from_str(&stream.finish().unwrap()).unwrap();
         assert_eq!(result["text"], "hi");
+    }
+
+    #[test]
+    fn streams_multiple_tool_calls() {
+        let mut stream = Stream::default();
+        for event in [
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"one","name":"first"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#,
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"two","name":"second"}}"#,
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"n\":2}"}}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"}}"#,
+        ] {
+            stream.push(event).unwrap();
+        }
+        let result: Value = serde_json::from_str(&stream.finish().unwrap()).unwrap();
+        assert_eq!(result["toolCalls"].as_array().unwrap().len(), 2);
+        assert_eq!(result["stopReason"], "toolUse");
     }
 }

@@ -1,0 +1,8 @@
+{
+  "id": "pi-agent",
+  "description": "System Agent and workspace",
+  "version": "1.0.0",
+  "tools": [],
+  "tasks": [],
+  "schedules": []
+}

@@ -1,0 +1,10 @@
+{
+  "$schema": "https://pocketjs.dev/schema/pocket-2.json",
+  "pocket": 2,
+  "id": "dev.pocket-stack.robinhood",
+  "name": "robinhood",
+  "title": "Robinhood",
+  "version": "1.1.0",
+  "engine": {"capabilities":{"requires":["data.fs","data.sqlite"]}},
+  "app": {"entry":"app.tsx","output":"app","framework":"solid","viewport":{"logical":[720,1280],"presentation":"fit"}}
+}

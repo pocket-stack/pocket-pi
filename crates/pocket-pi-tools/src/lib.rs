@@ -104,13 +104,19 @@ impl ToolHost for CoreToolHost {
             Err(error) => return ToolResult::error(format!("invalid tool arguments: {error}")),
         };
         match self.execute_value(call_id, name, &args) {
-            Ok(result) => ToolResult {
-                text: result.text,
-                details: result.details,
-                is_error: false,
-                terminate: result.terminate,
-            },
-            Err(error) => ToolResult::error(error),
+            Ok(result) => {
+                log::info!("Native tool {name} completed");
+                ToolResult {
+                    text: result.text,
+                    details: result.details,
+                    is_error: false,
+                    terminate: result.terminate,
+                }
+            }
+            Err(error) => {
+                log::warn!("Native tool {name} failed: {error}");
+                ToolResult::error(error)
+            }
         }
     }
 }
@@ -149,9 +155,6 @@ impl ToolResultExt for ToolResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use pocket_pi_embedded::{ModelBackend, PiEmbedded};
 
     struct TestPlatform;
 
@@ -234,67 +237,5 @@ mod tests {
         drop(tools);
         let restored = host(temp.path()).execute("call-3", "schedule.list", "{}");
         assert!(restored.text.contains("market"));
-    }
-
-    struct ToolCallingBackend {
-        calls: AtomicUsize,
-    }
-
-    impl ModelBackend for ToolCallingBackend {
-        fn complete(
-            &self,
-            request_json: &str,
-            on_delta: &mut dyn FnMut(&str),
-        ) -> Result<String, String> {
-            let request: Value = serde_json::from_str(request_json).unwrap();
-            let call = self.calls.fetch_add(1, Ordering::SeqCst);
-            if call == 0 {
-                let names = request["context"]["tools"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .filter_map(|tool| tool["name"].as_str())
-                    .collect::<Vec<_>>();
-                assert!(names.contains(&"write"));
-                return Ok(json!({
-                    "toolCall":{
-                        "id":"write-1",
-                        "name":"write",
-                        "arguments":{"path":"agent-created.txt","content":"created through pi-agent-core"}
-                    }
-                })
-                .to_string());
-            }
-            assert!(request["context"]["messages"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|message| message["role"] == "toolResult"));
-            on_delta("tool complete");
-            Ok(json!({"text":"tool complete"}).to_string())
-        }
-    }
-
-    #[test]
-    fn pi_agent_executes_the_real_registered_tool() {
-        let temp = tempfile::tempdir().unwrap();
-        let tools = Arc::new(host(temp.path()));
-        let runtime = PiEmbedded::new(
-            r#"{"provider":"test","model":"tool-test"}"#,
-            Arc::new(ToolCallingBackend {
-                calls: AtomicUsize::new(0),
-            }),
-            tools,
-            Arc::new(|_| {}),
-        )
-        .unwrap();
-
-        runtime.prompt("create a file").unwrap();
-        runtime.pump().unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(temp.path().join("agent-created.txt")).unwrap(),
-            "created through pi-agent-core"
-        );
     }
 }

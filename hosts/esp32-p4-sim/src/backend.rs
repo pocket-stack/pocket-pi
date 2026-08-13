@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pocket_pi_embedded::ModelBackend;
-use pocket_pi_protocols::model::WirelessProvider;
+use pocket_pi_protocols::model::{ModelStreamEvent, WirelessProvider};
 use pocket_pi_protocols::{anthropic_messages, codex_decision, openai_chat};
 use serde_json::{json, Value};
 
@@ -13,6 +13,7 @@ pub enum BackendChoice {
         provider: WirelessProvider,
         api_key: String,
         model: String,
+        thinking_level: String,
     },
     Codex {
         model: Option<String>,
@@ -22,11 +23,12 @@ pub enum BackendChoice {
 impl BackendChoice {
     pub fn from_name(name: &str, model: Option<String>) -> Result<Self, String> {
         match name {
-            "openai" | "openrouter" | "anthropic" => {
+            "openai" | "openrouter" | "anthropic" | "deepseek" => {
                 let provider = match name {
                     "openai" => WirelessProvider::OpenAi,
                     "openrouter" => WirelessProvider::OpenRouter,
                     "anthropic" => WirelessProvider::Anthropic,
+                    "deepseek" => WirelessProvider::DeepSeek,
                     _ => unreachable!(),
                 };
                 let prefix = name.to_ascii_uppercase();
@@ -36,31 +38,41 @@ impl BackendChoice {
                     .or_else(|| std::env::var(format!("{prefix}_MODEL")).ok())
                     .or_else(|| provider.default_model().map(str::to_owned))
                     .ok_or_else(|| format!("--backend {name} requires --model"))?;
+                let thinking_level = std::env::var(format!("{prefix}_THINKING_LEVEL"))
+                    .unwrap_or_else(|_| "high".into());
+                if !matches!(thinking_level.as_str(), "high" | "xhigh") {
+                    return Err(format!("{prefix}_THINKING_LEVEL must be high or xhigh"));
+                }
                 Ok(Self::Wireless {
                     provider,
                     api_key,
                     model,
+                    thinking_level,
                 })
             }
             "codex" => Ok(Self::Codex {
                 model: model.or_else(|| std::env::var("CODEX_MODEL").ok()),
             }),
             other => Err(format!(
-                "unknown backend {other:?}; expected openai, openrouter, anthropic or codex"
+                "unknown backend {other:?}; expected openai, openrouter, anthropic, deepseek or codex"
             )),
         }
     }
 
     pub fn agent_config(&self) -> String {
-        let (provider, model) = match self {
+        let (provider, model, thinking_level) = match self {
             Self::Wireless {
-                provider, model, ..
-            } => (provider.id(), model.as_str()),
-            Self::Codex { model } => ("codex", model.as_deref().unwrap_or("coding-plan")),
+                provider,
+                model,
+                thinking_level,
+                ..
+            } => (provider.id(), model.as_str(), thinking_level.as_str()),
+            Self::Codex { model } => ("codex", model.as_deref().unwrap_or("coding-plan"), "high"),
         };
         json!({
             "provider": provider,
             "model": model,
+            "thinkingLevel": thinking_level,
             "systemPrompt": "You are Pocket Pi in the ESP32 simulator. Be concise."
         })
         .to_string()
@@ -85,7 +97,7 @@ impl ModelBackend for WirelessBackend {
     fn complete(
         &self,
         request_json: &str,
-        on_delta: &mut dyn FnMut(&str),
+        on_event: &mut dyn FnMut(ModelStreamEvent),
     ) -> Result<String, String> {
         let (endpoint, body) = match self.provider {
             WirelessProvider::OpenAi => (
@@ -100,6 +112,10 @@ impl ModelBackend for WirelessBackend {
                 "https://api.anthropic.com/v1/messages",
                 anthropic_messages::build_request(request_json)?,
             ),
+            WirelessProvider::DeepSeek => (
+                "https://api.deepseek.com/chat/completions",
+                openai_chat::build_request_for(request_json, openai_chat::Dialect::DeepSeek)?,
+            ),
         };
         let agent = ureq::AgentBuilder::new()
             .timeout_connect(Duration::from_secs(20))
@@ -113,7 +129,9 @@ impl ModelBackend for WirelessBackend {
             WirelessProvider::Anthropic => request
                 .set("x-api-key", &self.api_key)
                 .set("anthropic-version", "2023-06-01"),
-            WirelessProvider::OpenAi | WirelessProvider::OpenRouter => {
+            WirelessProvider::OpenAi
+            | WirelessProvider::OpenRouter
+            | WirelessProvider::DeepSeek => {
                 request.set("authorization", &format!("Bearer {}", self.api_key))
             }
         };
@@ -132,6 +150,9 @@ impl ModelBackend for WirelessBackend {
 
         let mut stream = match self.provider {
             WirelessProvider::Anthropic => SimProviderStream::Anthropic(Default::default()),
+            WirelessProvider::DeepSeek => {
+                SimProviderStream::Chat(openai_chat::Stream::new(openai_chat::Dialect::DeepSeek))
+            }
             WirelessProvider::OpenAi | WirelessProvider::OpenRouter => {
                 SimProviderStream::Chat(Default::default())
             }
@@ -145,8 +166,8 @@ impl ModelBackend for WirelessBackend {
             if data == "[DONE]" {
                 break;
             }
-            if let Some(delta) = stream.push(data)? {
-                on_delta(&delta);
+            for event in stream.push(data)? {
+                on_event(event);
             }
         }
         stream.finish()
@@ -159,7 +180,7 @@ enum SimProviderStream {
 }
 
 impl SimProviderStream {
-    fn push(&mut self, data: &str) -> Result<Option<String>, String> {
+    fn push(&mut self, data: &str) -> Result<Vec<ModelStreamEvent>, String> {
         match self {
             Self::Chat(stream) => stream.push(data),
             Self::Anthropic(stream) => stream.push(data),
@@ -182,7 +203,7 @@ impl ModelBackend for CodexBackend {
     fn complete(
         &self,
         request_json: &str,
-        on_delta: &mut dyn FnMut(&str),
+        on_event: &mut dyn FnMut(ModelStreamEvent),
     ) -> Result<String, String> {
         let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
         let mut command = Command::new("codex");
@@ -243,7 +264,7 @@ impl ModelBackend for CodexBackend {
             .ok()
             .and_then(|value| value.get("text").and_then(Value::as_str).map(str::to_owned))
         {
-            on_delta(&text);
+            on_event(ModelStreamEvent::Text(text));
         }
         Ok(result)
     }

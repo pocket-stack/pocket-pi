@@ -1,14 +1,11 @@
 #include <stdbool.h>
 #include <stdint.h>
-#include <string.h>
 
 #include "bsp/esp32_p4_wifi6_touch_lcd_5.h"
 #include "bsp/touch.h"
 #include "driver/i2c_master.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_touch_gt911.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 
 esp_err_t pi_p4_touch_new(esp_lcd_touch_handle_t *ret_touch)
 {
@@ -70,48 +67,4 @@ bool pi_p4_touch_read(esp_lcd_touch_handle_t touch, uint16_t *x, uint16_t *y)
     *x = point.x;
     *y = point.y;
     return true;
-}
-
-bool pi_p4_cpu_load_percent(uint8_t *percent)
-{
-#if configGENERATE_RUN_TIME_STATS
-    enum { MAX_TASKS = 64 };
-    static TaskStatus_t tasks[MAX_TASKS];
-    static configRUN_TIME_COUNTER_TYPE previous_total = 0;
-    static uint64_t previous_idle = 0;
-    configRUN_TIME_COUNTER_TYPE total = 0;
-    uint64_t idle = 0;
-
-    if (percent == NULL) {
-        return false;
-    }
-    UBaseType_t count = uxTaskGetSystemState(tasks, MAX_TASKS, &total);
-    if (count == 0) {
-        return false;
-    }
-    for (UBaseType_t index = 0; index < count; ++index) {
-        if (tasks[index].pcTaskName != NULL && strncmp(tasks[index].pcTaskName, "IDLE", 4) == 0) {
-            idle += tasks[index].ulRunTimeCounter;
-        }
-    }
-    if (previous_total == 0 || total <= previous_total || idle < previous_idle) {
-        previous_total = total;
-        previous_idle = idle;
-        return false;
-    }
-
-    const uint64_t elapsed = (uint64_t)(total - previous_total) * configNUMBER_OF_CORES;
-    const uint64_t idle_elapsed = idle - previous_idle;
-    previous_total = total;
-    previous_idle = idle;
-    if (elapsed == 0) {
-        return false;
-    }
-    const uint64_t idle_percent = (idle_elapsed * 100U) / elapsed;
-    *percent = (uint8_t)(idle_percent >= 100U ? 0U : 100U - idle_percent);
-    return true;
-#else
-    (void)percent;
-    return false;
-#endif
 }

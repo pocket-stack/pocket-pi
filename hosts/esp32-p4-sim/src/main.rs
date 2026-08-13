@@ -1,19 +1,20 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use pocket3d::gpu::{Gpu, OffscreenTarget};
-use pocket_pi_device_ui::{
-    load_fonts, AgentState, ChatProjection, DeviceState, ModelBackendSettings, ModelSettings,
-    ScreenInteraction, ScreenState, ScreenView, SettingsCommand, SettingsProjection,
-    SystemTelemetry, UartProvider, WifiNetworkProjection,
+use pocket_pi_agentos::{
+    AppServiceHost, AppSupervisor, AppToolRequest, HttpRequest, NetFailure, RoutedToolHost,
+    TransportCompletion, ROOT_APP_ID,
 };
-use pocket_pi_embedded::{spawn_agent_worker, AgentEvent};
+use pocket_pi_app_pack::catalog;
+use pocket_pi_embedded::{AgentEvent, ToolHost};
 use pocket_pi_tools::{CoreToolHost, PlatformTools};
 use pocket_ui_wgpu::UiRenderer;
-use pocketjs_core::Ui;
+use serde_json::{json, Value};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
@@ -33,7 +34,8 @@ struct Args {
     screenshot: Option<PathBuf>,
     prompt: Option<String>,
     workspace: PathBuf,
-    view: ScreenView,
+    app: String,
+    root_tap: Option<(u16, u16)>,
     backend: BackendChoice,
 }
 
@@ -42,9 +44,22 @@ fn main() -> Result<()> {
     let args = parse_args()?;
     prepare_workspace(&args.workspace)?;
     if let Some(path) = args.screenshot {
-        headless(path, args.workspace, args.prompt, args.view, args.backend)
+        headless(
+            path,
+            args.workspace,
+            args.prompt,
+            args.app,
+            args.root_tap,
+            args.backend,
+        )
     } else {
-        windowed(args.workspace, args.prompt, args.view, args.backend)
+        windowed(
+            args.workspace,
+            args.prompt,
+            args.app,
+            args.root_tap,
+            args.backend,
+        )
     }
 }
 
@@ -53,7 +68,8 @@ fn parse_args() -> Result<Args> {
     let mut prompt = None;
     let mut workspace =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/esp32-p4-sim/workspace");
-    let mut view = ScreenView::Chat;
+    let mut app = ROOT_APP_ID.to_owned();
+    let mut root_tap = None;
     let mut backend = std::env::var("POCKET_PI_BACKEND").unwrap_or_else(|_| "codex".into());
     let mut model = None;
     let mut args = std::env::args().skip(1);
@@ -62,16 +78,37 @@ fn parse_args() -> Result<Args> {
             "--screenshot" => screenshot = Some(PathBuf::from(next(&mut args, "--screenshot")?)),
             "--prompt" => prompt = Some(next(&mut args, "--prompt")?),
             "--workspace" => workspace = PathBuf::from(next(&mut args, "--workspace")?),
-            "--view" => {
-                view = match next(&mut args, "--view")?.as_str() {
-                    "chat" => ScreenView::Chat,
-                    "workspace" | "files" => ScreenView::Files,
-                    "settings" => ScreenView::Settings,
-                    value => return Err(anyhow!("unknown view: {value}")),
+            "--app" => {
+                app = match next(&mut args, &argument)?.as_str() {
+                    "pi-agent" => ROOT_APP_ID.to_owned(),
+                    "files" => {
+                        root_tap = Some((270, 1220));
+                        ROOT_APP_ID.to_owned()
+                    }
+                    "apps" => {
+                        root_tap = Some((450, 1220));
+                        ROOT_APP_ID.to_owned()
+                    }
+                    "settings" => {
+                        root_tap = Some((630, 1220));
+                        ROOT_APP_ID.to_owned()
+                    }
+                    "keyboard" => {
+                        root_tap = Some((350, 1110));
+                        ROOT_APP_ID.to_owned()
+                    }
+                    value => value.to_owned(),
                 }
             }
             "--backend" => backend = next(&mut args, "--backend")?,
             "--model" => model = Some(next(&mut args, "--model")?),
+            "--tap" => {
+                let value = next(&mut args, "--tap")?;
+                let (x, y) = value
+                    .split_once(',')
+                    .ok_or_else(|| anyhow!("--tap expects x,y"))?;
+                root_tap = Some((x.parse()?, y.parse()?));
+            }
             other => return Err(anyhow!("unknown argument: {other}")),
         }
     }
@@ -79,7 +116,8 @@ fn parse_args() -> Result<Args> {
         screenshot,
         prompt,
         workspace,
-        view,
+        app,
+        root_tap,
         backend: BackendChoice::from_name(&backend, model).map_err(anyhow::Error::msg)?,
     })
 }
@@ -99,110 +137,251 @@ fn prepare_workspace(root: &Path) -> Result<()> {
     }
     let notes = root.join("notes.txt");
     if !notes.exists() {
-        std::fs::write(notes, "Physical ESP32 and simulator share one device UI.\n")?;
+        std::fs::write(notes, "Pi Agent owns this top-level workspace.\n")?;
     }
     Ok(())
-}
-
-fn new_ui() -> Result<Ui> {
-    let mut ui = Ui::new();
-    ui.set_viewport(PANEL_WIDTH as f32, PANEL_HEIGHT as f32);
-    if !load_fonts(&mut ui) {
-        return Err(anyhow!("PocketJS rejected the shared Inter font atlases"));
-    }
-    Ok(ui)
 }
 
 struct SimPlatform;
 
 impl PlatformTools for SimPlatform {
-    fn device_status(&self) -> serde_json::Value {
-        serde_json::json!({
+    fn device_status(&self) -> Value {
+        json!({
             "status":"ok",
             "board":"esp32-p4-sim",
-            "piHarness":"pi-agent-core",
-            "jsRuntime":"QuickJS via PocketJS host",
+            "agentOs":true,
+            "jsRuntime":"QuickJS via PocketJS",
             "simulated":true
         })
     }
 
-    fn wifi_status(&self) -> serde_json::Value {
-        serde_json::json!({
-            "status":"connected",
-            "ssid":"macOS host network",
-            "simulated":true
-        })
+    fn wifi_status(&self) -> Value {
+        json!({"status":"connected","ssid":"macOS host network","simulated":true})
     }
 
-    fn reboot(&self) -> Result<serde_json::Value, String> {
-        Ok(serde_json::json!({"status":"scheduled","simulated":true}))
+    fn reboot(&self) -> Result<Value, String> {
+        Ok(json!({"status":"scheduled","simulated":true}))
     }
+}
+
+/// Deterministic native fixtures keep the simulator useful without credentials.
+/// The App code, SQLite writes and View are exactly the same bundles as the board.
+struct SimAppServices;
+
+impl AppServiceHost for SimAppServices {
+    fn call(
+        &self,
+        app_id: &str,
+        service: &str,
+        operation: &str,
+        args: &Value,
+        deadline: Instant,
+    ) -> Result<Value, String> {
+        if Instant::now() >= deadline {
+            return Err("App Data Action deadline expired".into());
+        }
+        let tool_name = args.get("name").and_then(Value::as_str).unwrap_or("");
+        let tool_args = args.get("arguments").unwrap_or(&Value::Null);
+        if app_id == "robinhood"
+            && std::env::var("POCKET_PI_SIM_ROBINHOOD_FAIL").as_deref() == Ok("1")
+        {
+            return Err("simulated Robinhood service outage".into());
+        }
+        if (app_id, service, operation) == ("robinhood", "mcp.client", "callTools") {
+            let calls = args
+                .get("calls")
+                .and_then(Value::as_array)
+                .ok_or_else(|| "simulated callTools requires calls".to_owned())?;
+            let results = calls
+                .iter()
+                .map(|call| {
+                    let name = call.get("name").and_then(Value::as_str).unwrap_or("");
+                    let single = json!({
+                        "name":name,
+                        "arguments":call.get("arguments").unwrap_or(&Value::Null)
+                    });
+                    match self.call(app_id, service, "callTool", &single, deadline) {
+                        Ok(value) => json!({"name":name,"ok":true,"value":value}),
+                        Err(error) => json!({"name":name,"ok":false,"error":error}),
+                    }
+                })
+                .collect::<Vec<_>>();
+            return Ok(json!({"results":results}));
+        }
+        match (app_id, service, operation, tool_name) {
+            ("robinhood", "mcp.client", "callTool", "get_accounts") => Ok(json!({
+                "accounts":[
+                    {"account_number":"SIM-AGENT-001","status":"active","type":"cash","agentic_allowed":true},
+                    {"account_number":"SIM-IRA-002","status":"active","type":"traditional_ira"},
+                    {"account_number":"SIM-JOINT-003","status":"active","type":"joint"}
+                ]
+            })),
+            ("robinhood", "mcp.client", "callTool", "get_portfolio") => {
+                let account = tool_args
+                    .get("account_number")
+                    .and_then(Value::as_str)
+                    .unwrap_or("SIM-AGENT-001");
+                let (equity, cash, buying_power, day_pnl, week_pnl) = match account {
+                    "SIM-IRA-002" => ("84220.18", "4120.40", "4120.40", "-182.14", "1250.42"),
+                    "SIM-JOINT-003" => ("31008.75", "5280.05", "10560.10", "205.80", "935.22"),
+                    _ => ("15320.42", "1280.20", "2560.40", "128.35", "412.80"),
+                };
+                Ok(
+                    json!({"account_number":account,"equity":equity,"cash":cash,"buying_power":buying_power,"day_pnl":day_pnl,"week_pnl":week_pnl}),
+                )
+            }
+            ("robinhood", "mcp.client", "callTool", "get_equity_positions") => Ok(json!({
+                "positions":[
+                    {"symbol":"NVDA","quantity":"8","average_buy_price":"712.48","market_value":"7344.00"},
+                    {"symbol":"AAPL","quantity":"12","average_buy_price":"218.32","market_value":"2784.00"},
+                    {"symbol":"MSFT","quantity":"6","average_buy_price":"405.15","market_value":"2586.00"},
+                    {"symbol":"META","quantity":"3","average_buy_price":"502.10","market_value":"1581.00"},
+                    {"symbol":"AMZN","quantity":"5","average_buy_price":"191.25","market_value":"1012.50"},
+                    {"symbol":"GOOGL","quantity":"4","average_buy_price":"174.82","market_value":"724.00"},
+                    {"symbol":"TSLA","quantity":"2","average_buy_price":"332.50","market_value":"690.00"},
+                    {"symbol":"AMD","quantity":"3","average_buy_price":"168.40","market_value":"522.00"},
+                    {"symbol":"PLTR","quantity":"4","average_buy_price":"112.20","market_value":"468.00"},
+                    {"symbol":"VTI","quantity":"2","average_buy_price":"289.75","market_value":"602.00"}
+                ]
+            })),
+            ("robinhood", "mcp.client", "callTool", "get_equity_orders") => Ok(json!({"orders":[
+                {"symbol":"NVDA","side":"buy","state":"filled","type":"limit","executed_quantity":"2","average_price":"918.00","created_at":"2026-08-08T09:42:00Z"},
+                {"symbol":"AAPL","side":"sell","state":"filled","type":"market","executed_quantity":"4","average_price":"232.00","created_at":"2026-08-07T15:14:00Z"},
+                {"symbol":"MSFT","side":"buy","state":"filled","type":"market","executed_quantity":"1","average_price":"431.00","created_at":"2026-08-06T18:28:00Z"},
+                {"symbol":"META","side":"sell","state":"filled","type":"limit","executed_quantity":"1","average_price":"527.00","created_at":"2026-08-05T11:20:00Z"},
+                {"symbol":"AMZN","side":"buy","state":"filled","type":"limit","executed_quantity":"3","average_price":"202.50","created_at":"2026-08-04T10:05:00Z"},
+                {"symbol":"GOOGL","side":"buy","state":"cancelled","type":"limit","quantity":"2","price":"179.00","created_at":"2026-08-03T14:01:00Z"},
+                {"symbol":"TSLA","side":"sell","state":"filled","type":"market","executed_quantity":"2","average_price":"345.00","created_at":"2026-08-02T16:32:00Z"},
+                {"symbol":"AMD","side":"buy","state":"filled","type":"limit","executed_quantity":"3","average_price":"174.00","created_at":"2026-08-01T12:18:00Z"},
+                {"symbol":"PLTR","side":"buy","state":"filled","type":"market","executed_quantity":"4","average_price":"117.00","created_at":"2026-07-31T17:11:00Z"}
+            ]})),
+            ("robinhood", "mcp.client", "callTool", "get_realized_pnl") => {
+                Ok(json!({"realized_pnl":"682.15"}))
+            }
+            ("robinhood", "mcp.client", "callTool", name) => {
+                Ok(json!({"operation":name,"simulated":true,"args":tool_args}))
+            }
+            _ => Err(format!(
+                "unsupported simulated service call: {app_id}/{service}/{operation}"
+            )),
+        }
+    }
+
+    fn http(
+        &self,
+        app_id: &str,
+        request: HttpRequest,
+        deadline: Instant,
+    ) -> std::result::Result<TransportCompletion, NetFailure> {
+        if Instant::now() >= deadline {
+            return Err(NetFailure::new(
+                "timeout",
+                "App Data Action deadline expired",
+            ));
+        }
+        if app_id != "exa" || request.method != "POST" {
+            return Err(NetFailure::new(
+                "invalid_request",
+                "simulator denied HTTP request",
+            ));
+        }
+        let body: Value = serde_json::from_slice(&request.body)
+            .map_err(|error| NetFailure::new("invalid_request", error.to_string()))?;
+        let value = match request.url.as_str() {
+            "https://api.exa.ai/search" => {
+                let query = body
+                    .get("query")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Pocket Pi");
+                json!({"results":[
+                    {"title":format!("Research result for {query}"),"url":"https://example.com/research"},
+                    {"title":"PocketJS runtime notes","url":"https://pocketjs.dev/docs/concepts/"}
+                ]})
+            }
+            "https://api.exa.ai/contents" => json!({
+                "results":[{"title":"Simulated Exa document","url":"https://example.com/research","text":"Local simulator fixture"}]
+            }),
+            _ => {
+                return Err(NetFailure::new(
+                    "invalid_request",
+                    "simulator denied HTTP URL",
+                ))
+            }
+        };
+        Ok(TransportCompletion::Done {
+            handle: request.handle,
+            status: 200,
+            url: request.url,
+            headers: BTreeMap::from([("content-type".into(), "application/json".into())]),
+            body: serde_json::to_vec(&value)
+                .map_err(|error| NetFailure::new("other", error.to_string()))?,
+        })
+    }
+}
+
+#[derive(Clone)]
+struct Message {
+    role: &'static str,
+    text: String,
 }
 
 struct Product {
-    chat: ChatProjection,
-    screen: ScreenState,
-    device: DeviceState,
-    prompt_tx: Sender<String>,
-    agent_rx: Receiver<AgentEvent>,
-    tools: Arc<CoreToolHost>,
-    settings: SettingsProjection,
+    messages: Vec<Message>,
+    agent_status: &'static str,
+    model_label: String,
+    native_tools: Arc<CoreToolHost>,
+    app_rx: Receiver<AppToolRequest>,
+    supervisor: AppSupervisor,
     last_schedule_poll: Instant,
     busy: bool,
-    dirty: bool,
+    projection_dirty: bool,
+    pending_ui_task: Option<String>,
+    wifi_connected: Option<String>,
+    wifi_networks: Vec<(&'static str, i32, bool)>,
+    wifi_status: String,
 }
 
 impl Product {
-    fn new(workspace: PathBuf, backend: BackendChoice, view: ScreenView) -> Result<Self> {
-        let local_codex = matches!(backend, BackendChoice::Codex { .. });
-        let model_settings = settings_for(&backend);
-        let tools = Arc::new(CoreToolHost::new(workspace.clone(), Arc::new(SimPlatform)));
-        let config = backend.agent_config();
-        let backend = backend.build();
-        let (prompt_tx, agent_rx) =
-            spawn_agent_worker(config, backend, tools.clone(), None).map_err(anyhow::Error::msg)?;
-        let workspace = workspace
-            .to_str()
-            .ok_or_else(|| anyhow!("workspace path is not valid UTF-8"))?;
-        let mut screen = ScreenState::new(workspace);
-        let settings = SettingsProjection {
-            wifi: pocket_pi_device_ui::WifiSettingsProjection {
-                connected_ssid: Some("macOS host network".into()),
-                ip_address: Some("192.0.2.2".into()),
-                rssi_dbm: Some(-42),
-                status: "SIMULATED ESP32 WI-FI".into(),
-                ..Default::default()
-            },
-            firmware_version: env!("CARGO_PKG_VERSION").into(),
-            workspace_free_bytes: None,
+    fn new(workspace: PathBuf, backend: BackendChoice, app: &str) -> Result<Self> {
+        let model_label = match &backend {
+            BackendChoice::Wireless {
+                provider, model, ..
+            } => {
+                format!("{} / {model}", provider.id())
+            }
+            BackendChoice::Codex { model } => {
+                format!("Codex / {}", model.as_deref().unwrap_or("coding-plan"))
+            }
         };
-        screen.view = view;
-        screen.set_model_backend(&model_settings);
-        if local_codex {
-            screen.set_backend_status("CODEX", "LOCAL / MAC", "CODING PLAN");
-        }
-        screen.set_telemetry(SystemTelemetry {
-            psram_used_percent: 25,
-            psram_free_bytes: 24 * 1024 * 1024,
-            cpu_percent: None,
-            ui_fps_tenths: 0,
-            lcd_refresh_hz: 32,
-        });
-        screen.refresh_workspace();
-        screen.set_settings(settings.clone());
+        let services: Arc<dyn AppServiceHost> = Arc::new(SimAppServices);
+        let mut supervisor = AppSupervisor::new(workspace.clone(), catalog()?, services)?;
+        supervisor.open(app)?;
+
+        let native_tools = Arc::new(CoreToolHost::new(workspace.clone(), Arc::new(SimPlatform)));
+        let catalog = supervisor.catalog().clone();
+        let native: Arc<dyn ToolHost> = native_tools.clone();
+        let (routed, app_rx) = RoutedToolHost::new(native, catalog);
+        let config = backend.agent_config();
+        let model = backend.build();
+        supervisor.boot_agent(&config, model, Arc::new(routed))?;
+
         Ok(Self {
-            chat: ChatProjection::new("TYPE A MESSAGE", "ESP32-P4 PI AGENT SIMULATOR READY."),
-            screen,
-            device: DeviceState {
-                agent: AgentState::Idle,
-            },
-            prompt_tx,
-            agent_rx,
-            tools,
-            settings,
+            messages: vec![Message {
+                role: "assistant",
+                text: "Pocket Pi AgentOS is ready.".into(),
+            }],
+            agent_status: "IDLE",
+            model_label,
+            native_tools,
+            app_rx,
+            supervisor,
             last_schedule_poll: Instant::now(),
             busy: false,
-            dirty: true,
+            projection_dirty: true,
+            pending_ui_task: None,
+            wifi_connected: Some("macOS host network".into()),
+            wifi_networks: Vec::new(),
+            wifi_status: "SIMULATED NETWORK READY".into(),
         })
     }
 
@@ -210,153 +389,189 @@ impl Product {
         if self.busy || prompt.trim().is_empty() {
             return;
         }
-        self.chat.push_pending(prompt.clone());
-        self.screen.show_latest_chat();
-        self.device.agent = AgentState::Thinking;
+        self.messages.push(Message {
+            role: "user",
+            text: prompt.clone(),
+        });
+        self.messages.push(Message {
+            role: "assistant",
+            text: String::new(),
+        });
+        self.agent_status = "THINKING";
         self.busy = true;
-        if self.prompt_tx.send(prompt).is_err() {
-            self.chat.fail_pending("AGENT WORKER IS NOT AVAILABLE");
-            self.device.agent = AgentState::Faulted;
+        if let Err(error) = self.supervisor.prompt_agent(&prompt) {
+            self.messages.last_mut().unwrap().text = format!("Agent is unavailable: {error:#}");
+            self.agent_status = "FAULTED";
             self.busy = false;
         }
-        self.dirty = true;
+        self.projection_dirty = true;
     }
 
-    fn tap(&mut self, x: u16, y: u16, ui: &Ui) {
-        match self.screen.handle_tap(x, y, &self.chat, ui) {
-            ScreenInteraction::None => {}
-            ScreenInteraction::Redraw => self.dirty = true,
-            ScreenInteraction::SubmitPrompt(prompt) => self.send_prompt(prompt),
-            ScreenInteraction::Settings(command) => self.handle_settings(command),
-        }
-    }
-
-    fn handle_settings(&mut self, command: SettingsCommand) {
-        match command {
-            SettingsCommand::ScanWifi => {
-                self.settings.wifi.networks = vec![
-                    WifiNetworkProjection {
-                        ssid: "POCKET-PI-LAB".into(),
-                        rssi_dbm: -38,
-                        secured: true,
-                    },
-                    WifiNetworkProjection {
-                        ssid: "PHONE-HOTSPOT".into(),
-                        rssi_dbm: -56,
-                        secured: true,
-                    },
-                    WifiNetworkProjection {
-                        ssid: "GUEST".into(),
-                        rssi_dbm: -71,
-                        secured: false,
-                    },
-                    WifiNetworkProjection {
-                        ssid: "OFFICE".into(),
-                        rssi_dbm: -74,
-                        secured: true,
-                    },
-                    WifiNetworkProjection {
-                        ssid: "CAFE".into(),
-                        rssi_dbm: -78,
-                        secured: false,
-                    },
-                    WifiNetworkProjection {
-                        ssid: "PHONE-2".into(),
-                        rssi_dbm: -82,
-                        secured: true,
-                    },
-                ];
-                self.settings.wifi.status.clear();
-            }
-            SettingsCommand::ConnectWifi { ssid, password } => {
-                if !password.is_empty() && !(8..=63).contains(&password.len()) {
-                    self.settings.wifi.status = "PASSWORD MUST BE 8-63 BYTES".into();
-                } else {
-                    self.settings.wifi.connected_ssid = Some(ssid);
-                    self.settings.wifi.ip_address = Some("192.0.2.2".into());
-                    self.settings.wifi.rssi_dbm = Some(-40);
-                    self.settings.wifi.status = "CONNECTED (SIMULATED)".into();
+    fn tap(&mut self, x: u16, y: u16) -> Result<()> {
+        let action = self.supervisor.tap(x, y)?;
+        match action.get("type").and_then(Value::as_str) {
+            Some("navigate") => {
+                if let Some(app) = action.get("app").and_then(Value::as_str) {
+                    self.supervisor.open(app)?;
+                    self.projection_dirty = true;
                 }
             }
-            SettingsCommand::ForgetWifi => {
-                self.settings.wifi.connected_ssid = None;
-                self.settings.wifi.ip_address = None;
-                self.settings.wifi.rssi_dbm = None;
-                self.settings.wifi.status = "NETWORK FORGOTTEN (SIMULATED)".into();
-            }
-            SettingsCommand::Restart => {
-                self.settings.wifi.status = "RESTART REQUESTED (SIMULATED)".into();
-            }
-        }
-        self.screen.set_settings(self.settings.clone());
-        self.dirty = true;
-    }
-
-    fn release_touch(&mut self) {
-        self.dirty |= self.screen.handle_touch_release();
-    }
-
-    fn poll_agent(&mut self) {
-        while let Ok(event) = self.agent_rx.try_recv() {
-            match event {
-                AgentEvent::Ready => {
-                    self.device.agent = AgentState::Idle;
+            Some("submitPrompt") => {
+                if let Some(prompt) = action.get("prompt").and_then(Value::as_str) {
+                    self.send_prompt(prompt.to_owned());
                 }
-                AgentEvent::Delta(delta) => {
-                    if self.chat.append_model_delta(&delta) {
-                        self.screen.show_latest_chat();
+            }
+            Some("invokeTask") => {
+                if let Some(task) = action.get("task").and_then(Value::as_str) {
+                    self.pending_ui_task = Some(task.to_owned());
+                }
+            }
+            Some("settings") => match action.get("command").and_then(Value::as_str) {
+                Some("scan") => {
+                    self.wifi_networks = vec![
+                        ("PocketPi Lab", -42, true),
+                        ("Studio Guest", -61, false),
+                        ("ESP32 Testbench", -73, true),
+                    ];
+                    self.wifi_status = "3 NETWORKS FOUND".into();
+                    self.projection_dirty = true;
+                }
+                Some("connect") => {
+                    if let Some(ssid) = action.get("ssid").and_then(Value::as_str) {
+                        self.wifi_connected = Some(ssid.to_owned());
+                        self.wifi_status = format!("CONNECTED TO {ssid}");
+                        self.projection_dirty = true;
                     }
                 }
-                AgentEvent::Done => {
-                    self.chat.finish_pending();
-                    self.screen.refresh_workspace();
-                    self.device.agent = AgentState::Idle;
-                    self.busy = false;
+                Some("forget") => {
+                    self.wifi_connected = None;
+                    self.wifi_status = "WI-FI CREDENTIALS FORGOTTEN".into();
+                    self.projection_dirty = true;
                 }
-                AgentEvent::Failed(error) => {
-                    self.chat.fail_pending(format!("AGENT FAILED: {error}"));
-                    self.device.agent = AgentState::Faulted;
-                    self.busy = false;
+                Some("restart") => {
+                    self.wifi_status = "SIMULATED RESTART REQUESTED".into();
+                    self.projection_dirty = true;
                 }
-            }
-            self.dirty = true;
+                _ => {}
+            },
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn pointer_down(&mut self, x: u16, y: u16) -> Result<()> {
+        self.supervisor.pointer_down(x, y)?;
+        self.tap(x, y)
+    }
+
+    fn pointer_up(&mut self) -> Result<()> {
+        self.supervisor.pointer_up()
+    }
+
+    fn run_pending_ui_task(&mut self) {
+        let Some(task) = self.pending_ui_task.take() else {
+            return;
+        };
+        let started = Instant::now();
+        let result = self.supervisor.invoke_active_task(&task, &Value::Null);
+        log::info!(
+            "UI AppTask {} finished in {}ms: {}",
+            task,
+            started.elapsed().as_millis(),
+            result.text
+        );
+        self.projection_dirty = true;
+    }
+
+    fn poll(&mut self) -> Result<()> {
+        while let Ok(request) = self.app_rx.try_recv() {
+            request.handle(&self.supervisor);
+            self.projection_dirty = true;
         }
         if self.last_schedule_poll.elapsed() >= Duration::from_secs(1) {
-            let schedule = self.tools.schedule_projection();
-            self.screen
-                .set_schedule(pocket_pi_device_ui::ScheduleProjection {
-                    name: schedule.name,
-                    prompt: schedule.prompt,
-                    next_in_seconds: schedule.next_in_seconds,
-                    every_minutes: schedule.every_minutes,
-                });
             if !self.busy {
-                if let Some(wake) = self.tools.claim_due() {
+                if let Some(wake) = self.native_tools.claim_due() {
                     self.send_prompt(wake.prompt);
                 }
             }
+            for (task, result) in self.supervisor.poll_due_tasks() {
+                log::info!("AppTask {task}: {}", result.text);
+            }
             self.last_schedule_poll = Instant::now();
-            self.dirty = true;
+            self.projection_dirty = true;
         }
+
+        if self.projection_dirty {
+            self.supervisor.update_root(&self.root_projection())?;
+            self.projection_dirty = false;
+        }
+        // frame() always advances the Pi Agent System App, even while another
+        // App owns the visible View. Model/tool work itself remains off-thread.
+        for event in self.supervisor.frame()? {
+            match event {
+                AgentEvent::Ready => self.agent_status = "IDLE",
+                AgentEvent::ResponseText(text) => {
+                    if let Some(message) = self.messages.last_mut() {
+                        message.text.push_str(&text);
+                    }
+                }
+                AgentEvent::Done => {
+                    self.agent_status = "IDLE";
+                    self.busy = false;
+                }
+                AgentEvent::Failed(error) => {
+                    if let Some(message) = self.messages.last_mut() {
+                        message.text = format!("Agent failed: {error}");
+                    }
+                    self.agent_status = "FAULTED";
+                    self.busy = false;
+                }
+            }
+            self.projection_dirty = true;
+        }
+        Ok(())
     }
 
-    fn words(&self, ui: &Ui) -> Vec<u32> {
-        self.screen.draw_list(ui, &self.device, &self.chat)
-    }
-}
-
-fn settings_for(backend: &BackendChoice) -> ModelSettings {
-    let backend = match backend {
-        BackendChoice::Wireless { provider, .. } => ModelBackendSettings::Wireless {
-            provider: *provider,
-        },
-        BackendChoice::Codex { .. } => ModelBackendSettings::Uart {
-            provider: UartProvider::Codex,
-        },
-    };
-    ModelSettings {
-        backend,
-        model: None,
+    fn root_projection(&self) -> Value {
+        let schedule = self.native_tools.schedule_projection();
+        let schedule_next = match schedule.next_in_seconds {
+            Some(seconds) => schedule.every_minutes.map_or_else(
+                || format!("in {seconds}s"),
+                |minutes| format!("in {seconds}s · every {minutes}m"),
+            ),
+            None => "not scheduled".to_owned(),
+        };
+        json!({
+            "agent":self.agent_status,
+            "model":self.model_label,
+            "messages":self.messages.iter().map(|message| json!({"role":message.role,"text":message.text})).collect::<Vec<_>>(),
+            "schedule":{
+                "name":schedule.name,
+                "prompt":schedule.prompt,
+                "next":schedule_next,
+                "everyMinutes":schedule.every_minutes,
+            },
+            "apps":self.supervisor.catalog().descriptors().filter(|app| app.id != ROOT_APP_ID).map(|app| json!({
+                "id":app.id,
+                "title":app.title,
+                "description":app.description,
+                "scheduleEveryMinutes":app.schedules.first().map(|schedule| schedule.every_minutes),
+            })).collect::<Vec<_>>(),
+            "settings":{
+                "wifi":{
+                    "connectedSsid":self.wifi_connected,
+                    "ipAddress":if self.wifi_connected.is_some() { Some("192.168.4.20") } else { None },
+                    "rssiDbm":if self.wifi_connected.is_some() { Some(-42) } else { None },
+                    "scanning":false,
+                    "networks":self.wifi_networks.iter().map(|(ssid,rssi,secured)| json!({
+                        "ssid":ssid,"rssiDbm":rssi,"secured":secured
+                    })).collect::<Vec<_>>(),
+                    "status":self.wifi_status,
+                },
+                "firmwareVersion":env!("CARGO_PKG_VERSION"),
+                "workspaceFree":"SIMULATED 24 MB",
+            }
+        })
     }
 }
 
@@ -364,18 +579,30 @@ fn headless(
     output: PathBuf,
     workspace: PathBuf,
     prompt: Option<String>,
-    view: ScreenView,
+    app: String,
+    root_tap: Option<(u16, u16)>,
     backend: BackendChoice,
 ) -> Result<()> {
-    let ui = new_ui()?;
-    let mut product = Product::new(workspace, backend, view)?;
+    let mut product = Product::new(workspace, backend, &app)?;
+    if let Some((x, y)) = root_tap {
+        product.tap(x, y)?;
+        product.run_pending_ui_task();
+    }
     let wait_for_turn = prompt.is_some();
     if let Some(prompt) = prompt {
         product.send_prompt(prompt);
     }
-    for _ in 0..7_500 {
-        product.poll_agent();
-        if !wait_for_turn || !product.busy {
+    let mut settled_frames = 0;
+    for frame in 0..7_500 {
+        product.poll()?;
+        // Give PocketJS a few ticks to settle reactive insertions and layout
+        // before taking a deterministic screenshot.
+        if (!wait_for_turn || !product.busy) && !product.supervisor.services_busy() {
+            settled_frames += 1;
+        } else {
+            settled_frames = 0;
+        }
+        if frame >= 2 && settled_frames >= 2 {
             break;
         }
         std::thread::sleep(Duration::from_millis(16));
@@ -385,16 +612,18 @@ fn headless(
     let target = OffscreenTarget::new(&gpu, PANEL_WIDTH, PANEL_HEIGHT);
     let mut renderer = UiRenderer::new(&gpu, pocket3d::gpu::OFFSCREEN_FORMAT);
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
-    let words = product.words(&ui);
-    renderer.render_words(
-        &gpu,
-        &ui,
-        &words,
-        &mut encoder,
-        &target.view,
-        (PANEL_WIDTH, PANEL_HEIGHT),
-        wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-    )?;
+    product.supervisor.with_ui(|ui| {
+        let words = ui.draw().words.clone();
+        renderer.render_words(
+            &gpu,
+            ui,
+            &words,
+            &mut encoder,
+            &target.view,
+            (PANEL_WIDTH, PANEL_HEIGHT),
+            wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+        )
+    })?;
     gpu.queue.submit([encoder.finish()]);
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent)?;
@@ -410,18 +639,16 @@ struct WindowState {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     renderer: UiRenderer,
-    ui: Ui,
     product: Product,
     cursor: (u16, u16),
     touch_down: bool,
-    frames: u32,
-    fps_started: Instant,
 }
 
 struct WindowApp {
     workspace: PathBuf,
     initial_prompt: Option<String>,
-    initial_view: ScreenView,
+    initial_app: String,
+    initial_root_tap: Option<(u16, u16)>,
     backend: Option<BackendChoice>,
     state: Option<WindowState>,
     error: Option<anyhow::Error>,
@@ -430,14 +657,16 @@ struct WindowApp {
 fn windowed(
     workspace: PathBuf,
     prompt: Option<String>,
-    view: ScreenView,
+    app: String,
+    root_tap: Option<(u16, u16)>,
     backend: BackendChoice,
 ) -> Result<()> {
     let event_loop = EventLoop::new()?;
     let mut app = WindowApp {
         workspace,
         initial_prompt: prompt,
-        initial_view: view,
+        initial_app: app,
+        initial_root_tap: root_tap,
         backend: Some(backend),
         state: None,
         error: None,
@@ -448,11 +677,10 @@ fn windowed(
 
 impl WindowApp {
     fn init(&mut self, event_loop: &ActiveEventLoop) -> Result<WindowState> {
-        let ui = new_ui()?;
         let window = Arc::new(
             event_loop.create_window(
                 Window::default_attributes()
-                    .with_title("Pocket Pi — ESP32-P4 Simulator")
+                    .with_title("Pocket Pi AgentOS — ESP32-P4 Simulator")
                     .with_inner_size(winit::dpi::LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT))
                     .with_resizable(false),
             )?,
@@ -471,7 +699,10 @@ impl WindowApp {
             .backend
             .take()
             .ok_or_else(|| anyhow!("simulator backend was already consumed"))?;
-        let mut product = Product::new(self.workspace.clone(), backend, self.initial_view)?;
+        let mut product = Product::new(self.workspace.clone(), backend, &self.initial_app)?;
+        if let Some((x, y)) = self.initial_root_tap.take() {
+            product.tap(x, y)?;
+        }
         if let Some(prompt) = self.initial_prompt.take() {
             product.send_prompt(prompt);
         }
@@ -481,27 +712,14 @@ impl WindowApp {
             surface,
             config,
             renderer,
-            ui,
             product,
             cursor: (0, 0),
             touch_down: false,
-            frames: 0,
-            fps_started: Instant::now(),
         })
     }
 
     fn redraw(state: &mut WindowState) -> Result<()> {
-        state.product.poll_agent();
-        state.frames += 1;
-        let elapsed = state.fps_started.elapsed();
-        if elapsed >= Duration::from_secs(1) {
-            state.product.screen.telemetry.ui_fps_tenths =
-                ((state.frames as f32 / elapsed.as_secs_f32()) * 10.0).round() as u16;
-            state.frames = 0;
-            state.fps_started = Instant::now();
-            state.product.dirty = true;
-        }
-
+        state.product.poll()?;
         let frame = match state.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -513,21 +731,23 @@ impl WindowApp {
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = state.gpu.device.create_command_encoder(&Default::default());
         let scale = state.config.width as f32 / PANEL_WIDTH as f32;
-        let words = state.product.words(&state.ui);
-        state.renderer.render_words_scaled(
-            &state.gpu,
-            &state.ui,
-            &words,
-            &mut encoder,
-            &view,
-            (state.config.width, state.config.height),
-            scale,
-            wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-        )?;
+        state.product.supervisor.with_ui(|ui| {
+            let words = ui.draw().words.clone();
+            state.renderer.render_words_scaled(
+                &state.gpu,
+                ui,
+                &words,
+                &mut encoder,
+                &view,
+                (state.config.width, state.config.height),
+                scale,
+                wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+            )
+        })?;
         state.gpu.queue.submit([encoder.finish()]);
         state.window.pre_present_notify();
         frame.present();
-        state.product.dirty = false;
+        state.product.run_pending_ui_task();
         state.window.request_redraw();
         Ok(())
     }
@@ -574,7 +794,10 @@ impl ApplicationHandler for WindowApp {
                 ..
             } if !state.touch_down => {
                 state.touch_down = true;
-                state.product.tap(state.cursor.0, state.cursor.1, &state.ui);
+                if let Err(error) = state.product.pointer_down(state.cursor.0, state.cursor.1) {
+                    self.error = Some(error);
+                    event_loop.exit();
+                }
             }
             WindowEvent::MouseInput {
                 button: MouseButton::Left,
@@ -582,14 +805,16 @@ impl ApplicationHandler for WindowApp {
                 ..
             } => {
                 state.touch_down = false;
-                state.product.release_touch();
-            }
-            WindowEvent::KeyboardInput { event, .. } => {
-                if event.state == ElementState::Pressed
-                    && matches!(event.physical_key, PhysicalKey::Code(KeyCode::Escape))
-                {
+                if let Err(error) = state.product.pointer_up() {
+                    self.error = Some(error);
                     event_loop.exit();
                 }
+            }
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed
+                    && matches!(event.physical_key, PhysicalKey::Code(KeyCode::Escape)) =>
+            {
+                event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
                 if let Err(error) = Self::redraw(state) {
@@ -605,134 +830,222 @@ impl ApplicationHandler for WindowApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pocket_pi_embedded::ToolResult;
 
-    #[test]
-    fn bottom_navigation_uses_the_physical_screen_hit_map() {
-        let temp = tempfile::tempdir().unwrap();
-        let ui = new_ui().unwrap();
-        let mut product = Product::new(
-            temp.path().to_owned(),
-            BackendChoice::Codex { model: None },
-            ScreenView::Chat,
-        )
-        .unwrap();
-
-        product.tap(360, 1220, &ui);
-
-        assert_eq!(product.screen.view, ScreenView::Files);
-        product.screen.view = ScreenView::Chat;
-        product.tap(650, 1220, &ui);
-        assert_eq!(product.screen.view, ScreenView::Settings);
+    fn init_logs() {
+        let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+            .is_test(true)
+            .try_init();
     }
 
-    #[test]
-    fn settings_scan_and_wifi_password_use_the_shared_touch_keyboard() {
-        let temp = tempfile::tempdir().unwrap();
-        let ui = new_ui().unwrap();
-        let mut product = Product::new(
-            temp.path().to_owned(),
-            BackendChoice::Codex { model: None },
-            ScreenView::Settings,
-        )
-        .unwrap();
+    struct FailingRobinhood;
 
-        product.tap(580, 180, &ui);
-        product.tap(120, 350, &ui);
-        for _ in 0..8 {
-            product.tap(54, 548, &ui);
+    impl AppServiceHost for FailingRobinhood {
+        fn call(
+            &self,
+            _app_id: &str,
+            service: &str,
+            operation: &str,
+            _args: &Value,
+            _deadline: Instant,
+        ) -> Result<Value, String> {
+            let _ = (service, operation);
+            Err("simulated Robinhood outage".into())
         }
-        product.tap(640, 986, &ui);
+    }
 
-        assert_eq!(
-            product.settings.wifi.connected_ssid.as_deref(),
-            Some("POCKET-PI-LAB")
-        );
-        assert!(!product.screen.handle_touch_release());
+    struct NoTools;
+
+    impl ToolHost for NoTools {
+        fn definitions(&self) -> Vec<Value> {
+            Vec::new()
+        }
+
+        fn execute(&self, _call_id: &str, name: &str, _args_json: &str) -> ToolResult {
+            ToolResult {
+                text: format!("unexpected Tool {name}"),
+                is_error: true,
+                ..ToolResult::default()
+            }
+        }
+    }
+
+    fn route_tool(supervisor: &mut AppSupervisor, name: &str, args_json: &str) -> ToolResult {
+        let (tools, requests) =
+            RoutedToolHost::new(Arc::new(NoTools), supervisor.catalog().clone());
+        let name = name.to_owned();
+        let args_json = args_json.to_owned();
+        let call = std::thread::spawn(move || tools.execute("test", &name, &args_json));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !call.is_finished() {
+            while let Ok(request) = requests.try_recv() {
+                request.handle(supervisor);
+            }
+            supervisor.frame_render(true).unwrap();
+            assert!(Instant::now() < deadline, "timed out routing App Tool");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        call.join().unwrap()
+    }
+
+    fn wait_for(mut ready: impl FnMut() -> bool) {
+        for _ in 0..100 {
+            if ready() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("timed out waiting for background App Data Action");
+    }
+
+    fn try_query_app_database(
+        workspace: &Path,
+        app_id: &str,
+        database_name: &str,
+        sql: &str,
+    ) -> Option<Vec<Value>> {
+        let mut database = pocket_db::DbModule::new(pocket_db::Storage::Dir(
+            workspace.join("apps").join(app_id).join("data"),
+        ));
+        let handle = database.open(database_name);
+        if handle < 0 {
+            return None;
+        }
+        let value: Value = serde_json::from_str(&database.query(handle, sql, "[]")).ok()?;
+        database.close(handle);
+        if value.get("error").is_some() {
+            return None;
+        }
+        value["rows"].as_array().cloned()
+    }
+
+    fn query_app_database(
+        workspace: &Path,
+        app_id: &str,
+        database_name: &str,
+        sql: &str,
+    ) -> Vec<Value> {
+        try_query_app_database(workspace, app_id, database_name, sql)
+            .unwrap_or_else(|| panic!("query {app_id}/{database_name}: {sql}"))
     }
 
     #[test]
-    fn settings_wifi_list_scrolls_to_later_networks() {
+    fn exa_tool_writes_app_owned_sqlite() {
+        init_logs();
         let temp = tempfile::tempdir().unwrap();
-        let ui = new_ui().unwrap();
-        let mut product = Product::new(
-            temp.path().to_owned(),
-            BackendChoice::Codex { model: None },
-            ScreenView::Settings,
-        )
-        .unwrap();
-
-        product.tap(580, 180, &ui);
-        assert!(product.settings.wifi.status.is_empty());
-        product.tap(660, 710, &ui);
-        product.tap(120, 626, &ui);
-
-        assert_eq!(
-            product.settings.wifi.connected_ssid.as_deref(),
-            Some("CAFE")
+        let mut supervisor =
+            AppSupervisor::new(temp.path(), catalog().unwrap(), Arc::new(SimAppServices)).unwrap();
+        let result = route_tool(
+            &mut supervisor,
+            "research.search",
+            r#"{"query":"NVIDIA FY2026 annual report 10-K revenue data center guidance","numResults":5,"includeDomains":["investor.nvidia.com","sec.gov"]}"#,
         );
+        assert!(!result.is_error, "{}", result.text);
+        assert!(temp.path().join("apps/exa/data/exa.sqlite").exists());
+        let rows = query_app_database(
+            temp.path(),
+            "exa",
+            "exa",
+            "SELECT status,result_count FROM searches ORDER BY id DESC LIMIT 1",
+        );
+        assert_eq!(rows, vec![json!(["ok", 2])]);
     }
 
     #[test]
-    fn mouse_coordinates_drive_the_same_keyboard_as_touch() {
+    fn exa_write_removes_rows_older_than_seven_days() {
+        init_logs();
         let temp = tempfile::tempdir().unwrap();
-        let ui = new_ui().unwrap();
-        let mut screen = ScreenState::new(temp.path().to_str().unwrap());
-        let chat = ChatProjection::new("YOU", "PI");
+        let mut supervisor =
+            AppSupervisor::new(temp.path(), catalog().unwrap(), Arc::new(SimAppServices)).unwrap();
+        let first = route_tool(
+            &mut supervisor,
+            "research.search",
+            r#"{"query":"expired search"}"#,
+        );
+        assert!(!first.is_error, "{}", first.text);
 
+        let mut database =
+            pocket_db::DbModule::new(pocket_db::Storage::Dir(temp.path().join("apps/exa/data")));
+        let handle = database.open("exa");
+        assert!(handle >= 0);
         assert_eq!(
-            screen.handle_tap(360, 1100, &chat, &ui),
-            ScreenInteraction::Redraw
+            database.exec(handle, "UPDATE searches SET searched_at=0;"),
+            0,
+            "{}",
+            database.last_error(handle)
         );
-        assert_eq!(
-            screen.handle_tap(54, 548, &chat, &ui),
-            ScreenInteraction::Redraw
+        database.close(handle);
+
+        let second = route_tool(
+            &mut supervisor,
+            "research.search",
+            r#"{"query":"new search"}"#,
         );
-        assert_eq!(
-            screen.handle_tap(640, 986, &chat, &ui),
-            ScreenInteraction::SubmitPrompt("q".into())
+        assert!(!second.is_error, "{}", second.text);
+        let rows = query_app_database(
+            temp.path(),
+            "exa",
+            "exa",
+            "SELECT id,query FROM searches ORDER BY id",
         );
+        assert_eq!(rows, vec![json!([2, "new search"])]);
     }
 
     #[test]
-    fn touch_keyboard_can_type_uppercase_wifi_passwords() {
+    fn robinhood_refresh_failure_records_no_view_data() {
+        init_logs();
         let temp = tempfile::tempdir().unwrap();
-        let ui = new_ui().unwrap();
-        let mut screen = ScreenState::new(temp.path().to_str().unwrap());
-        let chat = ChatProjection::new("YOU", "PI");
+        let mut supervisor =
+            AppSupervisor::new(temp.path(), catalog().unwrap(), Arc::new(FailingRobinhood))
+                .unwrap();
+        supervisor.open("robinhood").unwrap();
 
-        assert_eq!(
-            screen.handle_tap(360, 1100, &chat, &ui),
-            ScreenInteraction::Redraw
+        let failed = supervisor.invoke_active_task("refreshPortfolio", &Value::Null);
+        assert!(!failed.is_error);
+        wait_for(|| {
+            try_query_app_database(
+                temp.path(),
+                "robinhood",
+                "robinhood",
+                "SELECT status FROM refresh_runs ORDER BY id DESC LIMIT 1",
+            )
+            .is_some_and(|rows| rows.first() == Some(&json!(["failed"])))
+        });
+        supervisor.frame_render(true).unwrap();
+
+        let rows = query_app_database(
+            temp.path(),
+            "robinhood",
+            "robinhood",
+            "SELECT COUNT(*) FROM total_value",
         );
-        assert_eq!(
-            screen.handle_tap(450, 986, &chat, &ui),
-            ScreenInteraction::Redraw
-        );
-        assert_eq!(
-            screen.handle_tap(54, 548, &chat, &ui),
-            ScreenInteraction::Redraw
-        );
-        assert_eq!(
-            screen.handle_tap(640, 986, &chat, &ui),
-            ScreenInteraction::SubmitPrompt("Q".into())
-        );
+        assert_eq!(rows, vec![json!([0])]);
     }
 
     #[test]
-    fn workspace_row_opens_the_physical_file_viewer() {
+    fn robinhood_refresh_writes_the_fixed_view_projection() {
+        init_logs();
         let temp = tempfile::tempdir().unwrap();
-        std::fs::write(temp.path().join("memory.md"), "shared-ui").unwrap();
-        let ui = new_ui().unwrap();
-        let mut product = Product::new(
-            temp.path().to_owned(),
-            BackendChoice::Codex { model: None },
-            ScreenView::Chat,
-        )
-        .unwrap();
+        let mut supervisor =
+            AppSupervisor::new(temp.path(), catalog().unwrap(), Arc::new(SimAppServices)).unwrap();
+        supervisor.open("robinhood").unwrap();
+        let refreshed = route_tool(&mut supervisor, "robinhood.refresh_portfolio", "{}");
+        assert!(!refreshed.is_error, "{}", refreshed.text);
+        supervisor.frame_render(true).unwrap();
 
-        product.tap(360, 1220, &ui);
-        product.tap(120, 220, &ui);
-
-        assert_eq!(product.screen.view, ScreenView::Viewer);
+        let rows = query_app_database(
+            temp.path(),
+            "robinhood",
+            "robinhood",
+            "SELECT status,operation_count,success_count FROM refresh_runs ORDER BY id DESC LIMIT 1",
+        );
+        assert_eq!(rows, vec![json!(["succeeded", 16, 16])]);
+        let rows = query_app_database(
+            temp.path(),
+            "robinhood",
+            "robinhood",
+            "SELECT (SELECT COUNT(*) FROM accounts),(SELECT COUNT(*) FROM portfolio_current),(SELECT COUNT(*) FROM total_value)",
+        );
+        assert_eq!(rows, vec![json!([3, 3, 3])]);
     }
 }
