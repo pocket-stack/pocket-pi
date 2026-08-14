@@ -3,7 +3,7 @@ import { getOps } from "@pocketjs/framework";
 // Dynamic App text is not visible to PocketJS's bundle-time font subsetter.
 // Keep common English prose punctuation in every bundle that imports this
 // module so model/provider text does not fall back to missing-glyph boxes.
-const DYNAMIC_TEXT_GLYPHS = "‘’“”–—…•";
+const DYNAMIC_TEXT_GLYPHS = "‘’“”‑–—…•";
 
 const PREVIEW_SOURCE_CHARACTERS = 512;
 

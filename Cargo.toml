@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/pocket-pi-app-pack",
     "crates/pocket-pi-agentos",
     "crates/pocket-pi-embedded",
     "crates/pocket-pi-protocols",
@@ -24,30 +23,31 @@ log = "0.4"
 pocket-pi-protocols = { path = "crates/pocket-pi-protocols" }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
+tar = "0.4"
 
 [workspace.dependencies.pocketjs-core]
 git = "https://github.com/pocket-stack/pocketjs.git"
-rev = "9c809bbd047ddc75c27caa4990951a78d942477a"
+rev = "e12cf12f82cc60b636368119d49a06eb9ed2a3d5"
 
 [workspace.dependencies.pocket-mod]
 git = "https://github.com/pocket-stack/pocketjs.git"
-rev = "9c809bbd047ddc75c27caa4990951a78d942477a"
+rev = "e12cf12f82cc60b636368119d49a06eb9ed2a3d5"
 
 [workspace.dependencies.pocket-ui-surface]
 git = "https://github.com/pocket-stack/pocketjs.git"
-rev = "9c809bbd047ddc75c27caa4990951a78d942477a"
+rev = "e12cf12f82cc60b636368119d49a06eb9ed2a3d5"
 
 [workspace.dependencies.pocket-db]
 git = "https://github.com/pocket-stack/pocketjs.git"
-rev = "9c809bbd047ddc75c27caa4990951a78d942477a"
+rev = "e12cf12f82cc60b636368119d49a06eb9ed2a3d5"
 
 [workspace.dependencies.pocket-fs]
 git = "https://github.com/pocket-stack/pocketjs.git"
-rev = "9c809bbd047ddc75c27caa4990951a78d942477a"
+rev = "e12cf12f82cc60b636368119d49a06eb9ed2a3d5"
 
 [workspace.dependencies.pocket-net]
 git = "https://github.com/pocket-stack/pocketjs.git"
-rev = "9c809bbd047ddc75c27caa4990951a78d942477a"
+rev = "e12cf12f82cc60b636368119d49a06eb9ed2a3d5"
 
 [profile.release]
 opt-level = 2

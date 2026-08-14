@@ -1,12 +1,17 @@
 use core::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::time::Instant;
 
+use anyhow::Context as _;
+use embedded_svc::http::{Headers as _, Method};
+use embedded_svc::io::{Read as _, Write as _};
+use esp_idf_svc::http::server::{Configuration as ServerConfiguration, EspHttpServer};
 use pocket_pi_agentos::{
-    AppCatalog, AppServiceHost, AppSupervisor, RoutedToolHost, DATA_ACTION_STACK_BYTES,
+    stage_pocketapp_bytes, system_app_bundle, AppDescriptor, AppServiceHost, AppSupervisor,
+    InstalledAppIndex, RoutedToolHost, StagedApp, DATA_ACTION_STACK_BYTES, MAX_POCKETAPP_BYTES,
 };
-use pocket_pi_app_pack::catalog;
 use pocket_pi_embedded::{AgentEvent, ModelBackend, ToolHost, MODEL_WORKER_STACK_BYTES};
 use pocket_pi_protocols::model::ModelBackendSettings;
 use pocket_pi_tools::CoreToolHost;
@@ -17,8 +22,8 @@ use super::{
     app_services::EspAppServices,
     backend,
     device_state::{SettingsProjection, WifiSettingsProjection},
-    esp_result, init_wifi, storage, transport, DisplayProbe, EspPlatform,
-    BOARD_NAME, PANEL_HEIGHT, PANEL_WIDTH,
+    esp_result, init_wifi, storage, transport, DisplayProbe, EspPlatform, BOARD_NAME, PANEL_HEIGHT,
+    PANEL_WIDTH,
 };
 
 const AGENTOS_FREERTOS_HZ: u32 = 100;
@@ -28,6 +33,12 @@ const _: () = assert!(esp_idf_svc::sys::configTICK_RATE_HZ == AGENTOS_FREERTOS_H
 struct Message {
     role: &'static str,
     text: String,
+}
+
+struct InstallUi {
+    state: &'static str,
+    descriptor: AppDescriptor,
+    error: Option<String>,
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -125,11 +136,14 @@ pub fn run() -> anyhow::Result<()> {
     let network_ready = Arc::new(AtomicBool::new(
         wifi.as_ref().is_some_and(|wifi| wifi.is_connected()),
     ));
-    let catalog = catalog()?;
+    let catalog = InstalledAppIndex::load(
+        std::path::Path::new(storage::WORKSPACE_ROOT),
+        system_app_bundle(),
+    )?;
     let services: Arc<dyn AppServiceHost> = Arc::new(EspAppServices::new(
         network_ready.clone(),
         catalog.clone(),
-        runtime_config.app_credentials,
+        wifi.as_ref().map(|wifi| wifi.nvs.clone()),
     ));
     let mut supervisor = with_psram_pthread_config(DATA_ACTION_STACK_BYTES, || {
         AppSupervisor::new(storage::WORKSPACE_ROOT, catalog, services)
@@ -168,6 +182,7 @@ pub fn run() -> anyhow::Result<()> {
             .boot_agent(&config.to_string(), backend, Arc::new(routed_tools))
             .map_err(anyhow::Error::msg)
     })?;
+    let (_install_server, install_rx, install_slot) = start_install_server()?;
 
     let mut messages = vec![Message {
         role: "assistant",
@@ -182,6 +197,9 @@ pub fn run() -> anyhow::Result<()> {
     let mut redraw = true;
     let mut projection_dirty = true;
     let mut pending_ui_task: Option<String> = None;
+    let mut pending_install: Option<StagedApp> = None;
+    let mut install_ui: Option<InstallUi> = None;
+    let mut install_requested = false;
     let mut last_tick = Instant::now();
     let mut last_runtime_pump = Instant::now();
     let mut last_projection_refresh = Instant::now();
@@ -190,6 +208,19 @@ pub fn run() -> anyhow::Result<()> {
     let mut last_wifi_connected = wifi.as_ref().is_some_and(|wifi| wifi.is_connected());
 
     loop {
+        if pending_install.is_none() && !busy && !supervisor.services_busy() {
+            if let Ok(staged) = install_rx.try_recv() {
+                install_ui = Some(InstallUi {
+                    state: "review",
+                    descriptor: staged.descriptor.clone(),
+                    error: None,
+                });
+                pending_install = Some(staged);
+                supervisor.open(pocket_pi_agentos::ROOT_APP_ID)?;
+                projection_dirty = true;
+                redraw = true;
+            }
+        }
         while let Ok(request) = app_rx.try_recv() {
             request.handle(&mut supervisor);
             redraw = true;
@@ -225,6 +256,25 @@ pub fn run() -> anyhow::Result<()> {
                                 pending_ui_task = Some(task.to_owned());
                             }
                         }
+                        Some("installApp")
+                            if install_ui.as_ref().is_some_and(|ui| ui.state == "review") =>
+                        {
+                            if let Some(ui) = &mut install_ui {
+                                ui.state = "installing";
+                            }
+                            install_requested = true;
+                            projection_dirty = true;
+                        }
+                        Some("dismissInstall") => {
+                            if let Some(staged) = pending_install.take() {
+                                if let Some(path) = staged.release_dir.parent() {
+                                    let _ = std::fs::remove_dir_all(path);
+                                }
+                            }
+                            install_ui = None;
+                            install_slot.store(false, Ordering::Release);
+                            projection_dirty = true;
+                        }
                         Some("settings") => {
                             match action.get("command").and_then(Value::as_str) {
                                 Some("scan") => match wifi.as_mut() {
@@ -255,16 +305,18 @@ pub fn run() -> anyhow::Result<()> {
                                         .and_then(Value::as_str)
                                         .unwrap_or("");
                                     match wifi.as_mut() {
-                                        Some(wifi) => match wifi.begin_connect(ssid, password, true) {
-                                            Ok(()) => {
-                                                settings = wifi.projection("CONNECTING...");
-                                                last_wifi_poll = Instant::now();
+                                        Some(wifi) => {
+                                            match wifi.begin_connect(ssid, password, true) {
+                                                Ok(()) => {
+                                                    settings = wifi.projection("CONNECTING...");
+                                                    last_wifi_poll = Instant::now();
+                                                }
+                                                Err(error) => {
+                                                    settings.wifi.status =
+                                                        format!("CONNECT FAILED: {error}")
+                                                }
                                             }
-                                            Err(error) => {
-                                                settings.wifi.status =
-                                                    format!("CONNECT FAILED: {error}")
-                                            }
-                                        },
+                                        }
                                         None => {
                                             settings.wifi.status = "WI-FI DRIVER UNAVAILABLE".into()
                                         }
@@ -339,13 +391,17 @@ pub fn run() -> anyhow::Result<()> {
                 }
                 log::info!(
                     "Wi-Fi link state changed: {}",
-                    if connected { "connected" } else { "disconnected" }
+                    if connected {
+                        "connected"
+                    } else {
+                        "disconnected"
+                    }
                 );
             }
         }
 
         if last_tick.elapsed() >= Duration::from_secs(1) {
-            if !busy && agent_status == "IDLE" && initial_prompt.is_none() {
+            if install_ui.is_none() && !busy && agent_status == "IDLE" && initial_prompt.is_none() {
                 if let Some(wake) = native_tools.claim_due() {
                     submit_prompt(
                         wake.prompt,
@@ -390,6 +446,7 @@ pub fn run() -> anyhow::Result<()> {
                 &settings,
                 native_tools.as_ref(),
                 supervisor.catalog(),
+                install_ui.as_ref(),
             );
             supervisor.update_root(&projection)?;
             projection_dirty = false;
@@ -453,6 +510,7 @@ pub fn run() -> anyhow::Result<()> {
 
         if agent_status == "IDLE"
             && !busy
+            && install_ui.is_none()
             && initial_prompt.is_some()
             && Instant::now() >= initial_prompt_not_before
             && (!wireless_model || network_ready.load(Ordering::Acquire))
@@ -477,9 +535,48 @@ pub fn run() -> anyhow::Result<()> {
             redraw = false;
         }
 
+        // The loading projection is rendered before activation enters QuickJS,
+        // SQLite and flash. Touch and prompts remain locked by InstallScreen.
+        if install_requested {
+            install_requested = false;
+            if let Some(staged) = pending_install.take() {
+                let cleanup = staged
+                    .release_dir
+                    .parent()
+                    .map(std::path::Path::to_path_buf);
+                let result = with_psram_pthread_config(DATA_ACTION_STACK_BYTES, || {
+                    supervisor.activate_new_app(&staged.release_dir, staged.credentials)
+                });
+                match &result {
+                    Ok(descriptor) => {
+                        log::info!(
+                            "App install succeeded: {} {}",
+                            descriptor.id,
+                            descriptor.version
+                        )
+                    }
+                    Err(error) => log::error!("App install failed: {error:#}"),
+                }
+                if let Some(path) = cleanup {
+                    let _ = std::fs::remove_dir_all(path);
+                }
+                if let Some(ui) = &mut install_ui {
+                    match result {
+                        Ok(_) => ui.state = "success",
+                        Err(error) => {
+                            ui.state = "failed";
+                            ui.error = Some(format!("{error:#}"));
+                        }
+                    }
+                }
+                projection_dirty = true;
+                redraw = true;
+            }
+        }
+
         // A UI-requested task runs only after its loading state has reached the
         // panel. This preserves immediate touch feedback even when HTTPS is slow.
-        if !busy {
+        if install_ui.is_none() && !busy {
             if let Some(task) = pending_ui_task.take() {
                 let started = Instant::now();
                 let result = supervisor.invoke_active_task(&task, &Value::Null);
@@ -512,6 +609,92 @@ pub fn run() -> anyhow::Result<()> {
         // CPU0's idle task a watchdog-feeding scheduling opportunity.
         unsafe { esp_idf_svc::sys::vTaskDelay(1) };
     }
+}
+
+fn start_install_server(
+) -> anyhow::Result<(EspHttpServer<'static>, Receiver<StagedApp>, Arc<AtomicBool>)> {
+    let install_root = std::path::Path::new(storage::WORKSPACE_ROOT).join(".system/install");
+    if let Err(error) = std::fs::remove_dir_all(&install_root) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(error).context("clear stale App install staging");
+        }
+    }
+    std::fs::create_dir_all(&install_root)?;
+    let mut server = EspHttpServer::new(&ServerConfiguration {
+        stack_size: 12 * 1024,
+        ..Default::default()
+    })?;
+    server.fn_handler::<anyhow::Error, _>("/", Method::Get, |request| {
+        request.into_ok_response()?.write_all(
+            b"<form><h1>Pocket Pi App Install</h1><input type=file id=f><button type=button onclick=send()>Upload</button><script>function send(){fetch('/install',{method:'POST',body:f.files[0]}).then(r=>r.text()).then(alert)}</script></form>",
+        )?;
+        Ok(())
+    })?;
+
+    let (tx, rx) = mpsc::sync_channel(1);
+    let slot = Arc::new(AtomicBool::new(false));
+    let handler_slot = slot.clone();
+    server.fn_handler::<anyhow::Error, _>("/install", Method::Post, move |mut request| {
+        if handler_slot
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            request
+                .into_status_response(409)?
+                .write_all(b"another install is pending")?;
+            return Ok(());
+        }
+        let job = install_root.join(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default()
+                .to_string(),
+        );
+        let result = (|| -> anyhow::Result<StagedApp> {
+            let length = usize::try_from(
+                request
+                    .content_len()
+                    .ok_or_else(|| anyhow::anyhow!("missing Content-Length"))?,
+            )
+            .context("Content-Length is too large")?;
+            anyhow::ensure!(length <= MAX_POCKETAPP_BYTES, "package exceeds 2 MiB");
+            let mut bytes = vec![0; length];
+            request.read_exact(&mut bytes)?;
+            std::fs::create_dir_all(&job)?;
+            stage_pocketapp_bytes(&bytes, &job.join("release"))
+        })();
+        match result {
+            Ok(staged) => match tx.try_send(staged) {
+                Ok(()) => {
+                    request
+                        .into_status_response(202)?
+                        .write_all(b"uploaded; confirm installation on Pocket Pi")?;
+                }
+                Err(
+                    mpsc::TrySendError::Full(staged) | mpsc::TrySendError::Disconnected(staged),
+                ) => {
+                    if let Some(path) = staged.release_dir.parent() {
+                        let _ = std::fs::remove_dir_all(path);
+                    }
+                    handler_slot.store(false, Ordering::Release);
+                    request
+                        .into_status_response(409)?
+                        .write_all(b"installer is busy")?;
+                }
+            },
+            Err(error) => {
+                let _ = std::fs::remove_dir_all(&job);
+                handler_slot.store(false, Ordering::Release);
+                request
+                    .into_status_response(400)?
+                    .write_all(format!("invalid package: {error:#}").as_bytes())?;
+            }
+        }
+        Ok(())
+    })?;
+    log::info!("App installer listening on http://<device-ip>/");
+    Ok((server, rx, slot))
 }
 
 fn with_psram_pthread_config<T>(
@@ -573,7 +756,8 @@ fn root_projection(
     model: &str,
     settings: &SettingsProjection,
     tools: &CoreToolHost,
-    catalog: &AppCatalog,
+    catalog: &InstalledAppIndex,
+    install: Option<&InstallUi>,
 ) -> Value {
     let schedule = tools.schedule_projection();
     let schedule_text = match schedule.next_in_seconds {
@@ -583,6 +767,49 @@ fn root_projection(
         ),
         None => "not scheduled".to_owned(),
     };
+    let install = install.map(|install| {
+        let network = install
+            .descriptor
+            .native_services
+            .http
+            .iter()
+            .flat_map(|policy| policy.urls.clone())
+            .chain(
+                install
+                    .descriptor
+                    .native_services
+                    .mcp
+                    .iter()
+                    .map(|policy| policy.url.clone()),
+            )
+            .collect::<Vec<_>>();
+        let credentials = install
+            .descriptor
+            .native_services
+            .http
+            .iter()
+            .filter_map(|policy| policy.credential.as_ref())
+            .chain(
+                install
+                    .descriptor
+                    .native_services
+                    .mcp
+                    .iter()
+                    .map(|policy| &policy.credential),
+            )
+            .map(|credential| credential.id.clone())
+            .collect::<Vec<_>>();
+        json!({
+            "state":install.state,
+            "name":install.descriptor.title,
+            "version":install.descriptor.version,
+            "tools":install.descriptor.tools.len(),
+            "network":network,
+            "credentials":credentials,
+            "schedules":install.descriptor.schedules.len(),
+            "error":install.error,
+        })
+    });
     json!({
         "agent":agent_status,
         "model":format!("{provider} / {model}"),
@@ -593,12 +820,13 @@ fn root_projection(
             "next":schedule_text,
             "everyMinutes":schedule.every_minutes,
         },
-        "apps":catalog.descriptors().filter(|app| app.id != pocket_pi_agentos::ROOT_APP_ID).map(|app| json!({
+        "apps":catalog.descriptors().into_iter().filter(|app| app.id != pocket_pi_agentos::ROOT_APP_ID).map(|app| json!({
             "id":app.id,
             "title":app.title,
             "description":app.description,
             "scheduleEveryMinutes":app.schedules.first().map(|schedule| schedule.every_minutes),
         })).collect::<Vec<_>>(),
+        "install":install,
         "settings":{
             "wifi":{
                 "connectedSsid":settings.wifi.connected_ssid,

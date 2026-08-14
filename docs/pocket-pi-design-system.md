@@ -1,6 +1,6 @@
 # Pi Design component inventory
 
-状态：v0.2。Pi Design 是 Pocket Pi 的全局视觉语言；内置 App 不再各自维护一套
+状态：v0.2。Pi Design 是 Pocket Pi Apps 的全局视觉语言；各 App 不再各自维护一套
 Header、按钮、空状态或字号层级。
 
 实现位于 `apps/_shared/ui.tsx` 和 `apps/_shared/text.ts`。共享层只能依赖
@@ -15,7 +15,7 @@ PocketJS framework primitives，不能调用 ESP-IDF、Pocket Pi Rust 私有接�
 | spacing | 24px screen gutter、card padding、stack gap | 直接写在当前 concrete component recipe 中，不导出无人消费的 token map |
 | surfaces | card、selected card、row、muted、shell recipes | arbitrary children 的容器保持 literal View；当前没有单独的 unused surface registry |
 | `statusBadge` | neutral、info、success、warning、danger | 统一背景色、文字色和状态语义；保留为当前 shared component recipe |
-| dynamic glyphs | curly quotes、en/em dash、ellipsis、bullet | 进入现有 Inter subset atlas |
+| dynamic glyphs | curly quotes、non-breaking/en/em dash、ellipsis、bullet | 进入现有 Inter subset atlas |
 
 PocketJS 当前只提供 12 / 14 / 16 / 18 / 20 / 24 / 36px 的 baked font
 slots。Pi Design 的“稍微放大”因此采用相邻 slot：caption/label 14→16px，
@@ -26,13 +26,13 @@ body 16→18px；不会引入 runtime font loader 或第二套字体。
 | Component | 包含什么 | 不包含什么 | 当前使用者 |
 | --- | --- | --- | --- |
 | `PocketHeader` | 112px shell header、back/status affordance、App title、两行 metadata | navigation side effect、App data loading | Pi Agent、Exa、Robinhood |
-| `PageIntro` | eyebrow、page title、一行说明 | 页面 query、filter、scroll | Exa |
-| `SectionHeading` | section title、optional detail、optional `VIEW ALL` affordance | list data、tap behavior | Robinhood |
+| `PageIntro` | eyebrow、page title、一行说明 | 页面 query、filter、scroll | Pi Agent installer、Exa |
+| `SectionHeading` | section title、optional detail、optional `VIEW ALL` affordance | list data、tap behavior | Pi Agent installer、Robinhood |
 | `ActionButton` | primary/neutral/danger/disabled visual state、统一 18px label | action execution、loading state machine | Pi Agent、Robinhood |
 | `statusBadge` recipe | 短 label 的 neutral/info/success/warning/danger surface + text classes | 长状态文案、业务判断 | Exa result、Robinhood account status |
 | `EmptyState` | optional icon、title、detail、regular/compact layout | empty 条件、retry action | Exa、Robinhood |
 | `MetricCard` | metric label、formatted value、optional positive/negative tone | 数值计算、currency formatting、time range | Robinhood value/cash/buying power |
-| `StatusBar` | 单行 runtime status、neutral/error tone、light/dark surface | log history、progress model、retry | Exa SQLite state、Robinhood refresh state |
+| `StatusBar` | 单行 runtime status、neutral/error tone、light/dark surface | log history、progress model、retry | Pi Agent、Exa SQLite state、Robinhood refresh state |
 | `ScrollButtons` | UP/DN controls 的统一文字和视觉 | offset、pagination、tap hit testing | Pi Agent、Exa、Robinhood |
 | `wrapLines` / `wrapPreview` / `wrapTextPage` | `measureText` 缓存、显式换行、preview ellipsis、按字符游标只物化可见文件页 | rich text、Markdown、scroll state | Pi Agent dynamic text / Files viewer |
 

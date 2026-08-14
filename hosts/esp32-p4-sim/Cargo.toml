@@ -11,17 +11,18 @@ anyhow.workspace = true
 env_logger = "0.11"
 log.workspace = true
 pocket-pi-agentos = { path = "../../crates/pocket-pi-agentos" }
-pocket-pi-app-pack = { path = "../../crates/pocket-pi-app-pack" }
 pocket-pi-embedded = { path = "../../crates/pocket-pi-embedded" }
 pocket-pi-protocols = { path = "../../crates/pocket-pi-protocols" }
 pocket-pi-tools = { path = "../../crates/pocket-pi-tools" }
-pocket-ui-wgpu = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "9c809bbd047ddc75c27caa4990951a78d942477a" }
-pocket3d = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "9c809bbd047ddc75c27caa4990951a78d942477a", default-features = false }
+pocket-ui-wgpu = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "e12cf12f82cc60b636368119d49a06eb9ed2a3d5" }
+pocket3d = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "e12cf12f82cc60b636368119d49a06eb9ed2a3d5", default-features = false }
 serde_json.workspace = true
 tempfile = "3"
+tiny_http = "0.12"
 ureq = { version = "2.12", features = ["json"] }
 wgpu = "25"
 winit = "0.30"
 
 [dev-dependencies]
 pocket-db.workspace = true
+tar.workspace = true

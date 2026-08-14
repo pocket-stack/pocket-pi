@@ -1,7 +1,13 @@
+use std::collections::{BTreeMap, BTreeSet};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
 use anyhow::{bail, Context, Result};
+use serde_json::{json, Value};
+
+const POCKETJS_REVISION: &str = "e12cf12f82cc60b636368119d49a06eb9ed2a3d5";
 
 fn main() -> Result<()> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -10,20 +16,27 @@ fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let command_name = args.next();
     let target = args.next();
-    let mut rest = args.collect::<Vec<_>>();
-    let apps = take_apps(&mut rest)?;
+    let rest = args.collect::<Vec<_>>();
     match (command_name.as_deref(), target.as_deref()) {
-        (Some("build"), Some("agentos-apps")) => {
+        (Some("build"), Some("pi-agent")) => {
             build_embedded_guest(&root)?;
-            build_agentos_apps(&root, &apps)
+            build_pi_agent(&root)
+        }
+        (Some("build"), Some("app")) => {
+            let app = rest.first().context("build app requires an App id")?;
+            anyhow::ensure!(
+                app != "pi-agent",
+                "the System App is built with `cargo xtask build pi-agent`"
+            );
+            build_app(&root, app)?;
+            package_app(&root, app, rest.get(1).map(PathBuf::from).as_deref())
         }
         (Some("build"), Some("esp32-p4")) => {
             build_embedded_guest(&root)?;
-            build_agentos_apps(&root, &apps)?;
+            build_pi_agent(&root)?;
             command(
                 Command::new("rustup")
                     .current_dir(root.join("firmware/esp32-p4"))
-                    .env("POCKET_PI_APPS", &apps)
                     .args([
                         "run",
                         "nightly-2026-05-01",
@@ -36,73 +49,40 @@ fn main() -> Result<()> {
         }
         (Some("build"), Some("esp32-p4-sim")) => {
             build_embedded_guest(&root)?;
-            build_agentos_apps(&root, &apps)?;
-            cargo(&root, &apps, ["build", "-p", "pocket-pi-esp32-p4-sim"])
+            build_pi_agent(&root)?;
+            cargo(&root, ["build", "-p", "pocket-pi-esp32-p4-sim"])
         }
         (Some("run"), Some("esp32-p4-sim")) => {
             build_embedded_guest(&root)?;
-            build_agentos_apps(&root, &apps)?;
-            cargo_with_args(
-                &root,
-                &apps,
-                ["run", "-p", "pocket-pi-esp32-p4-sim", "--"],
-                &rest,
-            )
+            build_pi_agent(&root)?;
+            cargo_with_args(&root, ["run", "-p", "pocket-pi-esp32-p4-sim", "--"], &rest)
         }
         (Some("snapshot"), Some("esp32-p4-sim")) => {
             build_embedded_guest(&root)?;
-            build_agentos_apps(&root, &apps)?;
+            build_pi_agent(&root)?;
             let output = root.join("artifacts/screenshots/esp32-p4-sim.png");
             std::fs::create_dir_all(output.parent().unwrap())?;
             cargo_with_args(
                 &root,
-                &apps,
                 ["run", "-p", "pocket-pi-esp32-p4-sim", "--"],
                 &["--screenshot".into(), output.display().to_string()],
             )
         }
         _ => {
             eprintln!(
-                "usage:\n  cargo xtask build agentos-apps|esp32-p4|esp32-p4-sim [--apps robinhood,exa|exa|robinhood|none]\n  cargo xtask run esp32-p4-sim [--apps ...] [args]\n  cargo xtask snapshot esp32-p4-sim [--apps ...]"
+                "usage:\n  cargo xtask build pi-agent|esp32-p4|esp32-p4-sim\n  cargo xtask build app <id> [credentials.json]\n  cargo xtask run esp32-p4-sim [args]\n  cargo xtask snapshot esp32-p4-sim"
             );
             bail!("unknown xtask command")
         }
     }
 }
 
-fn take_apps(args: &mut Vec<String>) -> Result<String> {
-    let Some(index) = args.iter().position(|arg| arg == "--apps") else {
-        return Ok("robinhood,exa".into());
-    };
-    args.remove(index);
-    let value = args
-        .get(index)
-        .cloned()
-        .context("--apps requires a value")?;
-    args.remove(index);
-    selected_apps(&value)?;
-    Ok(value)
+fn build_pi_agent(root: &Path) -> Result<()> {
+    let pocketjs = pocketjs_checkout(root)?;
+    build_app_with_pocketjs(root, &pocketjs, "pi-agent")
 }
 
-fn selected_apps(value: &str) -> Result<Vec<&str>> {
-    if value == "none" {
-        return Ok(Vec::new());
-    }
-    let mut selected = Vec::new();
-    for app in value.split(',') {
-        if !matches!(app, "robinhood" | "exa") {
-            bail!("unknown App {app}; expected robinhood, exa, or none");
-        }
-        if selected.contains(&app) {
-            bail!("duplicate App {app}");
-        }
-        selected.push(app);
-    }
-    Ok(selected)
-}
-
-fn build_agentos_apps(root: &Path, apps: &str) -> Result<()> {
-    const POCKETJS_REV: &str = "9c809bbd047ddc75c27caa4990951a78d942477a";
+fn pocketjs_checkout(root: &Path) -> Result<PathBuf> {
     let pocketjs = std::env::var_os("POCKETJS_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| root.parent().unwrap_or(root).join("pocketjs"));
@@ -112,38 +92,142 @@ fn build_agentos_apps(root: &Path, apps: &str) -> Result<()> {
         .output()
         .with_context(|| format!("inspect PocketJS checkout at {}", pocketjs.display()))?;
     let actual = String::from_utf8_lossy(&revision.stdout).trim().to_owned();
-    if !revision.status.success() || actual != POCKETJS_REV {
+    if !revision.status.success() || actual != POCKETJS_REVISION {
         bail!(
-            "POCKETJS_ROOT={} must be checked out at the pinned upstream PocketJS revision {POCKETJS_REV}; found {actual}",
+            "POCKETJS_ROOT={} must be checked out at the pinned upstream PocketJS revision {POCKETJS_REVISION}; found {actual}",
             pocketjs.display()
         );
     }
     install_if_missing(&pocketjs)?;
-    for app in std::iter::once("pi-agent").chain(selected_apps(apps)?) {
-        let app_root = root.join("apps").join(app);
+    Ok(pocketjs)
+}
+
+fn build_app(root: &Path, app: &str) -> Result<()> {
+    let pocketjs = pocketjs_checkout(root)?;
+    build_app_with_pocketjs(root, &pocketjs, app)
+}
+
+fn build_app_with_pocketjs(root: &Path, pocketjs: &Path, app: &str) -> Result<()> {
+    let app_root = app_root(root, app)?;
+    command(
+        Command::new("bun")
+            .current_dir(pocketjs)
+            .arg("tools/build.ts")
+            .arg(app_root.join("app.tsx"))
+            .arg(format!("--outdir={}", app_root.join("dist").display()))
+            .arg("--framework=solid"),
+        &format!("building AgentOS App {app}"),
+    )?;
+    minify_agentos_bundle(&app_root)?;
+    let data_entry = app_root.join("data-action.ts");
+    if data_entry.is_file() {
         command(
             Command::new("bun")
-                .current_dir(&pocketjs)
-                .arg("tools/build.ts")
-                .arg(app_root.join("app.tsx"))
-                .arg(format!("--outdir={}", app_root.join("dist").display()))
-                .arg("--framework=solid"),
-            &format!("building AgentOS App {app}"),
+                .arg(root.join("tools/build-agentos-data.ts"))
+                .arg(&data_entry)
+                .arg(app_root.join("dist/data-action.js"))
+                .arg(pocketjs),
+            &format!("building AgentOS data action {app}"),
         )?;
-        minify_agentos_bundle(&app_root)?;
-        let data_entry = app_root.join("data-action.ts");
-        if data_entry.is_file() {
-            command(
-                Command::new("bun")
-                    .arg(root.join("tools/build-agentos-data.ts"))
-                    .arg(&data_entry)
-                    .arg(app_root.join("dist/data-action.js"))
-                    .arg(&pocketjs),
-                &format!("building AgentOS data action {app}"),
-            )?;
-        }
     }
     Ok(())
+}
+
+fn package_app(root: &Path, app: &str, credentials: Option<&Path>) -> Result<()> {
+    let app_root = app_root(root, app)?;
+    let descriptor: Value =
+        serde_json::from_slice(&std::fs::read(app_root.join("agent-app.json"))?)?;
+    let manifest: Value = serde_json::from_slice(&std::fs::read(app_root.join("pocket.json"))?)?;
+    let credentials_map = credentials.map_or_else(
+        || Ok(BTreeMap::new()),
+        |path| {
+            serde_json::from_slice::<BTreeMap<String, String>>(&std::fs::read(path)?)
+                .context("parse credentials.json")
+        },
+    )?;
+    anyhow::ensure!(
+        descriptor["id"] == app && manifest["name"] == app,
+        "App id mismatch"
+    );
+    anyhow::ensure!(
+        descriptor["version"] == manifest["version"],
+        "App version mismatch"
+    );
+    anyhow::ensure!(
+        credentials_map.keys().cloned().collect::<BTreeSet<_>>()
+            == descriptor_credential_ids(&descriptor),
+        "credentials.json ids do not match agent-app.json"
+    );
+    let output_dir = root.join("target/pocketapps");
+    std::fs::create_dir_all(&output_dir)?;
+    let output = output_dir.join(format!("{app}.pocketapp"));
+    let file = std::fs::File::create(&output)?;
+    let mut archive = tar::Builder::new(file);
+    for (source, name) in [
+        (app_root.join("agent-app.json"), "agent-app.json"),
+        (app_root.join("pocket.json"), "pocket.json"),
+        (app_root.join("dist/app.js"), "app.js"),
+        (app_root.join("dist/app.pak"), "app.pak"),
+    ] {
+        archive.append_path_with_name(source, name)?;
+    }
+    let data_action = app_root.join("dist/data-action.js");
+    if data_action.is_file() {
+        archive.append_path_with_name(data_action, "data-action.js")?;
+    }
+    if let Some(credentials) = credentials {
+        archive.append_path_with_name(credentials, "credentials.json")?;
+    }
+    let plan = serde_json::to_vec_pretty(&json!({
+        "runtime":"pocket-pi-agentos",
+        "pocketjsRevision":POCKETJS_REVISION,
+        "app":app,
+        "modules":manifest.pointer("/engine/capabilities/requires").cloned().unwrap_or_else(|| json!([]))
+    }))?;
+    let mut header = tar::Header::new_gnu();
+    header.set_size(plan.len() as u64);
+    header.set_mode(0o644);
+    header.set_cksum();
+    archive.append_data(&mut header, "plan.json", plan.as_slice())?;
+    archive.finish()?;
+    #[cfg(unix)]
+    std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o600))?;
+    println!("packaged {}", output.display());
+    Ok(())
+}
+
+fn descriptor_credential_ids(descriptor: &Value) -> BTreeSet<String> {
+    ["http", "mcp"]
+        .into_iter()
+        .flat_map(|kind| {
+            descriptor
+                .pointer(&format!("/nativeServices/{kind}"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|policy| policy.pointer("/credential/id").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn app_root(root: &Path, app: &str) -> Result<PathBuf> {
+    anyhow::ensure!(
+        !app.is_empty()
+            && app != "."
+            && app != ".."
+            && app
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_')),
+        "invalid App id {app}"
+    );
+    let path = root.join("apps").join(app);
+    anyhow::ensure!(
+        path.is_dir(),
+        "App source does not exist: {}",
+        path.display()
+    );
+    Ok(path)
 }
 
 fn minify_agentos_bundle(app_root: &Path) -> Result<()> {
@@ -194,26 +278,17 @@ fn install_if_missing(directory: &Path) -> Result<()> {
     Ok(())
 }
 
-fn cargo<const N: usize>(root: &Path, apps: &str, args: [&str; N]) -> Result<()> {
+fn cargo<const N: usize>(root: &Path, args: [&str; N]) -> Result<()> {
     command(
-        Command::new("cargo")
-            .current_dir(root)
-            .env("POCKET_PI_APPS", apps)
-            .args(args),
+        Command::new("cargo").current_dir(root).args(args),
         "running cargo",
     )
 }
 
-fn cargo_with_args<const N: usize>(
-    root: &Path,
-    apps: &str,
-    base: [&str; N],
-    rest: &[String],
-) -> Result<()> {
+fn cargo_with_args<const N: usize>(root: &Path, base: [&str; N], rest: &[String]) -> Result<()> {
     command(
         Command::new("cargo")
             .current_dir(root)
-            .env("POCKET_PI_APPS", apps)
             .args(base)
             .args(rest),
         "running cargo",

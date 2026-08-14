@@ -6,6 +6,10 @@ application on a general-purpose desktop or mobile OS. One device runtime
 combines a persistent Pi Agent, local `/workspace`, native tools, schedules,
 Agent-native Apps, local SQLite state and a PocketJS UI.
 
+> **Development warning:** Pocket Pi is evolving rapidly. Breaking changes land
+> frequently while the runtime, App contract and hardware integration are being
+> built; do not assume compatibility between revisions yet.
+
 Pocket Pi builds on:
 
 - [`pi-agent-core`](https://github.com/badlogic/pi-mono) for the Agent Loop and
@@ -60,24 +64,20 @@ The current firmware target is the
 ### Build the device and development simulator
 
 ```sh
-cargo xtask build agentos-apps
+cargo xtask build pi-agent
 cargo xtask build esp32-p4-sim
 cargo xtask build esp32-p4
 ```
 
-Pi Agent is always included. Select ordinary Apps at build time with one flag;
-omitting it keeps the default Robinhood + Exa image:
+Pi Agent is always included in firmware. Ordinary Apps are standalone packages:
 
 ```sh
-cargo xtask build esp32-p4 --apps robinhood,exa
-cargo xtask build esp32-p4 --apps robinhood
-cargo xtask build esp32-p4 --apps exa
-cargo xtask build esp32-p4 --apps none
+cargo xtask build app exa path/to/exa-credentials.json
 ```
 
-`--apps none` builds the smallest Pocket Pi device image: the resident Pi Agent,
-workspace, native tools, schedules and Root View without ordinary Apps. It is
-not a generic `pi-agent-core` SDK or desktop harness.
+Packages are written to `target/pocketapps/<id>.pocketapp`. The firmware image
+contains the resident Pi Agent, workspace, native tools, schedules and Root View,
+but no ordinary App. Apps without declared credentials omit the final argument.
 
 ### 1. Pocket Pi on ESP32-P4
 
@@ -126,10 +126,13 @@ interactively. Wi-Fi can subsequently be changed from the device Settings UI
 without reflashing. Credentials are kept out of Agent workspace files and
 PocketJS UI state.
 
-The UART bridge automatically reuses an existing authorized Robinhood session
-from Keychain and injects its access token into the board's RAM-only boot
-configuration. `--provision-robinhood` is only the interactive fallback when no
-saved authorization exists.
+To install an ordinary App, open `http://<device-ip>/` from a computer or phone,
+upload its `.pocketapp`, then confirm on the Pocket Pi screen. Every credential
+declared by the App must be present in the package. Installer removes those values
+from the package and stores them in native NVS; they are not exposed through the
+App filesystem or Agent workspace. HTTP is the current upload ingress; activation
+always goes through the same Installer. A future UART ingress may deliver the same
+artifact, but may not write App storage, credentials or runtime state directly.
 
 ### 2. Develop with the ESP32-P4 simulator on macOS
 
@@ -216,10 +219,10 @@ includes:
 - Settings with Wi-Fi scanning, selection and password entry;
 - touch keyboard and next-schedule status.
 
-The embedded AgentOS ships Pi Agent as its resident System App and can include
-Robinhood and Exa as build-selected ordinary Apps. Each ordinary App owns its Tool catalog, Data Action,
-SQLite projection and fixed PocketJS View; hosts provide only scoped
-credentials, transport and hardware adapters.
+The embedded AgentOS ships Pi Agent as its resident System App. Robinhood and
+Exa use the same installable package as every ordinary App. Each ordinary App
+owns its Tool catalog, Data Action, SQLite projection and fixed PocketJS View;
+hosts provide only scoped credentials, transport and hardware adapters.
 
 ## Repository map
 
@@ -228,7 +231,6 @@ crates/pocket-pi-embedded/    bounded Agent Loop bridge used by device runtimes
 crates/pocket-pi-tools/       portable workspace, shell, time and schedule tools
 crates/pocket-pi-protocols/   model request, response and streaming codecs
 crates/pocket-pi-agentos/     App Supervisor, System App lifecycle and App contracts
-crates/pocket-pi-app-pack/    build-selected embedded App composition
 hosts/esp32-p4-sim/           macOS development simulator for ESP32-P4 contracts
 firmware/esp32-p4/            first supported device and reference implementation
 tools/uart_bridge/            Mac Codex and Claude Code streaming adapters
@@ -245,14 +247,16 @@ and [docs/esp32-p4-port.md](docs/esp32-p4-port.md) for board-specific details.
 
 ## Current validation
 
-On **2026-08-12**, the embedded-only workspace completed 30 Rust tests and 3
-App text behavior tests with no failures, passed workspace Clippy with warnings
-denied, and built the ESP32-P4 simulator with none, Exa-only, Robinhood-only and
-combined App catalogs.
+On **2026-08-14**, the workspace completed 34 Rust tests and 3 App text behavior
+tests with no failures, passed workspace Clippy with warnings denied, and built
+the ESP32-P4 release firmware. A simulator LAN smoke uploaded the generated Exa
+package through `POST /install` and received HTTP 202; the core install test
+then proves activation, Tool routing, SQLite ownership and restart recovery for
+a previously absent App.
 
-Physical firmware, boot, Wi-Fi/DHCP, provider calls and unattended memory
-pressure remain separate evidence tiers. A successful simulator build is not a
-substitute for fresh physical-board acceptance.
+Fresh physical flash/boot, phone upload, Wi-Fi/DHCP, provider calls and
+unattended memory pressure remain separate evidence tiers. Simulator and
+cross-build success do not substitute for fresh physical-board acceptance.
 
 ## Development checks
 

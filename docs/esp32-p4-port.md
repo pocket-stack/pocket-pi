@@ -23,6 +23,12 @@ The physical host selects `UartBackend` for a Mac Codex/Claude Code bridge or
 `WirelessBackend` for direct OpenAI/OpenRouter/Anthropic/DeepSeek HTTPS. These remain
 host adapters; they do not belong in the UI or embedded Agent core.
 
+The ESP host also exposes the current HTTP ingress for ordinary App packages.
+That adapter only receives a complete `.pocketapp` and hands it to the shared
+Installer in `pocket-pi-agentos`; it does not write App releases, credentials,
+`current`, or runtime state itself. A future UART ingress must use the same
+Installer boundary.
+
 ```sh
 cargo xtask build esp32-p4
 cargo xtask build esp32-p4-sim

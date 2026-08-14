@@ -1,16 +1,17 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context as _, Result};
 use pocket3d::gpu::{Gpu, OffscreenTarget};
 use pocket_pi_agentos::{
-    AppServiceHost, AppSupervisor, AppToolRequest, HttpRequest, NetFailure, RoutedToolHost,
-    TransportCompletion, ROOT_APP_ID,
+    stage_pocketapp_bytes, system_app_bundle, AppDescriptor, AppServiceHost, AppSupervisor,
+    AppToolRequest, HttpRequest, InstalledAppIndex, NetFailure, RoutedToolHost, StagedApp,
+    TransportCompletion, MAX_POCKETAPP_BYTES, ROOT_APP_ID,
 };
-use pocket_pi_app_pack::catalog;
 use pocket_pi_embedded::{AgentEvent, ToolHost};
 use pocket_pi_tools::{CoreToolHost, PlatformTools};
 use pocket_ui_wgpu::UiRenderer;
@@ -317,6 +318,10 @@ impl AppServiceHost for SimAppServices {
                 .map_err(|error| NetFailure::new("other", error.to_string()))?,
         })
     }
+
+    fn store_credentials(&self, _credentials: &BTreeMap<String, String>) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -339,6 +344,17 @@ struct Product {
     wifi_connected: Option<String>,
     wifi_networks: Vec<(&'static str, i32, bool)>,
     wifi_status: String,
+    install_rx: Receiver<StagedApp>,
+    install_slot: Arc<AtomicBool>,
+    pending_install: Option<StagedApp>,
+    install_ui: Option<InstallUi>,
+    install_requested: bool,
+}
+
+struct InstallUi {
+    state: &'static str,
+    descriptor: AppDescriptor,
+    error: Option<String>,
 }
 
 impl Product {
@@ -354,7 +370,8 @@ impl Product {
             }
         };
         let services: Arc<dyn AppServiceHost> = Arc::new(SimAppServices);
-        let mut supervisor = AppSupervisor::new(workspace.clone(), catalog()?, services)?;
+        let catalog = InstalledAppIndex::load(&workspace, system_app_bundle())?;
+        let mut supervisor = AppSupervisor::new(workspace.clone(), catalog, services)?;
         supervisor.open(app)?;
 
         let native_tools = Arc::new(CoreToolHost::new(workspace.clone(), Arc::new(SimPlatform)));
@@ -364,6 +381,7 @@ impl Product {
         let config = backend.agent_config();
         let model = backend.build();
         supervisor.boot_agent(&config, model, Arc::new(routed))?;
+        let (install_rx, install_slot) = start_install_server(&workspace)?;
 
         Ok(Self {
             messages: vec![Message {
@@ -382,6 +400,11 @@ impl Product {
             wifi_connected: Some("macOS host network".into()),
             wifi_networks: Vec::new(),
             wifi_status: "SIMULATED NETWORK READY".into(),
+            install_rx,
+            install_slot,
+            pending_install: None,
+            install_ui: None,
+            install_requested: false,
         })
     }
 
@@ -425,6 +448,28 @@ impl Product {
                 if let Some(task) = action.get("task").and_then(Value::as_str) {
                     self.pending_ui_task = Some(task.to_owned());
                 }
+            }
+            Some("installApp")
+                if self
+                    .install_ui
+                    .as_ref()
+                    .is_some_and(|ui| ui.state == "review") =>
+            {
+                if let Some(ui) = &mut self.install_ui {
+                    ui.state = "installing";
+                }
+                self.install_requested = true;
+                self.projection_dirty = true;
+            }
+            Some("dismissInstall") => {
+                if let Some(staged) = self.pending_install.take() {
+                    if let Some(path) = staged.release_dir.parent() {
+                        let _ = std::fs::remove_dir_all(path);
+                    }
+                }
+                self.install_ui = None;
+                self.install_slot.store(false, Ordering::Release);
+                self.projection_dirty = true;
             }
             Some("settings") => match action.get("command").and_then(Value::as_str) {
                 Some("scan") => {
@@ -483,19 +528,58 @@ impl Product {
         self.projection_dirty = true;
     }
 
+    fn run_pending_install(&mut self) {
+        if !self.install_requested {
+            return;
+        }
+        self.install_requested = false;
+        let Some(staged) = self.pending_install.take() else {
+            return;
+        };
+        let cleanup = staged.release_dir.parent().map(Path::to_path_buf);
+        let result = self
+            .supervisor
+            .activate_new_app(&staged.release_dir, staged.credentials);
+        if let Some(path) = cleanup {
+            let _ = std::fs::remove_dir_all(path);
+        }
+        if let Some(ui) = &mut self.install_ui {
+            match result {
+                Ok(_) => ui.state = "success",
+                Err(error) => {
+                    ui.state = "failed";
+                    ui.error = Some(format!("{error:#}"));
+                }
+            }
+        }
+        self.projection_dirty = true;
+    }
+
     fn poll(&mut self) -> Result<()> {
+        if self.pending_install.is_none() && !self.busy && !self.supervisor.services_busy() {
+            if let Ok(staged) = self.install_rx.try_recv() {
+                self.install_ui = Some(InstallUi {
+                    state: "review",
+                    descriptor: staged.descriptor.clone(),
+                    error: None,
+                });
+                self.pending_install = Some(staged);
+                self.supervisor.open(ROOT_APP_ID)?;
+                self.projection_dirty = true;
+            }
+        }
         while let Ok(request) = self.app_rx.try_recv() {
             request.handle(&self.supervisor);
             self.projection_dirty = true;
         }
         if self.last_schedule_poll.elapsed() >= Duration::from_secs(1) {
-            if !self.busy {
+            if self.install_ui.is_none() && !self.busy {
                 if let Some(wake) = self.native_tools.claim_due() {
                     self.send_prompt(wake.prompt);
                 }
-            }
-            for (task, result) in self.supervisor.poll_due_tasks() {
-                log::info!("AppTask {task}: {}", result.text);
+                for (task, result) in self.supervisor.poll_due_tasks() {
+                    log::info!("AppTask {task}: {}", result.text);
+                }
             }
             self.last_schedule_poll = Instant::now();
             self.projection_dirty = true;
@@ -541,6 +625,49 @@ impl Product {
             ),
             None => "not scheduled".to_owned(),
         };
+        let install = self.install_ui.as_ref().map(|install| {
+            let network = install
+                .descriptor
+                .native_services
+                .http
+                .iter()
+                .flat_map(|policy| policy.urls.clone())
+                .chain(
+                    install
+                        .descriptor
+                        .native_services
+                        .mcp
+                        .iter()
+                        .map(|policy| policy.url.clone()),
+                )
+                .collect::<Vec<_>>();
+            let credentials = install
+                .descriptor
+                .native_services
+                .http
+                .iter()
+                .filter_map(|policy| policy.credential.as_ref())
+                .chain(
+                    install
+                        .descriptor
+                        .native_services
+                        .mcp
+                        .iter()
+                        .map(|policy| &policy.credential),
+                )
+                .map(|credential| credential.id.clone())
+                .collect::<Vec<_>>();
+            json!({
+                "state":install.state,
+                "name":install.descriptor.title,
+                "version":install.descriptor.version,
+                "tools":install.descriptor.tools.len(),
+                "network":network,
+                "credentials":credentials,
+                "schedules":install.descriptor.schedules.len(),
+                "error":install.error,
+            })
+        });
         json!({
             "agent":self.agent_status,
             "model":self.model_label,
@@ -551,12 +678,13 @@ impl Product {
                 "next":schedule_next,
                 "everyMinutes":schedule.every_minutes,
             },
-            "apps":self.supervisor.catalog().descriptors().filter(|app| app.id != ROOT_APP_ID).map(|app| json!({
+            "apps":self.supervisor.catalog().descriptors().into_iter().filter(|app| app.id != ROOT_APP_ID).map(|app| json!({
                 "id":app.id,
                 "title":app.title,
                 "description":app.description,
                 "scheduleEveryMinutes":app.schedules.first().map(|schedule| schedule.every_minutes),
             })).collect::<Vec<_>>(),
+            "install":install,
             "settings":{
                 "wifi":{
                     "connectedSsid":self.wifi_connected,
@@ -573,6 +701,82 @@ impl Product {
             }
         })
     }
+}
+
+fn start_install_server(workspace: &Path) -> Result<(Receiver<StagedApp>, Arc<AtomicBool>)> {
+    let server = tiny_http::Server::http("0.0.0.0:8080")
+        .map_err(|error| anyhow!("start App install server: {error}"))?;
+    let temp_root = workspace.join(".system/install");
+    if let Err(error) = std::fs::remove_dir_all(&temp_root) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(error).context("clear stale App install staging");
+        }
+    }
+    std::fs::create_dir_all(&temp_root)?;
+    let (tx, rx) = mpsc::sync_channel(1);
+    let slot = Arc::new(AtomicBool::new(false));
+    let worker_slot = slot.clone();
+    std::thread::Builder::new()
+        .name("app-install-http".into())
+        .spawn(move || {
+            for mut request in server.incoming_requests() {
+                if request.method() == &tiny_http::Method::Get {
+                    let page = "<form method=post action=/install enctype=application/octet-stream><h1>Pocket Pi App Install</h1><input type=file id=f><button type=button onclick=send()>Upload</button><script>function send(){fetch('/install',{method:'POST',body:f.files[0]}).then(r=>r.text()).then(alert)}</script></form>";
+                    let _ = request.respond(tiny_http::Response::from_string(page));
+                    continue;
+                }
+                if request.method() != &tiny_http::Method::Post || request.url() != "/install" {
+                    let _ = request.respond(tiny_http::Response::from_string("not found").with_status_code(404));
+                    continue;
+                }
+                if worker_slot
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+                {
+                    let _ = request.respond(tiny_http::Response::from_string("another install is pending").with_status_code(409));
+                    continue;
+                }
+                let job = temp_root.join(format!(
+                    "{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|duration| duration.as_nanos())
+                        .unwrap_or_default()
+                ));
+                let result = (|| -> Result<StagedApp> {
+                    let length = request.body_length().ok_or_else(|| anyhow!("missing Content-Length"))?;
+                    anyhow::ensure!(length <= MAX_POCKETAPP_BYTES, "package exceeds 2 MiB");
+                    std::fs::create_dir_all(&job)?;
+                    let mut bytes = vec![0; length];
+                    request.as_reader().read_exact(&mut bytes)?;
+                    stage_pocketapp_bytes(&bytes, &job.join("release"))
+                })();
+                match result {
+                    Ok(staged) => {
+                        match tx.try_send(staged) {
+                            Ok(()) => {
+                                let _ = request.respond(tiny_http::Response::from_string("uploaded; confirm installation on Pocket Pi").with_status_code(202));
+                            }
+                            Err(mpsc::TrySendError::Full(staged)
+                            | mpsc::TrySendError::Disconnected(staged)) => {
+                                if let Some(path) = staged.release_dir.parent() {
+                                    let _ = std::fs::remove_dir_all(path);
+                                }
+                                worker_slot.store(false, Ordering::Release);
+                                let _ = request.respond(tiny_http::Response::from_string("installer is busy").with_status_code(409));
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let _ = std::fs::remove_dir_all(&job);
+                        worker_slot.store(false, Ordering::Release);
+                        let _ = request.respond(tiny_http::Response::from_string(format!("invalid package: {error:#}")).with_status_code(400));
+                    }
+                }
+            }
+        })?;
+    log::info!("App installer available at http://127.0.0.1:8080");
+    Ok((rx, slot))
 }
 
 fn headless(
@@ -595,6 +799,7 @@ fn headless(
     let mut settled_frames = 0;
     for frame in 0..7_500 {
         product.poll()?;
+        product.run_pending_install();
         // Give PocketJS a few ticks to settle reactive insertions and layout
         // before taking a deterministic screenshot.
         if (!wait_for_turn || !product.busy) && !product.supervisor.services_busy() {
@@ -748,6 +953,7 @@ impl WindowApp {
         state.window.pre_present_notify();
         frame.present();
         state.product.run_pending_ui_task();
+        state.product.run_pending_install();
         state.window.request_redraw();
         Ok(())
     }
@@ -929,12 +1135,142 @@ mod tests {
             .unwrap_or_else(|| panic!("query {app_id}/{database_name}: {sql}"))
     }
 
+    fn test_supervisor(workspace: &Path, services: Arc<dyn AppServiceHost>) -> AppSupervisor {
+        for app_id in ["robinhood", "exa"] {
+            let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("apps")
+                .join(app_id);
+            let release = workspace.join("apps").join(app_id).join("releases/r1");
+            std::fs::create_dir_all(&release).unwrap();
+            for (from, to) in [
+                ("agent-app.json", "agent-app.json"),
+                ("pocket.json", "pocket.json"),
+                ("dist/app.js", "app.js"),
+                ("dist/app.pak", "app.pak"),
+                ("dist/data-action.js", "data-action.js"),
+            ] {
+                std::fs::copy(source.join(from), release.join(to)).unwrap();
+            }
+            let manifest: Value =
+                serde_json::from_slice(&std::fs::read(source.join("pocket.json")).unwrap())
+                    .unwrap();
+            std::fs::write(
+                release.join("plan.json"),
+                serde_json::to_vec(&json!({
+                    "runtime":"pocket-pi-agentos",
+                    "pocketjsRevision":pocket_pi_agentos::POCKETJS_REVISION,
+                    "app":app_id,
+                    "modules":manifest.pointer("/engine/capabilities/requires").unwrap()
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            std::fs::write(workspace.join("apps").join(app_id).join("current"), "r1").unwrap();
+        }
+        let catalog = InstalledAppIndex::load(workspace, system_app_bundle()).unwrap();
+        AppSupervisor::new(workspace, catalog, services).unwrap()
+    }
+
+    fn checked_in_package(app_id: &str, output: &Path) {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("apps")
+            .join(app_id);
+        let manifest: Value =
+            serde_json::from_slice(&std::fs::read(source.join("pocket.json")).unwrap()).unwrap();
+        let file = std::fs::File::create(output).unwrap();
+        let mut archive = tar::Builder::new(file);
+        for (from, to) in [
+            ("agent-app.json", "agent-app.json"),
+            ("pocket.json", "pocket.json"),
+            ("dist/app.js", "app.js"),
+            ("dist/app.pak", "app.pak"),
+            ("dist/data-action.js", "data-action.js"),
+        ] {
+            archive
+                .append_path_with_name(source.join(from), to)
+                .unwrap();
+        }
+        let plan = serde_json::to_vec(&json!({
+            "runtime":"pocket-pi-agentos",
+            "pocketjsRevision":pocket_pi_agentos::POCKETJS_REVISION,
+            "app":app_id,
+            "modules":manifest.pointer("/engine/capabilities/requires").unwrap()
+        }))
+        .unwrap();
+        let mut header = tar::Header::new_gnu();
+        header.set_size(plan.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, "plan.json", plan.as_slice())
+            .unwrap();
+        let credentials = serde_json::to_vec(&json!({"exa.api-key":"test-secret"})).unwrap();
+        let mut header = tar::Header::new_gnu();
+        header.set_size(credentials.len() as u64);
+        header.set_mode(0o600);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, "credentials.json", credentials.as_slice())
+            .unwrap();
+        archive.finish().unwrap();
+    }
+
+    #[test]
+    fn fresh_device_installs_new_app_routes_its_tool_and_restores_after_restart() {
+        init_logs();
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let package = temp.path().join("exa.pocketapp");
+        checked_in_package("exa", &package);
+        let staged =
+            pocket_pi_agentos::stage_pocketapp(&package, &temp.path().join("staged")).unwrap();
+
+        let index = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
+        let mut supervisor =
+            AppSupervisor::new(&workspace, index, Arc::new(SimAppServices)).unwrap();
+        assert!(supervisor.catalog().descriptor("exa").is_none());
+        supervisor
+            .activate_new_app(&staged.release_dir, staged.credentials)
+            .unwrap();
+        assert!(supervisor.catalog().descriptor("exa").is_some());
+        let result = route_tool(
+            &mut supervisor,
+            "research.search",
+            r#"{"query":"freshly installed App"}"#,
+        );
+        assert!(!result.is_error, "{}", result.text);
+        assert_eq!(
+            query_app_database(
+                &workspace,
+                "exa",
+                "exa",
+                "SELECT status,result_count FROM searches ORDER BY id DESC LIMIT 1",
+            ),
+            vec![json!(["ok", 2])]
+        );
+        let active_release = std::fs::read_to_string(workspace.join("apps/exa/current")).unwrap();
+        assert_eq!(active_release, "1.1.0");
+        assert!(!workspace
+            .join("apps/exa/releases/1.1.0/credentials.json")
+            .exists());
+
+        drop(supervisor);
+        let restored = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
+        assert!(restored
+            .descriptor("exa")
+            .unwrap()
+            .tools
+            .iter()
+            .any(|tool| { tool.get("name").and_then(Value::as_str) == Some("research.search") }));
+    }
+
     #[test]
     fn exa_tool_writes_app_owned_sqlite() {
         init_logs();
         let temp = tempfile::tempdir().unwrap();
-        let mut supervisor =
-            AppSupervisor::new(temp.path(), catalog().unwrap(), Arc::new(SimAppServices)).unwrap();
+        let mut supervisor = test_supervisor(temp.path(), Arc::new(SimAppServices));
         let result = route_tool(
             &mut supervisor,
             "research.search",
@@ -955,8 +1291,7 @@ mod tests {
     fn exa_write_removes_rows_older_than_seven_days() {
         init_logs();
         let temp = tempfile::tempdir().unwrap();
-        let mut supervisor =
-            AppSupervisor::new(temp.path(), catalog().unwrap(), Arc::new(SimAppServices)).unwrap();
+        let mut supervisor = test_supervisor(temp.path(), Arc::new(SimAppServices));
         let first = route_tool(
             &mut supervisor,
             "research.search",
@@ -995,9 +1330,7 @@ mod tests {
     fn robinhood_refresh_failure_records_no_view_data() {
         init_logs();
         let temp = tempfile::tempdir().unwrap();
-        let mut supervisor =
-            AppSupervisor::new(temp.path(), catalog().unwrap(), Arc::new(FailingRobinhood))
-                .unwrap();
+        let mut supervisor = test_supervisor(temp.path(), Arc::new(FailingRobinhood));
         supervisor.open("robinhood").unwrap();
 
         let failed = supervisor.invoke_active_task("refreshPortfolio", &Value::Null);
@@ -1026,8 +1359,7 @@ mod tests {
     fn robinhood_refresh_writes_the_fixed_view_projection() {
         init_logs();
         let temp = tempfile::tempdir().unwrap();
-        let mut supervisor =
-            AppSupervisor::new(temp.path(), catalog().unwrap(), Arc::new(SimAppServices)).unwrap();
+        let mut supervisor = test_supervisor(temp.path(), Arc::new(SimAppServices));
         supervisor.open("robinhood").unwrap();
         let refreshed = route_tool(&mut supervisor, "robinhood.refresh_portfolio", "{}");
         assert!(!refreshed.is_error, "{}", refreshed.text);

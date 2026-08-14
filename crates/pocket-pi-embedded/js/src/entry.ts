@@ -54,6 +54,26 @@ const pendingTools = new Map<
 >();
 let agent: Agent | null = null;
 
+function toolsFor(definitions: NonNullable<Config["tools"]>): any[] {
+  return definitions.map((tool) => ({
+    name: tool.name,
+    label: tool.label || tool.name,
+    description: tool.description || "",
+    parameters: tool.parameters || { type: "object", properties: {} },
+    executionMode: "sequential" as const,
+    execute: (id: string, args: unknown) =>
+      new Promise<any>((resolve, reject) => {
+        try {
+          if (!globalThis.host) throw new Error("Pocket Pi Agent host is unavailable");
+          const requestId = globalThis.host.startTool(id, tool.name, JSON.stringify(args || {}));
+          pendingTools.set(requestId, { resolve, reject });
+        } catch (error) {
+          reject(error instanceof Error ? error : new Error(String(error)));
+        }
+      }),
+  }));
+}
+
 const emptyUsage = () => ({
   input: 0,
   output: 0,
@@ -303,23 +323,7 @@ function pushModelError(stream: AssistantMessageEventStream, model: any, message
 function boot(configJson: string): void {
   const config = JSON.parse(configJson) as Config;
   const model = modelFor(config);
-  const tools = (config.tools || []).map((tool) => ({
-    name: tool.name,
-    label: tool.label || tool.name,
-    description: tool.description || "",
-    parameters: tool.parameters || { type: "object", properties: {} },
-    executionMode: "sequential" as const,
-    execute: (id: string, args: unknown) =>
-      new Promise<any>((resolve, reject) => {
-        try {
-          if (!globalThis.host) throw new Error("Pocket Pi Agent host is unavailable");
-          const requestId = globalThis.host.startTool(id, tool.name, JSON.stringify(args || {}));
-          pendingTools.set(requestId, { resolve, reject });
-        } catch (error) {
-          reject(error instanceof Error ? error : new Error(String(error)));
-        }
-      }),
-  }));
+  const tools = toolsFor(config.tools || []);
 
   agent = new Agent({
     initialState: {
@@ -403,4 +407,12 @@ function drain(): string {
   });
 }
 
-globalThis.PocketPiEmbedded = { boot, prompt, tick, drain };
+function replaceTools(definitionsJson: string): void {
+  if (!agent) throw new Error("replaceTools before boot");
+  if (agent.state.isStreaming || pendingModels.size || pendingTools.size) {
+    throw new Error("replaceTools while Agent is busy");
+  }
+  agent.state.tools = toolsFor(JSON.parse(definitionsJson));
+}
+
+globalThis.PocketPiEmbedded = { boot, prompt, tick, drain, replaceTools };

@@ -33,7 +33,9 @@ authenticated MCP `initialize` and `tools/list` exchange with
 `https://agent.robinhood.com/mcp/trading`. It stores the upstream name,
 input schema, and one combined description containing upstream usage guidance
 plus Pocket Pi safety and persistence behavior. Credentials are never written to the catalog, App
-bundle, SQLite, or Agent context. Updating this catalog is an explicit App
+release, SQLite, or Agent context. They may be transported inside the temporary
+`.pocketapp`; Installer strips them and stores them in native NVS before the App
+is activated. Updating this catalog is an explicit App
 maintenance change and must be reviewed together with the native allowlist and
 contract tests.
 
