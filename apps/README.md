@@ -1,20 +1,25 @@
-# Pocket Pi built-in Apps
+# Pocket Pi Apps
 
-Each directory is one independently versioned PocketJS App source. The checked
-in `dist/app.js` and `dist/app.pak` files are target artifacts embedded into the
-firmware as the built-in release, then seeded into `/workspace` on boot. This
-is not yet a signed install, rollback, or recovery-UI mechanism.
+Each directory contains one independently versioned PocketJS App source.
 
-- `pi-agent`: the privileged Root View; its filesystem mount is `/workspace`.
-- `robinhood`: curated MCP tools, `refreshPortfolio` AppTask, SQLite and View.
-- `exa`: Exa search/fetch tools, SQLite search history and View.
+- `pi-agent` is the privileged, resident System App. It owns `/workspace` and is
+  the only App included in firmware.
+- `robinhood` and `exa` are ordinary Apps. They own their Tools, Data Actions,
+  SQLite state and Views, and are never embedded or seeded by firmware.
 
-Build all three from the pinned upstream PocketJS checkout:
+Build the System App when developing its source:
 
 ```sh
-POCKETJS_ROOT=/path/to/pocketjs-main cargo xtask build agentos-apps
+POCKETJS_ROOT=/path/to/pocketjs cargo xtask build pi-agent
 ```
 
-The task refuses a checkout other than revision
-`9c809bbd047ddc75c27caa4990951a78d942477a`, so generated recovery bundles
-cannot silently drift from the runtime modules linked into the firmware.
+Build any ordinary App as a standalone install artifact:
+
+```sh
+POCKETJS_ROOT=/path/to/pocketjs cargo xtask build app <id> [credentials.json]
+```
+
+The result is `target/pocketapps/<id>.pocketapp`. Every ordinary App reaches the
+device through the Installer; HTTP is only the current upload ingress. The build
+refuses a PocketJS checkout other than the revision pinned by Pocket Pi so App
+artifacts cannot drift from the runtime modules linked into firmware.

@@ -218,6 +218,17 @@ impl GuestAgent {
         call_agent(guest, "prompt", (text.to_owned(),))
     }
 
+    pub fn replace_tools(
+        &self,
+        guest: &Guest,
+        definitions: Vec<serde_json::Value>,
+    ) -> Result<(), String> {
+        validate_tool_definitions(&definitions)?;
+        let definitions = serde_json::to_string(&definitions)
+            .map_err(|error| format!("serialize Agent tools: {error}"))?;
+        call_agent(guest, "replaceTools", (definitions,))
+    }
+
     pub fn tick(&self, guest: &Guest) -> Result<Vec<AgentEvent>, String> {
         call_agent::<_, ()>(guest, "tick", ())?;
         guest.drain_jobs();
@@ -305,8 +316,14 @@ fn config_with_tools(
     let object = config
         .as_object_mut()
         .ok_or_else(|| "embedded config must be a JSON object".to_owned())?;
+    validate_tool_definitions(&definitions)?;
+    object.insert("tools".to_owned(), serde_json::Value::Array(definitions));
+    serde_json::to_string(&config).map_err(|error| format!("serialize embedded config: {error}"))
+}
+
+fn validate_tool_definitions(definitions: &[serde_json::Value]) -> Result<(), String> {
     let mut names = std::collections::BTreeSet::new();
-    for definition in &definitions {
+    for definition in definitions {
         let name = definition
             .get("name")
             .and_then(serde_json::Value::as_str)
@@ -315,8 +332,7 @@ fn config_with_tools(
             return Err(format!("duplicate tool definition: {name}"));
         }
     }
-    object.insert("tools".to_owned(), serde_json::Value::Array(definitions));
-    serde_json::to_string(&config).map_err(|error| format!("serialize embedded config: {error}"))
+    Ok(())
 }
 
 #[cfg(test)]
@@ -553,5 +569,82 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    struct RecordingBackend(Arc<Mutex<Vec<serde_json::Value>>>);
+
+    impl ModelBackend for RecordingBackend {
+        fn complete(
+            &self,
+            request_json: &str,
+            _on_event: &mut dyn FnMut(ModelStreamEvent),
+        ) -> Result<String, String> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(serde_json::from_str(request_json).unwrap());
+            Ok(serde_json::json!({
+                "thinking":"",
+                "text":"done",
+                "toolCalls":[],
+                "usage":{},
+                "stopReason":"stop"
+            })
+            .to_string())
+        }
+    }
+
+    #[test]
+    fn replacing_tools_keeps_the_guest_and_conversation() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let guest = Guest::new().unwrap();
+        let agent = GuestAgent::mount_source(
+            &guest,
+            r#"{"model":"offline"}"#,
+            Arc::new(RecordingBackend(requests.clone())),
+            Arc::new(Tools),
+            TEST_AGENT_BUNDLE,
+        )
+        .unwrap();
+
+        for prompt in ["before install", "after install"] {
+            if prompt == "after install" {
+                agent
+                    .replace_tools(
+                        &guest,
+                        vec![serde_json::json!({
+                            "name":"new.tool",
+                            "description":"New App Tool",
+                            "parameters":{"type":"object","properties":{}}
+                        })],
+                    )
+                    .unwrap();
+            }
+            agent.prompt(&guest, prompt).unwrap();
+            let mut done = false;
+            for _ in 0..200 {
+                done |= agent
+                    .tick(&guest)
+                    .unwrap()
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::Done));
+                if done {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            assert!(done);
+        }
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["context"]["tools"][0]["name"], "echo");
+        assert_eq!(requests[1]["context"]["tools"][0]["name"], "new.tool");
+        assert!(requests[1]["context"]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["role"] == "user"
+                && message["content"].to_string().contains("before install")));
     }
 }

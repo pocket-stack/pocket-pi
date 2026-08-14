@@ -273,11 +273,8 @@ impl WifiConnection {
                 let pending = self.pending.take().expect("pending Wi-Fi connect");
                 if pending.persist_on_success {
                     let result = (|| {
-                        let storage = EspDefaultNvs::new(
-                            self.nvs.clone(),
-                            WIFI_NVS_NAMESPACE,
-                            true,
-                        )?;
+                        let storage =
+                            EspDefaultNvs::new(self.nvs.clone(), WIFI_NVS_NAMESPACE, true)?;
                         storage.set_str(WIFI_NVS_SSID_KEY, &pending.ssid)?;
                         storage.set_str(WIFI_NVS_PASSWORD_KEY, &pending.password)?;
                         Ok::<(), anyhow::Error>(())

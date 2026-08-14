@@ -2,7 +2,7 @@ import { batch, createSignal, For, Show } from "solid-js";
 import { Text, View } from "@pocketjs/framework/components";
 import { mount } from "@pocketjs/framework";
 import { readFileSync, readdirSync, type DirEntry } from "@pocketjs/framework/fs";
-import { ActionButton, PocketHeader, ScrollButtons } from "../_shared/ui";
+import { ActionButton, PageIntro, PocketHeader, ScrollButtons, SectionHeading, StatusBar } from "../_shared/ui";
 import { wrapLines, wrapPreview, wrapTextPage, type WrappedTextPage } from "../_shared/text";
 
 const FONT_BODY = 3;
@@ -17,12 +17,23 @@ const FILE_PAGE_LINES = 39;
 type Message = { role: string; text: string };
 type Network = { ssid: string; rssiDbm: number; secured: boolean };
 type InstalledApp = { id: string; title: string; description: string; scheduleEveryMinutes?: number | null };
+type InstallProjection = {
+  state: "review" | "installing" | "success" | "failed";
+  name: string;
+  version: string;
+  tools: number;
+  network: string[];
+  credentials: string[];
+  schedules: number;
+  error?: string;
+};
 type Projection = {
   agent?: string;
   model?: string;
   messages?: Message[];
   schedule?: { name?: string | null; prompt?: string; next?: string; everyMinutes?: number | null };
   apps?: InstalledApp[];
+  install?: InstallProjection | null;
   settings?: {
     wifi?: {
       connectedSsid?: string | null;
@@ -56,6 +67,7 @@ const [projection, setProjection] = createSignal<Projection>({
   model: "CODEX / UART / MAC",
   messages: [{ role: "assistant", text: "BOOTING PI AGENT..." }],
 });
+const [installDetail, setInstallDetail] = createSignal<InstallProjection | null>(null);
 const [screen, setScreen] = createSignal<Screen>("chat");
 const [activeTab, setActiveTab] = createSignal<Tab>("chat");
 const [chatScroll, setChatScroll] = createSignal(0);
@@ -422,10 +434,82 @@ function ReaderScreen() {
   );
 }
 
+function InstallScreen() {
+  const install = () => installDetail()!;
+  const status = () => install().state === "review" ? "REVIEW APP"
+    : install().state === "installing" ? "INSTALLING"
+    : install().state === "success" ? "APP INSTALLED"
+    : "INSTALL FAILED";
+  const statusTitle = () => install().state === "review" ? "Ready to install"
+    : install().state === "installing" ? "Installing App..."
+    : install().state === "success" ? "Installation complete"
+    : "Installation failed";
+  const statusDetail = () => install().state === "review" ? "Confirm this package on the device."
+    : install().state === "installing" ? "Do not operate the device until installation finishes."
+    : install().state === "success" ? "The App is available to you and Pi Agent."
+    : install().error || "The package could not be installed.";
+  const statusSurface = () => install().state === "failed"
+    ? "w-full h-[150] px-6 flex-col justify-center gap-3 rounded-xl bg-red-100"
+    : install().state === "success"
+      ? "w-full h-[150] px-6 flex-col justify-center gap-3 rounded-xl bg-emerald-100"
+      : install().state === "installing"
+        ? "w-full h-[150] px-6 flex-col justify-center gap-3 rounded-xl bg-amber-100"
+        : "w-full h-[150] px-6 flex-col justify-center gap-3 rounded-xl bg-orange-100";
+  const statusText = () => install().state === "failed" ? "text-xl text-red-700 font-bold"
+    : install().state === "success" ? "text-xl text-emerald-700 font-bold"
+    : install().state === "installing" ? "text-xl text-amber-700 font-bold"
+    : "text-xl text-orange-700 font-bold";
+  return (
+    <View class="flex-col w-full h-full bg-slate-50">
+      <PocketHeader
+        title={status()}
+        accent={install().state === "failed" ? "danger" : install().state === "success" ? "ready" : "busy"}
+        metaTop="LOCAL INSTALL"
+        metaBottom="PHYSICAL CONFIRMATION"
+      />
+      <PageIntro
+        eyebrow="APP PACKAGE"
+        title={install().name}
+        description={"VERSION " + install().version + "  ·  " + String(install().tools) + " TOOLS  ·  " + String(install().schedules) + " SCHEDULES"}
+      />
+      <View class="h-[602] px-6 flex-col">
+        <SectionHeading title="REQUESTED ACCESS" detail="PACKAGE MANIFEST" />
+        <View class="h-[526] px-6 py-6 flex-col gap-5 rounded-xl shadow bg-white border-slate-100">
+          <Text class="text-base text-slate-500 font-bold">NETWORK</Text>
+          <Text class="text-lg text-slate-900">{install().network.length ? install().network.slice(0, 2).join("\n") : "NO NETWORK ACCESS"}</Text>
+          <View class="h-[2] bg-slate-100" />
+          <Text class="text-base text-slate-500 font-bold">CREDENTIALS</Text>
+          <Text class="text-lg text-slate-900">{install().credentials.length ? install().credentials.slice(0, 3).join(", ") : "NONE"}</Text>
+          <View class="h-[2] bg-slate-100" />
+          <Text class="text-base text-slate-500 font-bold">CAPABILITIES</Text>
+          <Text class="text-lg text-slate-900">{String(install().tools) + " TOOLS  ·  " + String(install().schedules) + " SCHEDULES"}</Text>
+        </View>
+      </View>
+      <View class="h-[166] px-6 pt-4">
+        <View class={statusSurface()}>
+          <Text class={statusText()}>{statusTitle()}</Text>
+          <Text class="text-base text-slate-600">{statusDetail()}</Text>
+        </View>
+      </View>
+      <View class="h-[168] px-6 pt-6 pb-6">
+        <View class="w-full h-[120]">
+          <ActionButton
+            label={install().state === "review" ? "INSTALL" : install().state === "installing" ? "INSTALLING..." : "DONE"}
+            disabled={install().state === "installing"}
+            tone={install().state === "review" ? "primary" : "neutral"}
+          />
+        </View>
+      </View>
+      <View class="h-[66]"><StatusBar text="Package received over your local network" dark /></View>
+    </View>
+  );
+}
+
 function Root() {
   return (
     <View class="flex-col w-full h-full bg-slate-50">
-      {screen() === "chat" ? <ChatScreen />
+      {projection().install ? <InstallScreen />
+        : screen() === "chat" ? <ChatScreen />
         : screen() === "files" ? <FilesScreen />
         : screen() === "apps" ? <AppsScreen />
         : screen() === "settings" ? <SettingsScreen />
@@ -523,7 +607,11 @@ queueMicrotask(() => refreshFiles("", true));
     return "";
   },
   update(line: string) {
-    setProjection(JSON.parse(line));
+    const next: Projection = JSON.parse(line);
+    batch(() => {
+      if (next.install) setInstallDetail(next.install);
+      setProjection(next);
+    });
     return "";
   },
   pointerDown(x: number, y: number) {
@@ -535,6 +623,13 @@ queueMicrotask(() => refreshFiles("", true));
     return "";
   },
   tap(x: number, y: number) {
+    const install = projection().install;
+    if (install) {
+      if (install.state !== "installing" && y >= 1046 && y < 1214) {
+        return JSON.stringify({ type: install.state === "review" ? "installApp" : "dismissInstall" });
+      }
+      return "";
+    }
     if (screen() === "keyboard") return handleKeyboardTap(x, y);
     if (screen() === "viewer") {
       const current = viewer();

@@ -11,9 +11,10 @@ use embedded_svc::http::{
 use embedded_svc::io::Write as _;
 use esp_idf_svc::http::client::{Configuration, EspHttpConnection};
 use esp_idf_svc::io::EspIOError;
+use esp_idf_svc::nvs::{EspDefaultNvs, EspDefaultNvsPartition};
 use pocket_pi_agentos::{
-    AppCatalog, AppServiceHost, CredentialBinding, HttpRequest, McpServicePolicy, NetFailure,
-    TransportCompletion,
+    AppServiceHost, CredentialBinding, HttpRequest, InstalledAppIndex, McpServicePolicy,
+    NetFailure, TransportCompletion,
 };
 use serde_json::{json, Value};
 
@@ -22,6 +23,8 @@ use super::delay_current_task;
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MAX_MCP_RESPONSE: usize = 160 * 1024;
 const MCP_RETRY_DELAY: Duration = Duration::from_millis(250);
+const APP_NVS_NAMESPACE: &str = "pocket_apps";
+const APP_CREDENTIALS_KEY: &str = "credentials";
 
 pub struct EspAppServices {
     inner: Arc<EspAppServicesInner>,
@@ -29,8 +32,9 @@ pub struct EspAppServices {
 
 struct EspAppServicesInner {
     network_ready: Arc<AtomicBool>,
-    catalog: AppCatalog,
-    credentials: BTreeMap<String, String>,
+    catalog: InstalledAppIndex,
+    credentials: Mutex<BTreeMap<String, String>>,
+    nvs: Option<EspDefaultNvsPartition>,
     mcp: Mutex<BTreeMap<(String, String), McpState>>,
 }
 
@@ -43,15 +47,20 @@ struct McpState {
 impl EspAppServices {
     pub fn new(
         network_ready: Arc<AtomicBool>,
-        catalog: AppCatalog,
-        mut credentials: BTreeMap<String, String>,
+        catalog: InstalledAppIndex,
+        nvs: Option<EspDefaultNvsPartition>,
     ) -> Self {
+        let mut credentials = nvs
+            .as_ref()
+            .and_then(|partition| load_credentials(partition.clone()).ok())
+            .unwrap_or_default();
         let required = catalog.credential_ids();
         credentials.retain(|id, _| required.contains(id));
         let inner = Arc::new(EspAppServicesInner {
             network_ready,
             catalog,
-            credentials,
+            credentials: Mutex::new(credentials),
+            nvs,
             mcp: Mutex::new(BTreeMap::new()),
         });
         Self { inner }
@@ -80,12 +89,11 @@ impl EspAppServicesInner {
                 "App supplied a forbidden HTTP header",
             ));
         }
-        execute_http(
-            request,
-            policy.credential.as_ref(),
-            &self.credentials,
-            deadline,
-        )
+        let credentials = self
+            .credentials
+            .lock()
+            .map_err(|_| NetFailure::new("unavailable", "credential store lock was poisoned"))?;
+        execute_http(request, policy.credential.as_ref(), &credentials, deadline)
     }
 
     fn mcp_call(&self, app_id: &str, args: &Value, deadline: Instant) -> Result<Value, String> {
@@ -96,17 +104,13 @@ impl EspAppServicesInner {
         let policy = self
             .catalog
             .mcp_policy(app_id, connection)
-            .cloned()
             .ok_or_else(|| "App requested an unknown MCP connection".to_owned())?;
         let operation = args
             .get("name")
             .and_then(Value::as_str)
             .ok_or_else(|| "mcp.client callTool requires name".to_owned())?;
         let arguments = args.get("arguments").unwrap_or(&Value::Null);
-        if !self
-            .catalog
-            .provider_operation_allowed(app_id, operation)
-        {
+        if !self.catalog.provider_operation_allowed(app_id, operation) {
             return Err(format!("MCP operation is not allowlisted: {operation}"));
         }
         let credential = self.credential(&policy.credential)?;
@@ -159,7 +163,6 @@ impl EspAppServicesInner {
         let policy = self
             .catalog
             .mcp_policy(app_id, connection)
-            .cloned()
             .ok_or_else(|| "App requested an unknown MCP connection".to_owned())?;
         let calls = args
             .get("calls")
@@ -212,6 +215,8 @@ impl EspAppServicesInner {
 
     fn credential(&self, binding: &CredentialBinding) -> Result<String, String> {
         self.credentials
+            .lock()
+            .map_err(|_| "credential store lock was poisoned".to_owned())?
             .get(&binding.id)
             .map(|secret| format!("{}{}", binding.prefix, secret))
             .ok_or_else(|| format!("credential {} was not provisioned", binding.id))
@@ -387,6 +392,67 @@ impl AppServiceHost for EspAppServices {
         }
         self.inner.http(app_id, request, deadline)
     }
+
+    fn store_credentials(&self, credentials: &BTreeMap<String, String>) -> Result<(), String> {
+        if credentials.is_empty() {
+            return Ok(());
+        }
+        let mut stored = self
+            .inner
+            .credentials
+            .lock()
+            .map_err(|_| "credential store lock was poisoned".to_owned())?;
+        stored.extend(credentials.clone());
+        if let Some(partition) = &self.inner.nvs {
+            persist_credentials(partition.clone(), &stored)?;
+        }
+        Ok(())
+    }
+
+    fn remove_credentials(&self, ids: &[String]) -> Result<(), String> {
+        let mut stored = self
+            .inner
+            .credentials
+            .lock()
+            .map_err(|_| "credential store lock was poisoned".to_owned())?;
+        for id in ids {
+            stored.remove(id);
+        }
+        if let Some(partition) = &self.inner.nvs {
+            persist_credentials(partition.clone(), &stored)?;
+        }
+        Ok(())
+    }
+}
+
+fn load_credentials(partition: EspDefaultNvsPartition) -> Result<BTreeMap<String, String>, String> {
+    let storage = EspDefaultNvs::new(partition, APP_NVS_NAMESPACE, true)
+        .map_err(|error| format!("open App credential NVS: {error}"))?;
+    let Some(length) = storage
+        .blob_len(APP_CREDENTIALS_KEY)
+        .map_err(|error| format!("read App credential length: {error}"))?
+    else {
+        return Ok(BTreeMap::new());
+    };
+    let mut bytes = vec![0; length];
+    let bytes = storage
+        .get_blob(APP_CREDENTIALS_KEY, &mut bytes)
+        .map_err(|error| format!("read App credentials: {error}"))?
+        .unwrap_or_default();
+    serde_json::from_slice(bytes).map_err(|error| format!("parse App credentials: {error}"))
+}
+
+fn persist_credentials(
+    partition: EspDefaultNvsPartition,
+    credentials: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    let storage = EspDefaultNvs::new(partition, APP_NVS_NAMESPACE, true)
+        .map_err(|error| format!("open App credential NVS: {error}"))?;
+    let bytes = serde_json::to_vec(credentials)
+        .map_err(|error| format!("encode App credentials: {error}"))?;
+    storage
+        .set_blob(APP_CREDENTIALS_KEY, &bytes)
+        .map_err(|error| format!("store App credentials: {error}"))
 }
 
 fn connection(timeout: Duration) -> Result<EspHttpConnection, String> {
@@ -651,13 +717,7 @@ fn post_mcp_batch(
     let payload =
         serde_json::to_string(bodies).map_err(|error| format!("encode MCP batch: {error}"))?;
     let mut response = submit_mcp(
-        policy,
-        credential,
-        session,
-        &payload,
-        "batch",
-        retryable,
-        deadline,
+        policy, credential, session, &payload, "batch", retryable, deadline,
     )?;
     let status = response.status();
     let returned_session = response.header("Mcp-Session-Id").map(str::to_owned);

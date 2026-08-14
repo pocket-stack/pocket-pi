@@ -22,10 +22,14 @@ The authoritative detailed design is
 
 ## Ownership
 
-- `crates/pocket-pi-agentos` owns App catalog, runtime lifecycle, foreground
-  selection, schedules, App Tool routing, and App-scoped FS/SQLite mounts.
-- `crates/pocket-pi-app-pack` composes the build-selected App artifacts without
-  moving their product logic into the AgentOS runtime or host adapters.
+- `crates/pocket-pi-agentos` owns the in-memory `InstalledAppIndex`, runtime
+  lifecycle, foreground selection, schedules, App Tool routing, and App-scoped
+  FS/SQLite mounts. There is no separate persistent App Catalog service.
+- `tools/xtask` packages ordinary Apps without moving their product logic into
+  the AgentOS runtime or host adapters.
+- HTTP is the current package ingress. It hands the complete `.pocketapp` to the
+  Installer, which alone validates, stores credentials, creates `current` and
+  activates runtime metadata. A future UART ingress must use the same boundary.
 - `crates/pocket-pi-embedded` provides the bounded JavaScript Agent Loop bridge.
   In AgentOS hosts, the loop is loaded from the Pi Agent System App release into
   the same PocketJS Guest as its Root View.
@@ -50,6 +54,11 @@ Opening Robinhood or Exa changes only the foreground View; it does not restart
 or replace the Agent. Model and native Tool transport complete asynchronously
 and return events to that persistent Guest.
 
+Ordinary View and Data Action Guests load on demand and use separate three-entry
+LRU caches. Only the foreground View ticks or renders. On ESP32-P4, App QuickJS
+heaps and large worker stacks allocate explicitly from PSRAM without changing
+the platform-wide `malloc()` policy.
+
 Ordinary Apps receive capability-scoped data roots. Pi Agent alone owns the
 top-level `/workspace` and cross-App Tool Registry.
 
@@ -58,7 +67,6 @@ top-level `/workspace` and cross-App Tool Registry.
 ```text
 apps/                       PocketJS System/ordinary App sources and bundles
 crates/pocket-pi-agentos/   App Supervisor and AgentOS contracts
-crates/pocket-pi-app-pack/  build-selected embedded App composition
 crates/pocket-pi-embedded/  embedded pi-agent-core bridge and host traits
 crates/pocket-pi-tools/     native workspace/shell/time/schedule Tools
 crates/pocket-pi-protocols/ provider codecs
@@ -71,7 +79,8 @@ tools/uart-model-bridge.py  UART framing and provisioning CLI
 ## Build entry points
 
 ```sh
-cargo xtask build agentos-apps
+cargo xtask build pi-agent
+cargo xtask build app <id> [credentials.json]
 cargo xtask build esp32-p4
 cargo xtask build esp32-p4-sim
 cargo xtask run esp32-p4-sim

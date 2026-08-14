@@ -22,10 +22,6 @@ READY = "PPI-RPC-READY"
 WAITING = "PPI-RPC-WAITING"
 REQUEST = "PPI-RPC-REQUEST:"
 STREAM = "PPI-RPC-STREAM:"
-ROBINHOOD_KEYCHAIN_SERVICE = "Codex MCP Credentials"
-ROBINHOOD_KEYCHAIN_ACCOUNT = "robinhood-trading|5cbe81c78ff5ae58"
-EXA_KEYCHAIN_SERVICE = "Pocket Pi Credentials"
-EXA_KEYCHAIN_ACCOUNT = "exa-api-key"
 DEEPSEEK_KEYCHAIN_SERVICE = "Pocket Pi Credentials"
 DEEPSEEK_KEYCHAIN_ACCOUNT = "deepseek-api-key"
 
@@ -43,40 +39,6 @@ def keychain_secret(service: str, account: str) -> str | None:
         return None
     value = result.stdout.strip()
     return value if result.returncode == 0 and value else None
-
-
-def robinhood_access_token() -> str | None:
-    """Reuse a completed Codex MCP OAuth grant without exposing it to disk."""
-    try:
-        result = subprocess.run(
-            [
-                "security",
-                "find-generic-password",
-                "-s",
-                ROBINHOOD_KEYCHAIN_SERVICE,
-                "-a",
-                ROBINHOOD_KEYCHAIN_ACCOUNT,
-                "-w",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except FileNotFoundError:
-        return None
-    if result.returncode != 0:
-        return None
-    try:
-        credential = json.loads(result.stdout)
-        token = credential.get("token_response", {}).get("access_token")
-        return token if isinstance(token, str) and token else None
-    except (json.JSONDecodeError, AttributeError):
-        return None
-
-
-def exa_api_key() -> str | None:
-    """Load the user-provided Exa key from macOS Keychain."""
-    return keychain_secret(EXA_KEYCHAIN_SERVICE, EXA_KEYCHAIN_ACCOUNT)
 
 
 def deepseek_api_key() -> str | None:
@@ -138,28 +100,6 @@ def config(args: argparse.Namespace) -> dict[str, object]:
             print("DeepSeek: reusing Keychain API key (RAM only on device)", flush=True)
         else:
             value["modelApiKey"] = getpass.getpass(f"{provider} API key: ")
-    app_credentials: dict[str, str] = {}
-    key = exa_api_key()
-    if key:
-        app_credentials["exa.api-key"] = key
-        print("Exa: reusing Keychain API key (RAM only on device)", flush=True)
-    elif args.provision_exa:
-        key = getpass.getpass("Exa API key: ")
-        if key:
-            app_credentials["exa.api-key"] = key
-    token = robinhood_access_token()
-    if token:
-        app_credentials["robinhood.oauth-access-token"] = token
-        print(
-            "Robinhood: reusing existing authorized Codex MCP session (RAM only)",
-            flush=True,
-        )
-    elif args.provision_robinhood:
-        token = getpass.getpass("Robinhood OAuth access token: ")
-        if token:
-            app_credentials["robinhood.oauth-access-token"] = token
-    if app_credentials:
-        value["appCredentials"] = app_credentials
     if args.prompt:
         value["initialPrompt"] = args.prompt
         if args.prompt_delay_seconds:
@@ -187,8 +127,6 @@ def main() -> int:
         help="delay the repeatable boot prompt while device services settle",
     )
     parser.add_argument("--provision-wifi", action="store_true")
-    parser.add_argument("--provision-exa", action="store_true")
-    parser.add_argument("--provision-robinhood", action="store_true")
     args = parser.parse_args()
     provider = args.provider or ("codex" if args.backend == "uart" else "openai")
     if args.backend == "uart" and provider not in ("codex", "claude-code"):

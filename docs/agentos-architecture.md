@@ -12,10 +12,10 @@ AgentOS/App 语义，不定义 standalone Agent harness。
 
 状态：架构基线 + v1 实现记录（以“常驻 Pi Agent System App”为当前实现）。
 
-截至 2026-08-12，当前工作树已经实现可运行的第一版：Pi Agent Root App、App
-Supervisor、App Tool Catalog/Router、`AppTask` Schedule、`data.fs`、
+截至 2026-08-13，当前工作树已经实现可运行的第一版：Pi Agent Root App、App
+Supervisor、`InstalledAppIndex`、App Tool Router、`AppTask` Schedule、`data.fs`、
 `data.sqlite`、后台 Data Action、revision-coalesced projection cache，以及
-Robinhood 和 Exa 两个可选 App，以及 build-time App selection。
+统一的 `.pocketapp` artifact、磁盘 installed-App index 和局域网热安装。
 Simulator contract tests 已通过；常驻 System App refactor 已在 ESP32-P4 实机
 完成冷启动、LittleFS App 加载、Root View、MIPI-DSI/Touch 初始化、Agent Tool
 Registry 启动和一次完整 UART model turn。运行中切换普通 App 的生命周期 contract
@@ -89,22 +89,21 @@ catalog、Agent Tool ownership 或后台任务生命周期。如果其中某个 
 
 ## 3. 第一版明确不做什么
 
-- 不做应用市场和远程分发协议。
+- 不做 Marketplace、云端 Registry、自动更新、卸载或 rollback。
 - ESP32 不修改 App/Root View 源码，不编译 PocketJS Bundle。
 - 不做 Agent 动态创建 Tools 或 workflow interpreter。
-- Tool 变化后可以 reload Agent session，不要求 live hot-plug。
+- 不允许 Agent 调用 Installer；安装必须由设备屏幕上的用户确认。
 - ESP32 不提供通用 POSIX shell、进程、多用户或桌面式多任务。
 - 凭据永远不直接暴露给 App 或模型。
 - 不自动把上游 MCP `tools/list` 的所有 Tool 暴露给模型。
 
-合法 Bundle 怎么进入 `/workspace/apps/` 不属于本架构。第一版可以预装，也
-可以通过 Mac 开发/部署路径复制。这里定义“如何加载和运行”，不定义“如何
-分发”。
-
-当前预装由 `crates/pocket-pi-app-pack` 在 build time 组合。`pi-agent` 始终存在；
-ordinary Apps 只通过一个 `--apps` build 参数选择，例如 `--apps robinhood,exa`、
-`--apps exa` 或 `--apps none`。未选择的 App 不进入 catalog、Tool definitions、
-native policy 或 Root Apps View；已有 App data 不自动删除。
+`pi-agent` 是 Firmware 中唯一的 `SystemAppBundle`。所有 ordinary App，包括
+Robinhood 和 Exa，都由构建机预编译为同一种 `.pocketapp`，并且只能由统一 Installer
+校验、写入和激活；设备端不编译源码，也不存在启动时自动安装或其他 ordinary App
+side door。HTTP 是当前唯一实现的上传 ingress，未来 UART 也只能把完整的同一种
+artifact 交给 Installer，不能直接写 App 目录、credential、`current` 或 Runtime。
+第一版局域网上传允许明文 HTTP 和明文 credential，暂不增加 TLS、签名、配对或证书
+系统。
 
 ## 4. 核心概念
 
@@ -292,9 +291,6 @@ flowchart TB
 
   .pi-agent/
     schedule.json               Pi Agent 自己创建的 AgentWake 状态
-  .system/
-    app-catalog.json            可选的 App Catalog 缓存
-
   data/
     agent.sqlite                Pi Agent 数据
     view/
@@ -319,7 +315,6 @@ flowchart TB
           app.js
           data-action.js            可选；headless 数据入口，不挂载 UI
           app.pak
-          migrations.json
       data/
         robinhood.sqlite
         .system/
@@ -331,12 +326,12 @@ flowchart TB
       ...
 ```
 
-这是目标布局与当前布局的并集。当前 v1 已写入 fixed `builtin-v1` release、`current`、
-App SQLite 和 App-local `schedules.json`；`data/agent.sqlite`、持久
-`app-catalog.json`、`migrations.json` 仍未实现。当前 `agent-app.json.nativeServices`
-保存 build-time trusted、无 secret 的 endpoint/credential-reference policy；当前 `plan.json` 也是
-`seed_builtin_releases()` 生成的最小 runtime/module 记录，不是 PocketJS resolver 的
-完整 target-specific plan。
+Pi Agent 的 release id 仍由 Firmware 管理；ordinary App 的 release id 来自 App
+版本。`InstalledAppIndex` 在启动时只扫描每个 App 的 `current` 一次，之后仅在安装
+成功时插入内存，不存在持久 catalog、目录 watcher 或逐帧扫描。当前
+`agent-app.json.nativeServices` 保存 endpoint/credential-reference policy；
+credential 可以随上传包交付，但 Installer 只将其写入 Native NVS，绝不写入 active
+release、App DB、`/workspace` projection、日志或 Agent context。
 
 Pi Agent 的挂载：
 
@@ -352,9 +347,10 @@ data.fs      root = /workspace/apps/<app-id>/data
 data.sqlite  root = /workspace/apps/<app-id>/data
 ```
 
-`current` 是保存 active release id 的小文件，不依赖 symlink。它只能在新
-release 完成校验后通过 `data.fs` atomic replace 切换。运行中的 Runtime 绝
-不能 eval 一个只写了一半的 Bundle。
+`current` 是保存 active release id 的小文件，不依赖 symlink。ordinary App 的
+`data.fs` 只挂载其 `data/`，无权写 lifecycle pointer；受信任的 Native Installer
+在新 release 完成校验后用临时文件加 rename 原子创建 `current`。运行中的 Runtime
+绝不能 eval 一个只写了一半的 Bundle。
 
 ## 8. App contract
 
@@ -413,8 +409,15 @@ catalog。
 - viewport contract；
 - artifact hashes。
 
-当前 build-selected embedded catalog 已能只解析 descriptor 建立 Agent Tool Catalog，但 ordinary
-View 仍会在 Supervisor 启动时全部 preload；动态发现和按需 residency 尚未实现。
+启动时只加载常驻 Pi Agent；ordinary View 在第一次打开时加载。最近使用的 ordinary
+View 和 Data Runtime 各自最多保留 3 个，超出时淘汰最久未使用者。安装成功的新
+View 进入 View cache，但前台仍停留在 Pi Agent 的安装界面。只有用户之后主动打开
+该 App 时才切换前台。只有前台 View 执行 `tick()`；Data Action 只更新 SQLite 和
+revision，重新打开时合并为一次 bounded projection refresh。
+
+安装校验会短暂构造 candidate View 和 candidate Data Runtime，以证明 bundle 能够
+加载；成功后保留 View Runtime，丢弃 candidate Data Runtime。真正执行第一次 Tool、
+Schedule 或 UI action 时，串行 Data worker 才按需创建 operational Data Runtime。
 
 ### App 内部依赖方向
 
@@ -439,38 +442,37 @@ UI refresh ─────┘                                             │
 
 当前 v1 的 App Supervisor 是受信任 Host 代码，实际负责：
 
-- 接收 build-time App pack，并解析所选 App 的 `agent-app.json`；
-- 把固定 `builtin-v1` artifacts 原子写入各 App release 目录和 `current`；
+- 从 `current` 构建 `InstalledAppIndex`；
+- 在用户确认后校验 candidate View/Data Action/Schedule，再原子创建 `current`；
 - 根据 `dataVersion` 只重建变化 App 的开发期 SQLite；
-- 启动一次 Pi Agent System App，并 preload 所选 ordinary View Runtime；
+- 启动一次 Pi Agent System App，并按需加载普通 App Runtime；
 - 挂载正确的 data root 和 Modules；
 - 切换前台 App；
 - 路由 App Tool/AppTask，并用一个 bounded Data Action queue 串行执行；
 - 注册、持久化并推进 App Schedules；
 - 共享每个 App 的 SQLite owner 和 revision counter。
 
-扫描任意安装 release、完整 plan/hash/signature 校验、动态创建/销毁 Runtime、迁移、
-上一版本回退和 recovery UI 尚未实现，统一列在 22.2/22.3，不能从本节职责反推为
-当前能力。
+更新、卸载、迁移、签名、上一版本回退和 recovery UI 不属于当前实现。
 
 ### 常驻 System App 与前台 View
 
 Supervisor 持有两种不同的引用：
 
 ```text
-system:     PiAgentSystemRuntime                // 启动一次，始终存在
-runtimes:   Map<AppId, OrdinaryAppRuntime>      // build-selected catalog 在启动时全部 preload
-active_app: Option<AppId>                       // None 表示显示 Root View
+system:       PiAgentSystemRuntime                // 启动一次，始终存在
+views:        Vec<(AppId, OrdinaryViewRuntime)>   // LRU-first，容量 3
+data:         Vec<(AppId, DataActionRuntime)>     // LRU-first，容量 3，单 worker
+active_app:   Option<AppId>                       // None 表示显示 Root View
 ```
 
-每个 host tick 都推进常驻 `system`；普通 App 的 `tick()` 只允许执行常量时间的
-View bookkeeping，不能 poll network、写 SQLite 或重建 projection。只有被选中的
-Runtime 执行 surface render；普通 App 不接管或复制 Agent Loop。由此保证：
+每个 host tick 都推进常驻 Agent Loop；只有被选中的 View Runtime 执行 `tick()` 和
+surface render。cache 中的后台普通 View 不进入 `tick()`；未命中的 View 才 cold
+load。普通 App 不接管或复制 Agent Loop。由此保证：
 
 1. Agent turn 跨 App navigation 保持同一 identity/context；
 2. 后台 model completion 和 Tool completion 继续进入 System App；
 3. Root projection 即使暂时不可见也可更新，返回时直接显示当前状态；
-4. foreground App 出错或被卸载不会连带终止 Agent。
+4. ordinary App Runtime 加载或执行失败不会连带终止 Agent。
 
 ### 前台与 headless 执行
 
@@ -479,19 +481,18 @@ Runtime 执行 surface render；普通 App 不接管或复制 Agent Loop。由�
 `data-action.js`，在独立 headless Guest 中顺序执行。schema DDL 只在
 `PRAGMA user_version` 不匹配时执行；正常启动不重复执行 `CREATE TABLE IF NOT EXISTS`。
 
-如果 App 不在前台，已 preload 的 View Guest 不运行 projection reload。Data
-Action 仍可更新该 App SQLite 并递增 revision；下次选择这个 View 时，前台 frame
-只读取一次当前 bounded projection。preload 解决的是 bundle/QuickJS cold load，
-不把后台 App 变成 SQLite polling loop。
+如果 App 不在前台，cache 中的 View Guest 不运行 projection reload。Data Action
+仍可更新该 App SQLite 并递增 revision；下次选择这个 View 时，cache hit 直接复用，
+cache miss 才重新加载 bundle，随后前台 frame 只读取一次当前 bounded projection。
 
 同一个 App 可以同时有一个 cached View Guest 和一个 headless Data Action Guest，
 但只能有一个 Data Action 在执行，且两者共享同一个 SQLite owner。这不是两份 App
 实例，而是同一个 App runtime 的 data plane 与 view plane。
 
-当前 v1 进一步让所有 App 共用一个全局串行 Data Action worker。这是有意的资源与
-执行语义取舍，不作为当前缺陷：它换取 bounded concurrency、单一 SQLite/QuickJS
-资源峰值和简单 completion ordering。只有实测出现不可接受的跨 App 阻塞后，才需要
-把 worker 拆成 per-App lease 或受限 worker pool。
+当前 v1 让所有 App 共用一个全局串行 Data Action worker，并在该 worker 内保留最多
+3 个 Data Runtime。这是资源与执行语义取舍：它换取 bounded concurrency、固定
+QuickJS 资源上限和简单 completion ordering。只有实测出现不可接受的跨 App 阻塞后，
+才需要重新讨论并发执行。
 
 ## 10. Scheduler
 
@@ -568,8 +569,8 @@ Workspace 动态自定义 Tools 不属于 v1。
 2. Supervisor 从 active `agent-app.json` 读取 namespaced App Tool schemas。
 3. Tool Catalog 检查重名和 capability availability。
 4. 合并后的 definitions 注册进 Pi Agent session。
-5. v1 中启用、停用或更改 App Tools 后 reload Agent session；不要求 live
-   hot-plug。
+5. 新 App 在 Agent idle 边界安装后，整体替换同一 Guest 中的 Tool snapshot；当前
+   turn、conversation 和 Pi Agent Runtime 都不重启。
 
 ### 11.2 调用
 
@@ -916,8 +917,10 @@ Guest 中运行，但 Root View 暂不产生前台 DrawList。用户仍可操作
 | Wi-Fi scan/connect/forget、restart | `device.settings` + Root View |
 | simulator/physical contract parity | shared runtime/module contracts |
 
-新增而不是现有的能力包括：App Supervisor、App Catalog、App Tools、AppTask
-Schedules、revision-coalesced projection cache 和 Bundle-based Views。
+新增而不是现有的能力包括：App Supervisor、App Tools、AppTask Schedules、
+revision-coalesced projection cache 和 Bundle-based Views。`InstalledAppIndex` 只是
+Supervisor、Router 和 Native policy 共用的一份内存索引，不是独立 App Catalog
+服务，也没有自己的持久化格式、线程或 watcher。
 
 ## 19. 设备 Target、开发 Simulator 与跨硬件
 
@@ -1012,7 +1015,7 @@ isolation 和 lifecycle。App Bundle 拥有名称、schema、provider mapping、
 ### 22.1 已实现
 
 1. PocketJS 固定在 upstream `origin/main` revision
-   `9c809bbd047ddc75c27caa4990951a78d942477a`；Simulator 和 ESP32-P4 共用
+   `e12cf12f82cc60b636368119d49a06eb9ed2a3d5`；Simulator 和 ESP32-P4 共用
    正式合并的 `pocket-fs`、`pocket-db`、`pocket-mod`、`pocket-net` 和
    `pocket-ui-surface` contracts。Exa Data Action 已使用正式 `fetch()` API；
    `pocket-net` 的 `start/cancel/drain` 由独立 native worker 实现，completion 只在
@@ -1020,11 +1023,11 @@ isolation 和 lifecycle。App Bundle 拥有名称、schema、provider mapping、
 2. Pi Agent 位于顶层 `/workspace`；Root View release 位于
    `/workspace/data/view`，其中 `app.js` 和 `agent.js` 是同一个 System App
    release；普通 App 位于 `/workspace/apps/<id>`。
-3. App Supervisor 会 seed/校验 build-selected embedded release，并在启动时创建一次常驻的
-   Pi Agent System App；当前所选 catalog 中的普通 App View Runtime 也全部在启动
-   阶段 preload。普通 View Guest 被限制在自己的 `data/` 和 `tmp/`，切换它们不会
-   替换 System App；前台导航只选择已经存在的 surface。这里没有 Marketplace、
-   LRU、pinning 或 residency policy。
+3. App Supervisor 只 seed Pi Agent `SystemAppBundle`；ordinary App 从磁盘 `current`
+   恢复，也可以从局域网上传的 `.pocketapp` 动态激活。普通 View Guest 被限制在
+   自己的 `data/` 和 `tmp/`，切换它们不会替换 System App。普通 View/Data Runtime
+   各使用容量为 3 的简单 LRU；这里没有 Marketplace、pinning 或额外 residency
+   service。
 4. Tool Catalog/Router 合并 Native Tools 与 namespaced App Tools；Agent Loop
    和 Root View 已挂载在同一个 PocketJS Guest。模型请求由一个常驻 worker 顺序
    执行；ESP32 wireless backend 在该 worker 内复用同一个 HTTPS client，连接出错
@@ -1060,11 +1063,10 @@ isolation 和 lifecycle。App Bundle 拥有名称、schema、provider mapping、
    单独记录在 `docs/pocket-pi-design-system.md`；它只包含 PocketJS 上的基础
    typography/recipes/components，不包含 App-specific View 或 native UI logic。
 12. ESP32-P4 使用 4 KiB PSRAM launcher，待 ESP-IDF entry task 退出后创建 64
-    KiB internal AgentOS runtime stack；App bundle 构建后会 minify 以降低固件
-    footprint，但不会把 minify 当作 stack isolation。App Data pthread 使用 128
-    KiB PSRAM stack，并把 PSRAM allocation caps 继承给按需创建的 96 KiB NET
-    worker；常驻 model worker 使用 64 KiB PSRAM stack。System App 的其他线程仍
-    使用恢复后的 platform default。
+    KiB internal AgentOS runtime stack；所有 App QuickJS Guest 使用显式 PSRAM
+    allocator，不修改全局 `malloc()` policy。App Data pthread 使用 128 KiB PSRAM
+    stack，并把 PSRAM allocation caps 继承给按需创建的 96 KiB NET worker；热安装
+    candidate Data 校验也使用相同配置。常驻 model worker 使用 64 KiB PSRAM stack。
 13. AgentOS 核心 contract tests 已证明：Agent turn 进行中打开 Robinhood，仍能收到完整回复
     和 `agent_end`；普通 App 在前台时 Agent 仍能路由另一 App 的 Tool、写 SQLite
     并完成 turn。revision contract
@@ -1103,11 +1105,9 @@ isolation 和 lifecycle。App Bundle 拥有名称、schema、provider mapping、
     wall-clock 校准影响的 pthread timed condition wait；它每 tick 检查一次 result
     channel 和 monotonic deadline。
 20. 当前自动化只保留 Tool catalog、安全边界、App state ownership、Data Action
-    transaction、resident Agent lifecycle、Tool routing 和 revision coalescing 等核心
-    contract；不保留 UI 坐标、按压视觉状态或重复 smoke tests。对应实现已通过
-    ESP32-P4 release cross-build，并曾刷入实体板。稳态冷启动测得 Root、Exa、
-    Robinhood View preload 分别约 2.0、2.8、3.3 秒，约 20.5 秒进入完整 UI；没有
-    watchdog 或蓝屏。`dataVersion` reset 只发生一次，正常启动不重复 DDL。
+    transaction、resident Agent lifecycle、Tool routing、revision coalescing 和 3-entry
+    LRU 等核心 contract；不保留 UI 坐标、按压视觉状态或重复 smoke tests。
+    `dataVersion` reset 只发生一次，正常启动不重复 DDL。
 21. 实机断网 Tool 验证已证明：Agent 调用 `research.search` 后，Data Action 在
     native connection-ready gate 处 fail-fast，写一条 terminal error search，随后
     删除不安全的 30 秒 ESP-Hosted 自动 reconnect 后，连续观察 120 秒没有 assertion
@@ -1119,11 +1119,9 @@ isolation 和 lifecycle。App Bundle 拥有名称、schema、provider mapping、
 23. 正式 `pocket-net` 路径曾在 schema v4 镜像的实体 ESP32-P4 上完成 Exa provider
     success、SQLite 持久化、重启恢复和 30 秒稳定性观察。schema v5 只收窄 App-owned
     projection，不改变已验证的 `/search`、`/contents` transport contract。
-24. UART bridge 现在默认复用 Keychain 中已有的 Robinhood OAuth session，并只把
-    access token 注入板子的 RAM-only boot config；`--provision-robinhood` 只在没有
-    saved authorization 时交互补录。未传该 flag 的实机 `get_accounts` 已完成 MCP
-    initialize 与 provider HTTP 200，收到 7222-byte body，不再出现
-    `OAuth token not provided`。
+24. App credential 只由 Installer 从 package 读取并写入 Native NVS；UART 不提供
+    credential 注入 side door。既有 Robinhood provider E2E 只作为 transport 历史
+    证据，不代表新的 package credential 路径已完成实体板验收。
 25. Agent 发起 App Tool 时，`RoutedToolHost` 与 Data Action 共用从 Router 创建的
     80 秒绝对 deadline；worker 直接把真实结果返回等待方，不再经过 Supervisor frame
     转发，也不把 queued receipt 当作模型结果。PocketJS HTTP 和 native
@@ -1144,12 +1142,9 @@ isolation 和 lifecycle。App Bundle 拥有名称、schema、provider mapping、
   transaction、上一版本回退和独立 recovery UI 还没有完成。
 - 当前唯一完整支持的硬件 target 是 physical ESP32-P4；配套 simulator 只证明共享
   product contract，不能计作第二个硬件实现，最终验收仍以实体设备为准。
-- build-selected catalog 的普通 App View 现在全部在 Supervisor 启动时 preload；真实
-  ESP32-P4 启动时长已量测，但持续切换仍需人工验收。后续如果 catalog
-  扩大，再依据实测在 PocketJS runtime 层设计加载策略，不能先引入 Marketplace、
-  LRU/residency policy，也不能把 App UI/数据逻辑写回 Rust。
-- Robinhood OAuth grant 与 Exa key 都由 Mac Keychain 复用，并只在本次 UART
-  boot config 中以内存态注入；credential 不进入 App DB、workspace 或 View。
+- Robinhood OAuth grant 与 Exa key 可以通过 package 中的 `credentials.json` 安装；
+  Native Installer 写入 NVS 后丢弃明文 package/staging，credential 不进入 active
+  release、App DB、workspace projection 或 View。
   当前 normalized schema 已分别取得 Exa search 和 Robinhood get_accounts 的实机
   provider success。
   `agent.robinhood.com` 从当前 AP 建连仍有波动，失败轮次会写 error batch，但不会
@@ -1163,29 +1158,18 @@ isolation 和 lifecycle。App Bundle 拥有名称、schema、provider mapping、
   `dataChanged` 和 account/span 的 bounded cache miss，但所有 projection cache 的
   `loadedRevision` 仍需继续显式化，随后再用板上 query 计数确认交互路径为零重读。
 
-### 22.3 日后扩展项目：Marketplace / Distribution
+### 22.3 App 热安装边界
 
-当前 v1 使用 build-selected App pack，release id 仍为 `builtin-v1`，启动时把所选 artifact 播种到 `/workspace` 并
-preload 全部普通 View。Marketplace 是独立的后续项目，不属于当前 runtime 完成度。
-启动该项目时按下面的依赖顺序扩展：
+当前 v1 的安装只有一个固定业务流程：Installer 接收一个完整、预编译的
+`.pocketapp`，屏幕显示 App、Tools、network policy 和 schedules，用户确认后进入
+Installing 锁定状态；candidate 校验通过后创建 `current`，并在同一个 Pi Agent Guest
+中更新 Tool snapshot。Robinhood、Exa 和任何新 ordinary App 都只能通过 Installer
+进入设备。HTTP 是当前唯一实现的 ingress；未来网络或 UART ingress 只负责输送同一
+artifact，不得成为第二条安装路径。
 
-1. 定义完整 release manifest：真实 PocketJS `plan.json`、artifact hashes、签名、
-   publisher identity、capability requirements 和兼容版本。
-2. 实现 staging install、完整校验、atomic activation、上一版本 rollback 和最小
-   recovery UI；损坏或未授权 Bundle 不能成为 `current`。
-3. 为 `dataVersion` 增加 App-owned migration transaction、失败恢复和 downgrade
-   policy，替代开发期直接删除单个 SQLite 文件的策略。
-4. 增加用户可见的 capability approval，特别是 credential-backed provider、network、
-   schedule、device 和 workspace scope；凭据本身仍不得进入 App Bundle。
-5. 在安装/启停后重建 Tool Catalog，并先采用 Agent session reload；只有真实需求出现
-   后再实现 live Tool hot-plug。
-6. catalog 规模扩大并取得板上内存/启动时长证据后，再设计 lazy load、pinning、LRU
-   或 residency policy，不提前把这些策略写进 v1。
-7. 最后补 distribution index、版本 channel、更新策略，以及 Simulator/ESP32
-   同一 package 的兼容性验证。
-
-仍明确延后：ESP32 source editing、Agent-authored Tools、通用 live Tool hot-plug，以及
-不经编译的 declarative View schema。
+明确延后：Marketplace、Registry、签名、TLS/配对、update/rollback/uninstall、migration、
+credential rotation UI、ESP32 source editing、Agent-authored Tools 和不经编译的
+declarative View schema。
 
 ## 23. 验收标准
 

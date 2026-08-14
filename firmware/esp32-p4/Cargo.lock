@@ -1124,7 +1124,7 @@ checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 [[package]]
 name = "pocket-db"
 version = "0.1.0"
-source = "git+https://github.com/pocket-stack/pocketjs.git?rev=9c809bbd047ddc75c27caa4990951a78d942477a#9c809bbd047ddc75c27caa4990951a78d942477a"
+source = "git+https://github.com/pocket-stack/pocketjs.git?rev=e12cf12f82cc60b636368119d49a06eb9ed2a3d5#e12cf12f82cc60b636368119d49a06eb9ed2a3d5"
 dependencies = [
  "anyhow",
  "base64",
@@ -1137,7 +1137,7 @@ dependencies = [
 [[package]]
 name = "pocket-fs"
 version = "0.1.0"
-source = "git+https://github.com/pocket-stack/pocketjs.git?rev=9c809bbd047ddc75c27caa4990951a78d942477a#9c809bbd047ddc75c27caa4990951a78d942477a"
+source = "git+https://github.com/pocket-stack/pocketjs.git?rev=e12cf12f82cc60b636368119d49a06eb9ed2a3d5#e12cf12f82cc60b636368119d49a06eb9ed2a3d5"
 dependencies = [
  "anyhow",
  "base64",
@@ -1149,7 +1149,7 @@ dependencies = [
 [[package]]
 name = "pocket-mod"
 version = "0.1.0"
-source = "git+https://github.com/pocket-stack/pocketjs.git?rev=9c809bbd047ddc75c27caa4990951a78d942477a#9c809bbd047ddc75c27caa4990951a78d942477a"
+source = "git+https://github.com/pocket-stack/pocketjs.git?rev=e12cf12f82cc60b636368119d49a06eb9ed2a3d5#e12cf12f82cc60b636368119d49a06eb9ed2a3d5"
 dependencies = [
  "anyhow",
  "log",
@@ -1160,7 +1160,7 @@ dependencies = [
 [[package]]
 name = "pocket-net"
 version = "0.1.0"
-source = "git+https://github.com/pocket-stack/pocketjs.git?rev=9c809bbd047ddc75c27caa4990951a78d942477a#9c809bbd047ddc75c27caa4990951a78d942477a"
+source = "git+https://github.com/pocket-stack/pocketjs.git?rev=e12cf12f82cc60b636368119d49a06eb9ed2a3d5#e12cf12f82cc60b636368119d49a06eb9ed2a3d5"
 dependencies = [
  "anyhow",
  "pocket-mod",
@@ -1187,14 +1187,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pocket-pi-app-pack"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "pocket-pi-agentos",
-]
-
-[[package]]
 name = "pocket-pi-embedded"
 version = "0.1.0"
 dependencies = [
@@ -1214,7 +1206,6 @@ dependencies = [
  "esp-idf-svc",
  "log",
  "pocket-pi-agentos",
- "pocket-pi-app-pack",
  "pocket-pi-embedded",
  "pocket-pi-protocols",
  "pocket-pi-tools",
@@ -1244,7 +1235,7 @@ dependencies = [
 [[package]]
 name = "pocket-ui-surface"
 version = "0.1.0"
-source = "git+https://github.com/pocket-stack/pocketjs.git?rev=9c809bbd047ddc75c27caa4990951a78d942477a#9c809bbd047ddc75c27caa4990951a78d942477a"
+source = "git+https://github.com/pocket-stack/pocketjs.git?rev=e12cf12f82cc60b636368119d49a06eb9ed2a3d5#e12cf12f82cc60b636368119d49a06eb9ed2a3d5"
 dependencies = [
  "anyhow",
  "log",
@@ -1255,7 +1246,7 @@ dependencies = [
 [[package]]
 name = "pocketjs-core"
 version = "0.1.0"
-source = "git+https://github.com/pocket-stack/pocketjs.git?rev=9c809bbd047ddc75c27caa4990951a78d942477a#9c809bbd047ddc75c27caa4990951a78d942477a"
+source = "git+https://github.com/pocket-stack/pocketjs.git?rev=e12cf12f82cc60b636368119d49a06eb9ed2a3d5#e12cf12f82cc60b636368119d49a06eb9ed2a3d5"
 dependencies = [
  "taffy",
 ]
@@ -1263,7 +1254,7 @@ dependencies = [
 [[package]]
 name = "pocketjs-esp32p4-ppa"
 version = "0.1.0"
-source = "git+https://github.com/pocket-stack/pocketjs.git?rev=9c809bbd047ddc75c27caa4990951a78d942477a#9c809bbd047ddc75c27caa4990951a78d942477a"
+source = "git+https://github.com/pocket-stack/pocketjs.git?rev=e12cf12f82cc60b636368119d49a06eb9ed2a3d5#e12cf12f82cc60b636368119d49a06eb9ed2a3d5"
 dependencies = [
  "pocketjs-core",
 ]

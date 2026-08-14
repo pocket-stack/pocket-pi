@@ -1,12 +1,13 @@
-//! Pocket Pi's App runtime: one isolated PocketJS Guest per active App,
-//! app-owned FS/SQLite state, namespaced Agent tools and native AppTask wakes.
+//! Pocket Pi's App runtime: bounded PocketJS Guest caches, app-owned FS/SQLite
+//! state, namespaced Agent tools and native AppTask wakes.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context as _, Result};
@@ -23,7 +24,84 @@ use serde_json::{json, Value};
 
 pub const ROOT_APP_ID: &str = "pi-agent";
 const BUILTIN_RELEASE: &str = "builtin-v1";
+pub const POCKETJS_REVISION: &str = "e12cf12f82cc60b636368119d49a06eb9ed2a3d5";
 const VIEWPORT: (f32, f32) = (720.0, 1280.0);
+pub const MAX_POCKETAPP_BYTES: usize = 2 * 1024 * 1024;
+const VIEW_RUNTIME_LIMIT: usize = 3;
+const DATA_RUNTIME_LIMIT: usize = 3;
+
+fn take_runtime<T>(runtimes: &mut Vec<(String, T)>, app_id: &str) -> Option<T> {
+    runtimes
+        .iter()
+        .position(|(cached_id, _)| cached_id == app_id)
+        .map(|index| runtimes.remove(index).1)
+}
+
+fn make_runtime_room<T>(
+    runtimes: &mut Vec<(String, T)>,
+    limit: usize,
+    protected_app: Option<&str>,
+) {
+    if runtimes.len() < limit {
+        return;
+    }
+    let index = protected_app
+        .and_then(|protected| runtimes.iter().position(|(app_id, _)| app_id != protected))
+        .unwrap_or(0);
+    runtimes.remove(index);
+}
+
+#[cfg(target_os = "espidf")]
+struct PsramAllocator;
+
+#[cfg(target_os = "espidf")]
+unsafe impl pocket_mod::qjs::allocator::Allocator for PsramAllocator {
+    fn alloc(&mut self, size: usize) -> *mut u8 {
+        unsafe { heap_caps_malloc(size, PSRAM_CAPS).cast() }
+    }
+
+    fn calloc(&mut self, count: usize, size: usize) -> *mut u8 {
+        unsafe { heap_caps_calloc(count, size, PSRAM_CAPS).cast() }
+    }
+
+    unsafe fn dealloc(&mut self, ptr: *mut u8) {
+        heap_caps_free(ptr.cast());
+    }
+
+    unsafe fn realloc(&mut self, ptr: *mut u8, new_size: usize) -> *mut u8 {
+        heap_caps_realloc(ptr.cast(), new_size, PSRAM_CAPS).cast()
+    }
+
+    unsafe fn usable_size(ptr: *mut u8) -> usize {
+        heap_caps_get_allocated_size(ptr.cast())
+    }
+}
+
+#[cfg(target_os = "espidf")]
+const PSRAM_CAPS: u32 = 4 | 1024;
+
+#[cfg(target_os = "espidf")]
+unsafe extern "C" {
+    fn heap_caps_malloc(size: usize, caps: u32) -> *mut core::ffi::c_void;
+    fn heap_caps_calloc(count: usize, size: usize, caps: u32) -> *mut core::ffi::c_void;
+    fn heap_caps_realloc(
+        ptr: *mut core::ffi::c_void,
+        size: usize,
+        caps: u32,
+    ) -> *mut core::ffi::c_void;
+    fn heap_caps_free(ptr: *mut core::ffi::c_void);
+    fn heap_caps_get_allocated_size(ptr: *mut core::ffi::c_void) -> usize;
+}
+
+#[cfg(target_os = "espidf")]
+fn new_app_guest() -> Result<Guest> {
+    Guest::new_with_alloc(PsramAllocator)
+}
+
+#[cfg(not(target_os = "espidf"))]
+fn new_app_guest() -> Result<Guest> {
+    Guest::new()
+}
 
 // One end-to-end budget starts when the Agent routes an App Tool. Queueing,
 // Data Action execution and native transport all consume this same deadline.
@@ -103,171 +181,360 @@ pub struct McpServicePolicy {
     pub credential: CredentialBinding,
 }
 
+pub struct StagedApp {
+    pub descriptor: AppDescriptor,
+    pub release_dir: PathBuf,
+    pub credentials: BTreeMap<String, String>,
+}
+
+pub fn stage_pocketapp(package: &Path, staging_dir: &Path) -> Result<StagedApp> {
+    anyhow::ensure!(
+        std::fs::metadata(package)
+            .context("inspect .pocketapp package")?
+            .len()
+            <= MAX_POCKETAPP_BYTES as u64,
+        "package exceeds 2 MiB"
+    );
+    let bytes = std::fs::read(package).context("read .pocketapp package")?;
+    stage_pocketapp_bytes(&bytes, staging_dir)
+}
+
+pub fn stage_pocketapp_bytes(bytes: &[u8], staging_dir: &Path) -> Result<StagedApp> {
+    anyhow::ensure!(bytes.len() <= MAX_POCKETAPP_BYTES, "package exceeds 2 MiB");
+    anyhow::ensure!(
+        !staging_dir.exists(),
+        "App staging directory already exists"
+    );
+    std::fs::create_dir_all(staging_dir)?;
+    let result = (|| -> Result<StagedApp> {
+        let allowed = BTreeSet::from([
+            "agent-app.json",
+            "pocket.json",
+            "plan.json",
+            "app.js",
+            "app.pak",
+            "data-action.js",
+            "credentials.json",
+        ]);
+        let required = BTreeSet::from([
+            "agent-app.json",
+            "pocket.json",
+            "plan.json",
+            "app.js",
+            "app.pak",
+        ])
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+        let mut seen = BTreeSet::new();
+        let mut credentials: BTreeMap<String, String> = BTreeMap::new();
+        let mut total = 0usize;
+        let mut offset = 0usize;
+        let mut finished = false;
+        while offset + 512 <= bytes.len() {
+            let header = &bytes[offset..offset + 512];
+            if header.iter().all(|byte| *byte == 0) {
+                anyhow::ensure!(
+                    bytes[offset..].iter().all(|byte| *byte == 0),
+                    "App package contains data after its end marker"
+                );
+                finished = true;
+                break;
+            }
+            anyhow::ensure!(
+                header[156] == 0 || header[156] == b'0',
+                "App package contains a non-file"
+            );
+            anyhow::ensure!(
+                tar_octal(&header[148..156])?
+                    == header
+                        .iter()
+                        .enumerate()
+                        .map(|(index, byte)| {
+                            if (148..156).contains(&index) {
+                                u64::from(b' ')
+                            } else {
+                                u64::from(*byte)
+                            }
+                        })
+                        .sum::<u64>(),
+                "App package header checksum is invalid"
+            );
+            let name_end = header[..100]
+                .iter()
+                .position(|byte| *byte == 0)
+                .unwrap_or(100);
+            let name = std::str::from_utf8(&header[..name_end])
+                .ok()
+                .filter(|name| !name.is_empty() && !name.contains('/') && !name.contains('\\'))
+                .ok_or_else(|| anyhow!("App package contains an invalid path"))?
+                .to_owned();
+            anyhow::ensure!(
+                allowed.contains(name.as_str()),
+                "unexpected App package file: {name}"
+            );
+            anyhow::ensure!(
+                seen.insert(name.clone()),
+                "duplicate App package file: {name}"
+            );
+            let size = usize::try_from(tar_octal(&header[124..136])?)
+                .context("App package file is too large")?;
+            total = total.saturating_add(size);
+            anyhow::ensure!(total <= MAX_POCKETAPP_BYTES, "App package exceeds 2 MiB");
+            let data_start = offset + 512;
+            let data_end = data_start
+                .checked_add(size)
+                .filter(|end| *end <= bytes.len())
+                .ok_or_else(|| anyhow!("App package file is truncated"))?;
+            let contents = &bytes[data_start..data_end];
+            if name == "credentials.json" {
+                credentials = serde_json::from_slice(contents).context("parse credentials.json")?;
+                anyhow::ensure!(
+                    credentials.len() <= 16
+                        && credentials.iter().all(|(id, value)| !id.is_empty()
+                            && !value.is_empty()
+                            && value.len() <= 4096),
+                    "credentials.json contains invalid credentials"
+                );
+            } else {
+                let mut file = std::fs::File::create(staging_dir.join(&name))?;
+                file.write_all(contents)?;
+                file.sync_all()?;
+            }
+            let padded = size
+                .checked_add(511)
+                .map(|value| value / 512 * 512)
+                .ok_or_else(|| anyhow!("App package file is too large"))?;
+            offset = data_start
+                .checked_add(padded)
+                .ok_or_else(|| anyhow!("App package is too large"))?;
+        }
+        anyhow::ensure!(finished, "App package is missing its end marker");
+        anyhow::ensure!(
+            required.is_subset(&seen),
+            "App package is missing required files"
+        );
+        let descriptor_id: String =
+            serde_json::from_slice::<Value>(&std::fs::read(staging_dir.join("agent-app.json"))?)?
+                ["id"]
+                .as_str()
+                .ok_or_else(|| anyhow!("agent-app.json is missing id"))?
+                .to_owned();
+        let app = load_release(staging_dir, &descriptor_id, false)?;
+        validate_package_credentials(&app.descriptor, &credentials)?;
+        Ok(StagedApp {
+            descriptor: app.descriptor,
+            release_dir: staging_dir.to_owned(),
+            credentials,
+        })
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(staging_dir);
+    }
+    result
+}
+
+fn tar_octal(field: &[u8]) -> Result<u64> {
+    let text =
+        std::str::from_utf8(field)?.trim_matches(|character| character == '\0' || character == ' ');
+    anyhow::ensure!(
+        !text.is_empty(),
+        "App package contains invalid tar metadata"
+    );
+    u64::from_str_radix(text, 8).context("App package contains invalid tar metadata")
+}
+
 #[derive(Clone, Copy)]
-pub struct EmbeddedApp {
+pub struct SystemAppBundle {
     pub descriptor_json: &'static str,
     pub pocket_json: &'static str,
     pub js: &'static str,
-    pub data_js: Option<&'static str>,
-    pub agent_js: Option<&'static str>,
+    pub agent_js: &'static str,
     pub pak: &'static [u8],
 }
 
-impl EmbeddedApp {
+impl SystemAppBundle {
     pub const fn new(
         descriptor_json: &'static str,
         pocket_json: &'static str,
         js: &'static str,
-        data_js: Option<&'static str>,
-        agent_js: Option<&'static str>,
+        agent_js: &'static str,
         pak: &'static [u8],
     ) -> Self {
         Self {
             descriptor_json,
             pocket_json,
             js,
-            data_js,
             agent_js,
             pak,
         }
     }
 }
 
-#[derive(Clone)]
-struct CatalogApp {
-    descriptor: AppDescriptor,
-    bundle: EmbeddedApp,
+pub const fn system_app_bundle() -> SystemAppBundle {
+    SystemAppBundle::new(
+        include_str!("../../../apps/pi-agent/agent-app.json"),
+        include_str!("../../../apps/pi-agent/pocket.json"),
+        include_str!("../../../apps/pi-agent/dist/app.js"),
+        include_str!("../../../apps/pi-agent/dist/agent.js"),
+        include_bytes!("../../../apps/pi-agent/dist/app.pak"),
+    )
 }
 
-#[derive(Clone)]
-pub struct AppCatalog {
-    apps: BTreeMap<String, CatalogApp>,
+#[derive(Clone, Debug)]
+struct InstalledApp {
+    descriptor: AppDescriptor,
+    manifest: Value,
+    release_dir: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+pub struct InstalledAppIndex {
+    inner: Arc<RwLock<InstalledApps>>,
+}
+
+#[derive(Debug)]
+struct InstalledApps {
+    apps: BTreeMap<String, InstalledApp>,
     tool_owner: BTreeMap<String, String>,
 }
 
-impl AppCatalog {
-    pub fn new(bundles: impl IntoIterator<Item = EmbeddedApp>) -> Result<Self> {
+impl InstalledAppIndex {
+    pub fn load(workspace: &Path, system: SystemAppBundle) -> Result<Self> {
+        seed_system_release(workspace, system)?;
+        let system_release = workspace.join("data/view/releases").join(BUILTIN_RELEASE);
         let mut apps = BTreeMap::new();
-        for bundle in bundles {
-            let mut descriptor: AppDescriptor = serde_json::from_str(bundle.descriptor_json)
-                .context("parse embedded agent-app.json")?;
-            let pocket: Value =
-                serde_json::from_str(bundle.pocket_json).context("parse embedded pocket.json")?;
-            descriptor.title = pocket
-                .get("title")
-                .and_then(Value::as_str)
-                .filter(|title| !title.is_empty())
-                .ok_or_else(|| anyhow!("App {} pocket.json is missing title", descriptor.id))?
-                .to_owned();
-            anyhow::ensure!(
-                pocket.get("version").and_then(Value::as_str) == Some(descriptor.version.as_str()),
-                "App {} version differs between agent-app.json and pocket.json",
-                descriptor.id
-            );
-            if descriptor.tool_namespace.is_empty() {
-                descriptor.tool_namespace.clone_from(&descriptor.id);
+        let root = load_release(&system_release, ROOT_APP_ID, true)?;
+        apps.insert(ROOT_APP_ID.to_owned(), root);
+
+        let apps_root = workspace.join("apps");
+        if let Ok(entries) = std::fs::read_dir(&apps_root) {
+            for entry in entries {
+                let entry = entry?;
+                if !entry.file_type()?.is_dir() {
+                    continue;
+                }
+                let app_id = entry
+                    .file_name()
+                    .to_str()
+                    .ok_or_else(|| anyhow!("installed App id is not UTF-8"))?
+                    .to_owned();
+                let current_path = entry.path().join("current");
+                let release = match std::fs::read_to_string(&current_path) {
+                    Ok(value) => value.trim().to_owned(),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => {
+                        return Err(error)
+                            .with_context(|| format!("read {}", current_path.display()))
+                    }
+                };
+                ensure_safe_component(&release, "release id")?;
+                let installed = load_release(
+                    &entry.path().join("releases").join(&release),
+                    &app_id,
+                    false,
+                )?;
+                anyhow::ensure!(
+                    apps.insert(app_id.clone(), installed).is_none(),
+                    "duplicate installed App id: {app_id}"
+                );
             }
-            if apps.contains_key(&descriptor.id) {
-                anyhow::bail!("duplicate embedded App id: {}", descriptor.id);
-            }
-            apps.insert(descriptor.id.clone(), CatalogApp { descriptor, bundle });
         }
-        anyhow::ensure!(
-            apps.contains_key(ROOT_APP_ID),
-            "missing {ROOT_APP_ID} System App"
-        );
-        anyhow::ensure!(
-            apps[ROOT_APP_ID].bundle.agent_js.is_some(),
-            "{ROOT_APP_ID} System App is missing agent.js"
-        );
-        anyhow::ensure!(
-            apps.values()
-                .filter(|app| app.bundle.agent_js.is_some())
-                .count()
-                == 1,
-            "only {ROOT_APP_ID} may contain agent.js"
-        );
+
         let mut tool_owner = BTreeMap::new();
         for app in apps.values() {
-            let provider_operations = app
-                .descriptor
-                .provider_operations
-                .iter()
-                .collect::<BTreeSet<_>>();
-            anyhow::ensure!(
-                provider_operations.len() == app.descriptor.provider_operations.len(),
-                "App {} declares duplicate provider operations",
-                app.descriptor.id
-            );
-            anyhow::ensure!(
-                provider_operations
-                    .iter()
-                    .all(|operation| !operation.is_empty()),
-                "App {} declares an empty provider operation",
-                app.descriptor.id
-            );
-            for tool in &app.descriptor.tools {
-                let name = tool
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| anyhow!("{} tool is missing name", app.descriptor.id))?;
-                if !name.starts_with(&format!("{}.", app.descriptor.tool_namespace)) {
-                    anyhow::bail!("App {} owns non-namespaced tool {name}", app.descriptor.id);
-                }
-                if tool_owner
-                    .insert(name.to_owned(), app.descriptor.id.clone())
-                    .is_some()
-                {
-                    anyhow::bail!("duplicate App tool: {name}");
-                }
-            }
+            validate_app_tools(app, &tool_owner)?;
+            add_app_tools(app, &mut tool_owner);
         }
-        Ok(Self { apps, tool_owner })
+        Ok(Self {
+            inner: Arc::new(RwLock::new(InstalledApps { apps, tool_owner })),
+        })
     }
 
     fn tool_definitions(&self) -> Vec<Value> {
-        self.apps
+        self.inner
+            .read()
+            .expect("installed App index lock")
+            .apps
             .values()
             .flat_map(|app| app.descriptor.tools.clone())
             .collect()
     }
 
-    fn app_for_tool(&self, name: &str) -> Option<&str> {
-        self.tool_owner.get(name).map(String::as_str)
+    fn app_for_tool(&self, name: &str) -> Option<String> {
+        self.inner
+            .read()
+            .expect("installed App index lock")
+            .tool_owner
+            .get(name)
+            .cloned()
     }
 
-    pub fn descriptors(&self) -> impl Iterator<Item = &AppDescriptor> {
-        self.apps.values().map(|app| &app.descriptor)
+    pub fn descriptors(&self) -> Vec<AppDescriptor> {
+        self.inner
+            .read()
+            .expect("installed App index lock")
+            .apps
+            .values()
+            .map(|app| app.descriptor.clone())
+            .collect()
     }
 
-    pub fn descriptor(&self, id: &str) -> Option<&AppDescriptor> {
-        self.apps.get(id).map(|app| &app.descriptor)
+    pub fn descriptor(&self, id: &str) -> Option<AppDescriptor> {
+        self.inner
+            .read()
+            .expect("installed App index lock")
+            .apps
+            .get(id)
+            .map(|app| app.descriptor.clone())
     }
 
     pub fn provider_operation_allowed(&self, app_id: &str, operation: &str) -> bool {
-        self.descriptor(app_id)
-            .is_some_and(|app| app.provider_operations.iter().any(|item| item == operation))
+        self.inner
+            .read()
+            .expect("installed App index lock")
+            .apps
+            .get(app_id)
+            .is_some_and(|app| {
+                app.descriptor
+                    .provider_operations
+                    .iter()
+                    .any(|item| item == operation)
+            })
     }
 
-    pub fn http_policy(&self, app_id: &str, method: &str, url: &str) -> Option<&HttpServicePolicy> {
-        self.descriptor(app_id)?
+    pub fn http_policy(&self, app_id: &str, method: &str, url: &str) -> Option<HttpServicePolicy> {
+        self.inner
+            .read()
+            .expect("installed App index lock")
+            .apps
+            .get(app_id)?
+            .descriptor
             .native_services
             .http
             .iter()
             .find(|policy| policy.method == method && policy.urls.iter().any(|item| item == url))
+            .cloned()
     }
 
-    pub fn mcp_policy(&self, app_id: &str, connection: &str) -> Option<&McpServicePolicy> {
-        self.descriptor(app_id)?
+    pub fn mcp_policy(&self, app_id: &str, connection: &str) -> Option<McpServicePolicy> {
+        self.inner
+            .read()
+            .expect("installed App index lock")
+            .apps
+            .get(app_id)?
+            .descriptor
             .native_services
             .mcp
             .iter()
             .find(|policy| policy.connection == connection)
+            .cloned()
     }
 
     pub fn credential_ids(&self) -> BTreeSet<String> {
-        self.descriptors()
-            .flat_map(|descriptor| {
+        let mut ids = BTreeSet::new();
+        for descriptor in self.descriptors() {
+            ids.extend(
                 descriptor
                     .native_services
                     .http
@@ -280,14 +547,237 @@ impl AppCatalog {
                             .iter()
                             .map(|policy| &policy.credential),
                     )
-            })
-            .map(|credential| credential.id.clone())
+                    .map(|credential| credential.id.clone()),
+            );
+        }
+        ids
+    }
+
+    fn app(&self, id: &str) -> Option<InstalledApp> {
+        self.inner
+            .read()
+            .expect("installed App index lock")
+            .apps
+            .get(id)
+            .cloned()
+    }
+
+    fn apps(&self) -> Vec<InstalledApp> {
+        self.inner
+            .read()
+            .expect("installed App index lock")
+            .apps
+            .values()
+            .cloned()
             .collect()
     }
 
-    fn app(&self, id: &str) -> Option<&CatalogApp> {
-        self.apps.get(id)
+    fn validate_insert(&self, app: &InstalledApp) -> Result<()> {
+        let index = self.inner.read().expect("installed App index lock");
+        anyhow::ensure!(
+            !index.apps.contains_key(&app.descriptor.id),
+            "App {} is already installed",
+            app.descriptor.id
+        );
+        validate_app_tools(app, &index.tool_owner)?;
+        let installed_credentials = index
+            .apps
+            .values()
+            .flat_map(|installed| descriptor_credential_ids(&installed.descriptor))
+            .collect::<BTreeSet<_>>();
+        anyhow::ensure!(
+            descriptor_credential_ids(&app.descriptor).is_disjoint(&installed_credentials),
+            "App {} reuses an installed credential id",
+            app.descriptor.id
+        );
+        Ok(())
     }
+
+    fn insert_validated(&self, app: InstalledApp) {
+        let mut index = self.inner.write().expect("installed App index lock");
+        add_app_tools(&app, &mut index.tool_owner);
+        index.apps.insert(app.descriptor.id.clone(), app);
+    }
+}
+
+fn validate_app_tools(app: &InstalledApp, owners: &BTreeMap<String, String>) -> Result<()> {
+    for tool in &app.descriptor.tools {
+        let name = tool
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("{} tool is missing name", app.descriptor.id))?;
+        anyhow::ensure!(
+            name.starts_with(&format!("{}.", app.descriptor.tool_namespace)),
+            "App {} owns non-namespaced tool {name}",
+            app.descriptor.id
+        );
+        anyhow::ensure!(!owners.contains_key(name), "duplicate App tool: {name}");
+    }
+    Ok(())
+}
+
+fn add_app_tools(app: &InstalledApp, owners: &mut BTreeMap<String, String>) {
+    for tool in &app.descriptor.tools {
+        let name = tool["name"]
+            .as_str()
+            .expect("validated App tool name")
+            .to_owned();
+        owners.insert(name, app.descriptor.id.clone());
+    }
+}
+
+fn descriptor_credential_ids(descriptor: &AppDescriptor) -> BTreeSet<String> {
+    descriptor
+        .native_services
+        .http
+        .iter()
+        .filter_map(|policy| policy.credential.as_ref())
+        .chain(
+            descriptor
+                .native_services
+                .mcp
+                .iter()
+                .map(|policy| &policy.credential),
+        )
+        .map(|credential| credential.id.clone())
+        .collect()
+}
+
+fn validate_package_credentials(
+    descriptor: &AppDescriptor,
+    credentials: &BTreeMap<String, String>,
+) -> Result<()> {
+    anyhow::ensure!(
+        credentials.keys().cloned().collect::<BTreeSet<_>>()
+            == descriptor_credential_ids(descriptor),
+        "credentials.json ids do not match agent-app.json"
+    );
+    Ok(())
+}
+
+fn load_release(release_dir: &Path, expected_id: &str, system: bool) -> Result<InstalledApp> {
+    for required in [
+        "agent-app.json",
+        "pocket.json",
+        "plan.json",
+        "app.js",
+        "app.pak",
+    ] {
+        anyhow::ensure!(
+            release_dir.join(required).is_file(),
+            "App {expected_id} release is missing {required}"
+        );
+    }
+    anyhow::ensure!(
+        release_dir.join("agent.js").is_file() == system,
+        if system {
+            "System App is missing agent.js"
+        } else {
+            "ordinary App may not contain agent.js"
+        }
+    );
+
+    let mut descriptor: AppDescriptor = serde_json::from_slice(
+        &std::fs::read(release_dir.join("agent-app.json"))
+            .context("read installed agent-app.json")?,
+    )
+    .context("parse installed agent-app.json")?;
+    anyhow::ensure!(descriptor.id == expected_id, "installed App id mismatch");
+    ensure_safe_component(&descriptor.id, "App id")?;
+    let manifest: Value = serde_json::from_slice(
+        &std::fs::read(release_dir.join("pocket.json")).context("read installed pocket.json")?,
+    )
+    .context("parse installed pocket.json")?;
+    anyhow::ensure!(
+        manifest.get("pocket").and_then(Value::as_u64) == Some(2),
+        "App requires pocket.json v2"
+    );
+    anyhow::ensure!(
+        manifest.get("name").and_then(Value::as_str) == Some(descriptor.id.as_str()),
+        "pocket.json name does not match App id"
+    );
+    descriptor.title = manifest
+        .get("title")
+        .and_then(Value::as_str)
+        .filter(|title| !title.is_empty())
+        .ok_or_else(|| anyhow!("App {} pocket.json is missing title", descriptor.id))?
+        .to_owned();
+    anyhow::ensure!(
+        manifest.get("version").and_then(Value::as_str) == Some(descriptor.version.as_str()),
+        "App {} version differs between agent-app.json and pocket.json",
+        descriptor.id
+    );
+    if descriptor.tool_namespace.is_empty() {
+        descriptor.tool_namespace.clone_from(&descriptor.id);
+    }
+    let provider_operations = descriptor
+        .provider_operations
+        .iter()
+        .collect::<BTreeSet<_>>();
+    anyhow::ensure!(
+        provider_operations.len() == descriptor.provider_operations.len()
+            && provider_operations
+                .iter()
+                .all(|operation| !operation.is_empty()),
+        "App {} declares invalid provider operations",
+        descriptor.id
+    );
+    for schedule in &descriptor.schedules {
+        anyhow::ensure!(
+            descriptor.tasks.iter().any(|task| task == &schedule.task),
+            "{}.{} schedule references missing task {}",
+            descriptor.id,
+            schedule.id,
+            schedule.task
+        );
+    }
+    anyhow::ensure!(
+        (descriptor.tools.is_empty() && descriptor.tasks.is_empty())
+            || release_dir.join("data-action.js").is_file(),
+        "App {} tools and tasks require data-action.js",
+        descriptor.id
+    );
+    for capability in manifest
+        .pointer("/engine/capabilities/requires")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        anyhow::ensure!(
+            matches!(capability, "data.fs" | "data.sqlite" | "net.http"),
+            "unsupported App capability: {capability}"
+        );
+    }
+    let plan: Value = serde_json::from_slice(
+        &std::fs::read(release_dir.join("plan.json")).context("read installed plan.json")?,
+    )
+    .context("parse installed plan.json")?;
+    anyhow::ensure!(
+        plan.get("runtime").and_then(Value::as_str) == Some("pocket-pi-agentos")
+            && plan.get("pocketjsRevision").and_then(Value::as_str) == Some(POCKETJS_REVISION)
+            && plan.get("app").and_then(Value::as_str) == Some(descriptor.id.as_str()),
+        "App {} plan.json does not target this runtime",
+        descriptor.id
+    );
+    Ok(InstalledApp {
+        descriptor,
+        manifest,
+        release_dir: release_dir.to_owned(),
+    })
+}
+
+fn ensure_safe_component(value: &str, label: &str) -> Result<()> {
+    anyhow::ensure!(
+        !value.is_empty()
+            && value != "."
+            && value != ".."
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_')),
+        "invalid {label}: {value}"
+    );
+    Ok(())
 }
 
 /// The native transport/security boundary used by App bundles. Implementations
@@ -322,6 +812,21 @@ pub trait AppServiceHost: Send + Sync {
     /// True while a native App worker owns network/TLS activity.
     fn busy(&self) -> bool {
         false
+    }
+
+    fn store_credentials(
+        &self,
+        credentials: &BTreeMap<String, String>,
+    ) -> std::result::Result<(), String> {
+        if credentials.is_empty() {
+            Ok(())
+        } else {
+            Err("App credential storage is unavailable".into())
+        }
+    }
+
+    fn remove_credentials(&self, _ids: &[String]) -> std::result::Result<(), String> {
+        Ok(())
     }
 }
 
@@ -464,7 +969,7 @@ struct DataActionRuntime {
 
 impl DataActionRuntime {
     fn load(config: &DataAppConfig, services: Arc<dyn AppServiceHost>) -> Result<Self> {
-        let guest = Guest::new()?;
+        let guest = new_app_guest().context("create App Data Action Guest")?;
         mount_shared_db(&guest, config.database.clone())?;
         let action_deadline = Rc::new(Cell::new(None));
         mount_data_lifecycle(&guest, config.revision.clone(), action_deadline.clone())?;
@@ -591,6 +1096,7 @@ fn parse_data_result(line: &str) -> Result<ToolResult> {
 
 struct AppDataRunner {
     tx: mpsc::SyncSender<DataActionRequest>,
+    configs: Arc<Mutex<BTreeMap<String, DataAppConfig>>>,
     next_run_id: AtomicU32,
     busy: Arc<AtomicBool>,
 }
@@ -598,39 +1104,46 @@ struct AppDataRunner {
 impl AppDataRunner {
     fn start(configs: Vec<DataAppConfig>, services: Arc<dyn AppServiceHost>) -> Result<Self> {
         let (tx, rx) = mpsc::sync_channel::<DataActionRequest>(DATA_ACTION_QUEUE);
+        let configs = Arc::new(Mutex::new(
+            configs
+                .into_iter()
+                .map(|config| (config.app_id.clone(), config))
+                .collect::<BTreeMap<_, _>>(),
+        ));
+        let worker_configs = configs.clone();
         let busy = Arc::new(AtomicBool::new(false));
         let worker_busy = busy.clone();
         std::thread::Builder::new()
             .name("app-data".to_owned())
             .stack_size(DATA_ACTION_STACK_BYTES)
             .spawn(move || {
-                let configs = configs
-                    .into_iter()
-                    .map(|config| (config.app_id.clone(), config))
-                    .collect::<BTreeMap<_, _>>();
-                let mut runtimes = BTreeMap::<String, DataActionRuntime>::new();
+                let mut runtimes = Vec::<(String, DataActionRuntime)>::new();
                 while let Ok(request) = rx.recv() {
                     worker_busy.store(true, Ordering::Release);
                     let result = (|| -> Result<ToolResult> {
-                        if !runtimes.contains_key(&request.app_id) {
-                            let config = configs
-                                .get(&request.app_id)
-                                .ok_or_else(|| anyhow!("{} has no Data Action", request.app_id))?;
-                            runtimes.insert(
-                                request.app_id.clone(),
-                                DataActionRuntime::load(config, services.clone())?,
-                            );
+                        let runtime = match take_runtime(&mut runtimes, &request.app_id) {
+                            Some(runtime) => runtime,
+                            None => {
+                                make_runtime_room(&mut runtimes, DATA_RUNTIME_LIMIT, None);
+                                let config = worker_configs
+                                    .lock()
+                                    .map_err(|_| {
+                                        anyhow!("App Data Action config lock was poisoned")
+                                    })?
+                                    .get(&request.app_id)
+                                    .cloned()
+                                    .ok_or_else(|| {
+                                        anyhow!("{} has no Data Action", request.app_id)
+                                    })?;
+                                DataActionRuntime::load(&config, services.clone())?
+                            }
+                        };
+                        let result = runtime.invoke(&request);
+                        if result.is_ok() || Instant::now() < request.deadline {
+                            runtimes.push((request.app_id.clone(), runtime));
                         }
-                        runtimes
-                            .get(&request.app_id)
-                            .expect("Data Action runtime inserted")
-                            .invoke(&request)
+                        result
                     })();
-                    if result.is_err() && Instant::now() >= request.deadline {
-                        // Drop the timed-out Guest and its pending promises.
-                        // The next request gets a clean runtime and NET worker.
-                        runtimes.remove(&request.app_id);
-                    }
                     let result = match result {
                         Ok(result) if result.is_error => {
                             log::warn!(
@@ -662,6 +1175,7 @@ impl AppDataRunner {
             .context("start App Data Action runner")?;
         Ok(Self {
             tx,
+            configs,
             next_run_id: AtomicU32::new(1),
             busy,
         })
@@ -694,6 +1208,26 @@ impl AppDataRunner {
     fn busy(&self) -> bool {
         self.busy.load(Ordering::Acquire)
     }
+
+    fn register(&self, config: DataAppConfig) -> Result<()> {
+        let mut configs = self
+            .configs
+            .lock()
+            .map_err(|_| anyhow!("App Data Action config lock was poisoned"))?;
+        anyhow::ensure!(
+            !configs.contains_key(&config.app_id),
+            "App {} Data Action is already registered",
+            config.app_id
+        );
+        configs.insert(config.app_id.clone(), config);
+        Ok(())
+    }
+
+    fn unregister(&self, app_id: &str) {
+        if let Ok(mut configs) = self.configs.lock() {
+            configs.remove(app_id);
+        }
+    }
 }
 
 struct AppRuntime {
@@ -705,58 +1239,22 @@ struct AppRuntime {
     last_seen_revision: Cell<u32>,
     #[cfg(test)]
     projection_refreshes: Cell<u32>,
+    #[cfg(test)]
+    ticks: Cell<u32>,
 }
 
 impl AppRuntime {
     fn load(
-        app: &CatalogApp,
-        release_dir: &Path,
+        app: &InstalledApp,
         fs_root: &Path,
         tmp_root: &Path,
         db: SharedDb,
         revision: AppRevision,
     ) -> Result<Self> {
-        let descriptor: AppDescriptor = serde_json::from_slice(
-            &std::fs::read(release_dir.join("agent-app.json")).context("read agent-app.json")?,
-        )
-        .context("parse installed agent-app.json")?;
-        anyhow::ensure!(
-            descriptor.id == app.descriptor.id,
-            "installed App id mismatch"
-        );
-        anyhow::ensure!(
-            descriptor.version == app.descriptor.version,
-            "installed App version mismatch"
-        );
-        let manifest: Value = serde_json::from_slice(
-            &std::fs::read(release_dir.join("pocket.json")).context("read pocket.json")?,
-        )
-        .context("parse installed pocket.json")?;
-        anyhow::ensure!(
-            manifest.get("pocket").and_then(Value::as_u64) == Some(2),
-            "App requires pocket.json v2"
-        );
-        anyhow::ensure!(
-            manifest.get("name").and_then(Value::as_str) == Some(app.descriptor.id.as_str()),
-            "pocket.json name does not match App id"
-        );
-        for capability in manifest
-            .pointer("/engine/capabilities/requires")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-        {
-            anyhow::ensure!(
-                matches!(capability, "data.fs" | "data.sqlite" | "net.http"),
-                "unsupported App capability: {capability}"
-            );
-        }
-
         std::fs::create_dir_all(fs_root)?;
-        let guest = Guest::new()?;
+        let guest = new_app_guest().context("create App View Guest")?;
         let surface = UiSurface::new(VIEWPORT);
-        let pak = std::fs::read(release_dir.join("app.pak")).context("read App pak")?;
+        let pak = std::fs::read(app.release_dir.join("app.pak")).context("read App pak")?;
         surface.feed_pak(&pak);
         surface.mount(&guest)?;
 
@@ -771,12 +1269,12 @@ impl AppRuntime {
         mount_shared_db(&guest, db.clone())?;
 
         let source =
-            std::fs::read_to_string(release_dir.join("app.js")).context("read App bundle")?;
-        eval_bundle(&guest, &descriptor.id, &source)?;
+            std::fs::read_to_string(app.release_dir.join("app.js")).context("read App bundle")?;
+        eval_bundle(&guest, &app.descriptor.id, &source)?;
         anyhow::ensure!(
             guest.has_frame(),
             "{} bundle installed no frame()",
-            descriptor.id
+            app.descriptor.id
         );
 
         let last_seen_revision = revision.load(Ordering::Acquire);
@@ -789,6 +1287,8 @@ impl AppRuntime {
             last_seen_revision: Cell::new(last_seen_revision),
             #[cfg(test)]
             projection_refreshes: Cell::new(0),
+            #[cfg(test)]
+            ticks: Cell::new(0),
         })
     }
 
@@ -801,6 +1301,8 @@ impl AppRuntime {
         // App revision and lets the View refresh a bounded projection when a
         // committed Data Action made that revision stale.
         self.call_method("tick", ()).map(|_: String| ())?;
+        #[cfg(test)]
+        self.ticks.set(self.ticks.get().saturating_add(1));
         if render_surface {
             let current_revision = self.revision.load(Ordering::Acquire);
             if current_revision != self.last_seen_revision.get() {
@@ -892,12 +1394,6 @@ impl AppRuntime {
     }
 }
 
-#[cfg(not(target_os = "espidf"))]
-fn eval_bundle(guest: &Guest, label: &str, source: &str) -> Result<()> {
-    guest.eval(label, source)
-}
-
-#[cfg(target_os = "espidf")]
 fn eval_bundle(guest: &Guest, label: &str, source: &str) -> Result<()> {
     guest.eval(label, source)
 }
@@ -1047,17 +1543,18 @@ fn mount_data_lifecycle(
 
 pub struct AppSupervisor {
     workspace: PathBuf,
-    catalog: AppCatalog,
+    catalog: InstalledAppIndex,
     services: Arc<dyn AppServiceHost>,
     data_runner: AppDataRunner,
+    databases: BTreeMap<String, SharedDb>,
+    revisions: BTreeMap<String, AppRevision>,
     /// The Pi Agent System App is booted once and remains resident for the
     /// entire supervisor lifetime. Foreground navigation never replaces it.
     system: AppRuntime,
     agent: Option<GuestAgent>,
-    /// The small v1 catalog is loaded once at supervisor startup. Background
-    /// Data Actions do not advance these Views, and navigation only selects
-    /// an already resident surface.
-    runtimes: BTreeMap<String, AppRuntime>,
+    agent_tools: Option<Arc<dyn ToolHost>>,
+    // Least recently used first. Only the selected View advances.
+    runtimes: Vec<(String, AppRuntime)>,
     active_app: Option<String>,
     schedules: AppScheduleStore,
 }
@@ -1065,18 +1562,17 @@ pub struct AppSupervisor {
 impl AppSupervisor {
     pub fn new(
         workspace: impl Into<PathBuf>,
-        catalog: AppCatalog,
+        catalog: InstalledAppIndex,
         services: Arc<dyn AppServiceHost>,
     ) -> Result<Self> {
         let workspace = workspace.into();
-        seed_builtin_releases(&workspace, &catalog)?;
         let schedules = AppScheduleStore::load(&workspace, &catalog)?;
         let mut databases = BTreeMap::new();
         let mut revisions = BTreeMap::new();
         for descriptor in catalog.descriptors() {
-            let (_, _, db_root, _) = paths(&workspace, &descriptor.id);
+            let (_, db_root, _) = data_paths(&workspace, &descriptor.id);
             std::fs::create_dir_all(&db_root)?;
-            reset_development_database(&workspace, descriptor, &db_root)?;
+            reset_development_database(&workspace, &descriptor, &db_root)?;
             databases.insert(
                 descriptor.id.clone(),
                 Arc::new(Mutex::new(DbModule::new(DbStorage::Dir(db_root)))),
@@ -1084,12 +1580,11 @@ impl AppSupervisor {
             revisions.insert(descriptor.id.clone(), Arc::new(AtomicU32::new(0)));
         }
         let data_configs = catalog
-            .apps
-            .values()
+            .apps()
+            .into_iter()
             .filter_map(|app| {
                 let descriptor = &app.descriptor;
-                let (release_dir, _, _, _) = paths(&workspace, &descriptor.id);
-                let source_path = release_dir.join("data-action.js");
+                let source_path = app.release_dir.join("data-action.js");
                 source_path.is_file().then(|| DataAppConfig {
                     app_id: descriptor.id.clone(),
                     source_path,
@@ -1101,14 +1596,10 @@ impl AppSupervisor {
                         .get(&descriptor.id)
                         .expect("revision created for descriptor")
                         .clone(),
-                    net: serde_json::from_str::<Value>(app.bundle.pocket_json)
-                        .ok()
-                        .and_then(|manifest| {
-                            manifest
-                                .pointer("/engine/capabilities/requires")
-                                .and_then(Value::as_array)
-                                .cloned()
-                        })
+                    net: app
+                        .manifest
+                        .pointer("/engine/capabilities/requires")
+                        .and_then(Value::as_array)
                         .is_some_and(|capabilities| {
                             capabilities.iter().any(|value| value == "net.http")
                         }),
@@ -1116,43 +1607,166 @@ impl AppSupervisor {
             })
             .collect();
         let data_runner = AppDataRunner::start(data_configs, services.clone())?;
-        log::info!("preloading View Runtime: {ROOT_APP_ID}");
+        log::info!("loading Pi Agent System App");
         let system = load_runtime(&workspace, &catalog, &databases, &revisions, ROOT_APP_ID)?;
-        log::info!("preloaded View Runtime: {ROOT_APP_ID}");
-        // v1 has a small fixed App catalog. Load every ordinary View once at
-        // boot so foreground navigation is only a surface switch. Background
-        // Data Actions remain separate and are still loaded on demand.
-        let ordinary_app_ids = catalog
-            .descriptors()
-            .filter(|descriptor| descriptor.id != ROOT_APP_ID)
-            .map(|descriptor| descriptor.id.clone())
-            .collect::<Vec<_>>();
-        let mut runtimes = BTreeMap::new();
-        for app_id in ordinary_app_ids {
-            log::info!("preloading View Runtime: {app_id}");
-            let runtime = load_runtime(&workspace, &catalog, &databases, &revisions, &app_id)?;
-            log::info!("preloaded View Runtime: {app_id}");
-            runtimes.insert(app_id, runtime);
-        }
+        log::info!("Pi Agent System App loaded");
         Ok(Self {
             workspace,
             catalog,
             services,
             data_runner,
+            databases,
+            revisions,
             system,
             agent: None,
-            runtimes,
+            agent_tools: None,
+            runtimes: Vec::new(),
             active_app: None,
             schedules,
         })
     }
 
-    pub fn catalog(&self) -> &AppCatalog {
+    pub fn catalog(&self) -> &InstalledAppIndex {
         &self.catalog
     }
 
     pub fn services_busy(&self) -> bool {
         self.services.busy() || self.data_runner.busy()
+    }
+
+    pub fn activate_new_app(
+        &mut self,
+        staging_release: &Path,
+        credentials: BTreeMap<String, String>,
+    ) -> Result<AppDescriptor> {
+        anyhow::ensure!(!self.services_busy(), "App services are busy");
+        anyhow::ensure!(staging_release.is_dir(), "staged App release is missing");
+        anyhow::ensure!(
+            !staging_release.join("credentials.json").exists(),
+            "credentials.json must be removed before activation"
+        );
+        let descriptor: AppDescriptor = serde_json::from_slice(
+            &std::fs::read(staging_release.join("agent-app.json"))
+                .context("read staged agent-app.json")?,
+        )
+        .context("parse staged agent-app.json")?;
+        ensure_safe_component(&descriptor.id, "App id")?;
+        anyhow::ensure!(
+            descriptor.id != ROOT_APP_ID,
+            "cannot install the System App"
+        );
+        ensure_safe_component(&descriptor.version, "release id")?;
+        let app_root = self.workspace.join("apps").join(&descriptor.id);
+        anyhow::ensure!(
+            !app_root.exists(),
+            "App {} is already installed",
+            descriptor.id
+        );
+
+        let credential_ids = credentials.keys().cloned().collect::<Vec<_>>();
+        let result =
+            self.activate_new_app_inner(staging_release, descriptor, credentials, &app_root);
+        if result.is_err() {
+            if let Some(app_id) = app_root.file_name().and_then(|value| value.to_str()) {
+                self.data_runner.unregister(app_id);
+            }
+            let _ = self.services.remove_credentials(&credential_ids);
+            let _ = std::fs::remove_dir_all(&app_root);
+        }
+        result
+    }
+
+    fn activate_new_app_inner(
+        &mut self,
+        staging_release: &Path,
+        descriptor: AppDescriptor,
+        credentials: BTreeMap<String, String>,
+        app_root: &Path,
+    ) -> Result<AppDescriptor> {
+        let mut app = load_release(staging_release, &descriptor.id, false)?;
+        self.catalog.validate_insert(&app)?;
+
+        let (fs_root, db_root, tmp_root) = data_paths(&self.workspace, &descriptor.id);
+        std::fs::create_dir_all(&db_root)?;
+        std::fs::create_dir_all(&tmp_root)?;
+        reset_development_database(&self.workspace, &app.descriptor, &db_root)?;
+        let database = Arc::new(Mutex::new(DbModule::new(DbStorage::Dir(db_root))));
+        let revision = Arc::new(AtomicU32::new(0));
+        make_runtime_room(
+            &mut self.runtimes,
+            VIEW_RUNTIME_LIMIT,
+            self.active_app.as_deref(),
+        );
+        let runtime = AppRuntime::load(
+            &app,
+            &fs_root,
+            &tmp_root,
+            database.clone(),
+            revision.clone(),
+        )?;
+        let net = app
+            .manifest
+            .pointer("/engine/capabilities/requires")
+            .and_then(Value::as_array)
+            .is_some_and(|capabilities| capabilities.iter().any(|value| value == "net.http"));
+        let staged_data = staging_release.join("data-action.js");
+        if staged_data.is_file() {
+            let candidate = DataAppConfig {
+                app_id: descriptor.id.clone(),
+                source_path: staged_data,
+                database: database.clone(),
+                revision: revision.clone(),
+                net,
+            };
+            DataActionRuntime::load(&candidate, self.services.clone())?;
+        }
+
+        let schedules = new_schedules(&app.descriptor);
+        let schedule_path = app_root.join("data/.system/schedules.json");
+        atomic_write(&schedule_path, &serde_json::to_vec(&schedules)?)?;
+
+        let release_dir = app_root.join("releases").join(&descriptor.version);
+        std::fs::create_dir_all(release_dir.parent().expect("release parent"))?;
+        anyhow::ensure!(!release_dir.exists(), "App release already exists");
+        std::fs::rename(staging_release, &release_dir).context("move staged App release")?;
+        app.release_dir = release_dir.clone();
+
+        let has_data_action = release_dir.join("data-action.js").is_file();
+        if has_data_action {
+            self.data_runner.register(DataAppConfig {
+                app_id: descriptor.id.clone(),
+                source_path: release_dir.join("data-action.js"),
+                database: database.clone(),
+                revision: revision.clone(),
+                net,
+            })?;
+        }
+        self.services
+            .store_credentials(&credentials)
+            .map_err(anyhow::Error::msg)?;
+        let prior_tools = self.agent_tools.as_ref().map(|tools| tools.definitions());
+        if let (Some(agent), Some(prior)) = (&self.agent, &prior_tools) {
+            let mut next = prior.clone();
+            next.extend(app.descriptor.tools.clone());
+            agent
+                .replace_tools(&self.system.guest, next)
+                .map_err(anyhow::Error::msg)?;
+        }
+        if let Err(error) = atomic_write(&app_root.join("current"), descriptor.version.as_bytes()) {
+            self.data_runner.unregister(&descriptor.id);
+            if let (Some(agent), Some(prior)) = (&self.agent, prior_tools) {
+                let _ = agent.replace_tools(&self.system.guest, prior);
+            }
+            return Err(error).context("activate App release");
+        }
+
+        self.catalog.insert_validated(app);
+        self.databases.insert(descriptor.id.clone(), database);
+        self.revisions.insert(descriptor.id.clone(), revision);
+        self.runtimes.push((descriptor.id.clone(), runtime));
+        self.schedules
+            .register(descriptor.id.clone(), schedule_path, schedules);
+        Ok(descriptor)
     }
 
     pub fn active_id(&self) -> &str {
@@ -1168,7 +1782,25 @@ impl AppSupervisor {
             return Ok(());
         }
 
-        anyhow::ensure!(self.runtimes.contains_key(app_id), "unknown App: {app_id}");
+        anyhow::ensure!(self.catalog.app(app_id).is_some(), "unknown App: {app_id}");
+        let runtime = match take_runtime(&mut self.runtimes, app_id) {
+            Some(runtime) => runtime,
+            None => {
+                make_runtime_room(
+                    &mut self.runtimes,
+                    VIEW_RUNTIME_LIMIT,
+                    self.active_app.as_deref(),
+                );
+                load_runtime(
+                    &self.workspace,
+                    &self.catalog,
+                    &self.databases,
+                    &self.revisions,
+                    app_id,
+                )?
+            }
+        };
+        self.runtimes.push((app_id.to_owned(), runtime));
         self.active_app = Some(app_id.to_owned());
         Ok(())
     }
@@ -1183,7 +1815,11 @@ impl AppSupervisor {
             self.agent.is_none(),
             "Pi Agent System App is already booted"
         );
-        let release = paths(&self.workspace, ROOT_APP_ID).0;
+        let release = self
+            .catalog
+            .app(ROOT_APP_ID)
+            .expect("System App remains installed")
+            .release_dir;
         let agent_source = std::fs::read_to_string(release.join("agent.js"))
             .context("read Pi Agent System App loop bundle")?;
         self.agent = Some(
@@ -1191,11 +1827,12 @@ impl AppSupervisor {
                 &self.system.guest,
                 config_json,
                 backend,
-                tools,
+                tools.clone(),
                 &agent_source,
             )
             .map_err(|error| anyhow!(error))?,
         );
+        self.agent_tools = Some(tools);
         Ok(())
     }
 
@@ -1223,11 +1860,12 @@ impl AppSupervisor {
                 .map_err(|error| anyhow!(error))?,
             None => Vec::new(),
         };
-        self.system
-            .advance(render_selected && self.active_app.is_none())?;
-        for (app_id, runtime) in &self.runtimes {
-            runtime
-                .advance(render_selected && self.active_app.as_deref() == Some(app_id.as_str()))?;
+        if let Some(app_id) = &self.active_app {
+            self.cached_view(app_id)
+                .expect("active ordinary App remains loaded")
+                .advance(render_selected)?;
+        } else {
+            self.system.advance(render_selected)?;
         }
         Ok(events)
     }
@@ -1265,7 +1903,7 @@ impl AppSupervisor {
         deadline: Instant,
         response: mpsc::Sender<ToolResult>,
     ) {
-        let Some(app_id) = self.catalog.app_for_tool(name).map(str::to_owned) else {
+        let Some(app_id) = self.catalog.app_for_tool(name) else {
             let _ = response.send(tool_error(format!("unknown App tool: {name}")));
             return;
         };
@@ -1337,14 +1975,21 @@ impl AppSupervisor {
     fn active(&self) -> &AppRuntime {
         self.active_app
             .as_deref()
-            .and_then(|app_id| self.runtimes.get(app_id))
+            .and_then(|app_id| self.cached_view(app_id))
             .unwrap_or(&self.system)
+    }
+
+    fn cached_view(&self, app_id: &str) -> Option<&AppRuntime> {
+        self.runtimes
+            .iter()
+            .find(|(cached_id, _)| cached_id == app_id)
+            .map(|(_, runtime)| runtime)
     }
 }
 
 fn load_runtime(
     workspace: &Path,
-    catalog: &AppCatalog,
+    catalog: &InstalledAppIndex,
     databases: &BTreeMap<String, SharedDb>,
     revisions: &BTreeMap<String, AppRevision>,
     app_id: &str,
@@ -1352,7 +1997,7 @@ fn load_runtime(
     let app = catalog
         .app(app_id)
         .ok_or_else(|| anyhow!("unknown App: {app_id}"))?;
-    let (release_dir, fs_root, db_root, tmp_root) = paths(workspace, app_id);
+    let (fs_root, _, tmp_root) = data_paths(workspace, app_id);
     let db = databases
         .get(app_id)
         .cloned()
@@ -1361,27 +2006,20 @@ fn load_runtime(
         .get(app_id)
         .cloned()
         .ok_or_else(|| anyhow!("App {app_id} has no revision owner"))?;
-    let _ = db_root;
-    AppRuntime::load(app, &release_dir, &fs_root, &tmp_root, db, revision)
+    AppRuntime::load(&app, &fs_root, &tmp_root, db, revision)
         .with_context(|| format!("load App {app_id}"))
 }
 
-fn paths(workspace: &Path, app_id: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+fn data_paths(workspace: &Path, app_id: &str) -> (PathBuf, PathBuf, PathBuf) {
     if app_id == ROOT_APP_ID {
         (
-            workspace.join("data/view/releases").join(BUILTIN_RELEASE),
             workspace.to_owned(),
             workspace.join("data"),
             workspace.join(".system/tmp/pi-agent"),
         )
     } else {
         let root = workspace.join("apps").join(app_id);
-        (
-            root.join("releases").join(BUILTIN_RELEASE),
-            root.join("data"),
-            root.join("data"),
-            root.join("tmp"),
-        )
+        (root.join("data"), root.join("data"), root.join("tmp"))
     }
 }
 
@@ -1417,54 +2055,39 @@ fn reset_development_database(
     atomic_write(&marker, expected.as_bytes())
 }
 
-fn seed_builtin_releases(workspace: &Path, catalog: &AppCatalog) -> Result<()> {
-    for app in catalog.apps.values() {
-        let (release_dir, fs_root, db_root, tmp_root) = paths(workspace, &app.descriptor.id);
-        std::fs::create_dir_all(&release_dir)?;
-        std::fs::create_dir_all(&fs_root)?;
-        std::fs::create_dir_all(&db_root)?;
-        std::fs::create_dir_all(&tmp_root)?;
-        atomic_write(&release_dir.join("app.js"), app.bundle.js.as_bytes())?;
-        if let Some(data_js) = app.bundle.data_js {
-            atomic_write(&release_dir.join("data-action.js"), data_js.as_bytes())?;
-        }
-        if let Some(agent_js) = app.bundle.agent_js {
-            atomic_write(&release_dir.join("agent.js"), agent_js.as_bytes())?;
-        }
-        atomic_write(&release_dir.join("app.pak"), app.bundle.pak)?;
-        atomic_write(
-            &release_dir.join("agent-app.json"),
-            app.bundle.descriptor_json.as_bytes(),
-        )?;
-        atomic_write(
-            &release_dir.join("pocket.json"),
-            app.bundle.pocket_json.as_bytes(),
-        )?;
-        let manifest: Value = serde_json::from_str(app.bundle.pocket_json)?;
-        let modules = manifest
-            .pointer("/engine/capabilities/requires")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        atomic_write(
-            &release_dir.join("plan.json"),
-            &serde_json::to_vec_pretty(&json!({
-                "runtime":"pocket-pi-agentos",
-                "pocketjsRevision":"9c809bbd047ddc75c27caa4990951a78d942477a",
-                "app":app.descriptor.id,
-                "modules":modules
-            }))?,
-        )?;
-        let current = if app.descriptor.id == ROOT_APP_ID {
-            workspace.join("data/view/current")
-        } else {
-            workspace
-                .join("apps")
-                .join(&app.descriptor.id)
-                .join("current")
-        };
-        atomic_write(&current, BUILTIN_RELEASE.as_bytes())?;
-    }
+fn seed_system_release(workspace: &Path, bundle: SystemAppBundle) -> Result<()> {
+    let release_dir = workspace.join("data/view/releases").join(BUILTIN_RELEASE);
+    std::fs::create_dir_all(&release_dir)?;
+    atomic_write(&release_dir.join("app.js"), bundle.js.as_bytes())?;
+    atomic_write(&release_dir.join("agent.js"), bundle.agent_js.as_bytes())?;
+    atomic_write(&release_dir.join("app.pak"), bundle.pak)?;
+    atomic_write(
+        &release_dir.join("agent-app.json"),
+        bundle.descriptor_json.as_bytes(),
+    )?;
+    atomic_write(
+        &release_dir.join("pocket.json"),
+        bundle.pocket_json.as_bytes(),
+    )?;
+    let manifest: Value = serde_json::from_str(bundle.pocket_json)?;
+    let modules = manifest
+        .pointer("/engine/capabilities/requires")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    atomic_write(
+        &release_dir.join("plan.json"),
+        &serde_json::to_vec_pretty(&json!({
+            "runtime":"pocket-pi-agentos",
+            "pocketjsRevision":POCKETJS_REVISION,
+            "app":ROOT_APP_ID,
+            "modules":modules
+        }))?,
+    )?;
+    atomic_write(
+        &workspace.join("data/view/current"),
+        BUILTIN_RELEASE.as_bytes(),
+    )?;
     Ok(())
 }
 
@@ -1499,14 +2122,14 @@ pub struct AppToolRequest {
 
 pub struct RoutedToolHost {
     native: Arc<dyn ToolHost>,
-    catalog: AppCatalog,
+    catalog: InstalledAppIndex,
     app_tx: mpsc::Sender<AppToolRequest>,
 }
 
 impl RoutedToolHost {
     pub fn new(
         native: Arc<dyn ToolHost>,
-        catalog: AppCatalog,
+        catalog: InstalledAppIndex,
     ) -> (Self, mpsc::Receiver<AppToolRequest>) {
         let (app_tx, app_rx) = mpsc::channel();
         (
@@ -1600,7 +2223,7 @@ struct AppScheduleStore {
 }
 
 impl AppScheduleStore {
-    fn load(workspace: &Path, catalog: &AppCatalog) -> Result<Self> {
+    fn load(workspace: &Path, catalog: &InstalledAppIndex) -> Result<Self> {
         // AppTask declarations travel with the App release, while their
         // mutable scheduler cursor belongs to that App's private data root.
         let now = unix_seconds();
@@ -1675,6 +2298,11 @@ impl AppScheduleStore {
         Some(due)
     }
 
+    fn register(&mut self, app_id: String, path: PathBuf, schedules: Vec<StoredSchedule>) {
+        self.paths.insert(app_id, path);
+        self.schedules.extend(schedules);
+    }
+
     fn finish(&mut self, due: &DueTask, ok: bool) {
         if let Some(item) = self
             .schedules
@@ -1703,6 +2331,26 @@ impl AppScheduleStore {
         }
         Ok(())
     }
+}
+
+fn new_schedules(descriptor: &AppDescriptor) -> Vec<StoredSchedule> {
+    let now = unix_seconds();
+    descriptor
+        .schedules
+        .iter()
+        .map(|declaration| {
+            let every_seconds = declaration.every_minutes.saturating_mul(60).max(60);
+            StoredSchedule {
+                app_id: descriptor.id.clone(),
+                schedule_id: declaration.id.clone(),
+                task: declaration.task.clone(),
+                args: declaration.args.clone(),
+                every_seconds,
+                next_run_at: now.saturating_add(every_seconds),
+                last_ok: None,
+            }
+        })
+        .collect()
 }
 
 fn unix_seconds() -> u64 {
@@ -1750,53 +2398,43 @@ mod tests {
 
     #[test]
     fn catalog_uses_each_apps_declared_tool_namespace() {
-        let catalog = AppCatalog::new([
-            fixture(
-                r#"{"id":"pi-agent","description":"System","version":"1","tools":[],"tasks":[],"schedules":[]}"#,
-                Some("agent"),
-            ),
-            fixture(
-                r#"{"id":"search","description":"Research","version":"1","toolNamespace":"research","tools":[{"name":"research.query","parameters":{"type":"object"}}],"tasks":[],"schedules":[]}"#,
-                None,
-            ),
-        ])
-        .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        install_fixture(
+            temp.path(),
+            "search",
+            r#"{"id":"search","description":"Research","version":"1","toolNamespace":"research","tools":[{"name":"research.query","parameters":{"type":"object"}}],"tasks":[],"schedules":[]}"#,
+        );
+        let catalog = InstalledAppIndex::load(temp.path(), system_app_bundle()).unwrap();
 
-        assert_eq!(catalog.app_for_tool("research.query"), Some("search"));
-        assert_eq!(catalog.descriptors().count(), 2);
+        assert_eq!(
+            catalog.app_for_tool("research.query"),
+            Some("search".into())
+        );
+        assert_eq!(catalog.descriptors().len(), 2);
     }
 
     #[test]
     fn catalog_rejects_a_tool_outside_its_declared_namespace() {
-        let error = AppCatalog::new([
-            fixture(
-                r#"{"id":"pi-agent","description":"System","version":"1","tools":[],"tasks":[],"schedules":[]}"#,
-                Some("agent"),
-            ),
-            fixture(
-                r#"{"id":"search","description":"Research","version":"1","tools":[{"name":"other.query","parameters":{"type":"object"}}],"tasks":[],"schedules":[]}"#,
-                None,
-            ),
-        ])
-        .err()
-        .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        install_fixture(
+            temp.path(),
+            "search",
+            r#"{"id":"search","description":"Research","version":"1","tools":[{"name":"other.query","parameters":{"type":"object"}}],"tasks":[],"schedules":[]}"#,
+        );
+        let error = InstalledAppIndex::load(temp.path(), system_app_bundle()).unwrap_err();
 
         assert!(error.to_string().contains("non-namespaced tool"));
     }
 
     #[test]
     fn catalog_exposes_only_declared_native_policies() {
-        let catalog = AppCatalog::new([
-            fixture(
-                r#"{"id":"pi-agent","description":"System","version":"1","tools":[],"tasks":[],"schedules":[]}"#,
-                Some("agent"),
-            ),
-            fixture(
-                r#"{"id":"search","description":"Research","version":"1","tools":[],"tasks":[],"schedules":[],"nativeServices":{"http":[{"method":"POST","urls":["https://example.com/search"],"allowedRequestHeaders":["content-type"],"credential":{"id":"search.api-key","header":"x-api-key"}}],"mcp":[]}}"#,
-                None,
-            ),
-        ])
-        .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        install_fixture(
+            temp.path(),
+            "search",
+            r#"{"id":"search","description":"Research","version":"1","tools":[],"tasks":[],"schedules":[],"nativeServices":{"http":[{"method":"POST","urls":["https://example.com/search"],"allowedRequestHeaders":["content-type"],"credential":{"id":"search.api-key","header":"x-api-key"}}],"mcp":[]}}"#,
+        );
+        let catalog = InstalledAppIndex::load(temp.path(), system_app_bundle()).unwrap();
 
         assert!(catalog
             .http_policy("search", "POST", "https://example.com/search")
@@ -1811,19 +2449,59 @@ mod tests {
     }
 
     #[test]
+    fn package_credentials_must_exactly_match_the_descriptor() {
+        let descriptor = AppDescriptor {
+            id: "search".into(),
+            title: "Search".into(),
+            description: "Research".into(),
+            version: "1".into(),
+            data_version: 0,
+            tool_namespace: "search".into(),
+            tools: Vec::new(),
+            provider_operations: Vec::new(),
+            tasks: Vec::new(),
+            schedules: Vec::new(),
+            native_services: NativeServices {
+                http: vec![HttpServicePolicy {
+                    method: "POST".into(),
+                    urls: vec!["https://example.com/search".into()],
+                    allowed_request_headers: Vec::new(),
+                    credential: Some(CredentialBinding {
+                        id: "search.api-key".into(),
+                        header: "authorization".into(),
+                        prefix: "Bearer ".into(),
+                    }),
+                }],
+                mcp: Vec::new(),
+            },
+        };
+
+        assert!(validate_package_credentials(&descriptor, &BTreeMap::new()).is_err());
+        assert!(validate_package_credentials(
+            &descriptor,
+            &BTreeMap::from([("search.api-key".into(), "secret".into())])
+        )
+        .is_ok());
+        assert!(validate_package_credentials(
+            &descriptor,
+            &BTreeMap::from([
+                ("search.api-key".into(), "secret".into()),
+                ("extra.api-key".into(), "secret".into())
+            ])
+        )
+        .is_err());
+    }
+
+    #[test]
     fn app_tool_request_carries_the_single_80_second_deadline() {
         assert_eq!(APP_ACTION_TIMEOUT, Duration::from_secs(80));
-        let catalog = AppCatalog::new([
-            fixture(
-                r#"{"id":"pi-agent","description":"System","version":"1","tools":[],"tasks":[],"schedules":[]}"#,
-                Some("agent"),
-            ),
-            fixture(
-                r#"{"id":"search","description":"Research","version":"1","toolNamespace":"research","tools":[{"name":"research.query","parameters":{"type":"object"}}],"tasks":[],"schedules":[]}"#,
-                None,
-            ),
-        ])
-        .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        install_fixture(
+            temp.path(),
+            "search",
+            r#"{"id":"search","description":"Research","version":"1","toolNamespace":"research","tools":[{"name":"research.query","parameters":{"type":"object"}}],"tasks":[],"schedules":[]}"#,
+        );
+        let catalog = InstalledAppIndex::load(temp.path(), system_app_bundle()).unwrap();
         let (tools, requests) = RoutedToolHost::new(Arc::new(NoTools), catalog);
         let call = std::thread::spawn(move || tools.execute("call", "research.query", "{}"));
         let request = requests.recv().unwrap();
@@ -1885,77 +2563,391 @@ mod tests {
     }
 
     #[test]
+    fn failed_candidate_never_creates_current() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("device");
+        let staging = temp.path().join("staged-release");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(
+            staging.join("agent-app.json"),
+            r#"{"id":"broken","description":"Broken","version":"1","tools":[],"tasks":[],"schedules":[]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            staging.join("pocket.json"),
+            r#"{"pocket":2,"name":"broken","title":"Broken","version":"1","engine":{"capabilities":{"requires":[]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            staging.join("plan.json"),
+            json!({
+                "runtime":"pocket-pi-agentos",
+                "pocketjsRevision":POCKETJS_REVISION,
+                "app":"broken",
+                "modules":[]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(staging.join("app.js"), "").unwrap();
+        std::fs::write(staging.join("app.pak"), []).unwrap();
+
+        let index = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
+        let mut supervisor = AppSupervisor::new(&workspace, index, Arc::new(NoServices)).unwrap();
+        let error = supervisor
+            .activate_new_app(&staging, BTreeMap::new())
+            .unwrap_err();
+        assert!(error.to_string().contains("frame") || error.to_string().contains("PocketPiApp"));
+        assert!(!workspace.join("apps/broken/current").exists());
+        assert!(!workspace.join("apps/broken").exists());
+    }
+
+    #[test]
+    fn installing_app_keeps_root_foreground_until_user_opens_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let staging = temp.path().join("staged-exa");
+        stage_checked_in_app(&staging, "exa");
+        let catalog = InstalledAppIndex::load(temp.path(), system_app_bundle()).unwrap();
+        let mut supervisor =
+            AppSupervisor::new(temp.path(), catalog, Arc::new(NoServices)).unwrap();
+
+        let installed = supervisor
+            .activate_new_app(&staging, BTreeMap::new())
+            .unwrap();
+
+        assert_eq!(installed.id, "exa");
+        assert_eq!(supervisor.active_id(), ROOT_APP_ID);
+        assert!(supervisor.catalog().app("exa").is_some());
+        assert!(supervisor.cached_view("exa").is_some());
+
+        supervisor.open("exa").unwrap();
+        assert_eq!(supervisor.active_id(), "exa");
+    }
+
+    #[test]
     fn app_revisions_coalesce_at_the_foreground_frame_boundary() {
         let temp = tempfile::tempdir().unwrap();
-        let catalog = AppCatalog::new([pi_agent_bundle(), exa_bundle()]).unwrap();
+        install_checked_in_app(temp.path(), "exa");
+        let catalog = InstalledAppIndex::load(temp.path(), system_app_bundle()).unwrap();
         let mut supervisor =
             AppSupervisor::new(temp.path(), catalog, Arc::new(NoServices)).unwrap();
         supervisor.open("exa").unwrap();
 
-        let revision = supervisor.runtimes["exa"].revision.clone();
+        let revision = supervisor.cached_view("exa").unwrap().revision.clone();
         revision.fetch_add(1, Ordering::Release);
         revision.fetch_add(1, Ordering::Release);
         revision.fetch_add(1, Ordering::Release);
         assert!(supervisor.active_projection_is_stale());
 
         supervisor.frame_render(false).unwrap();
-        assert_eq!(supervisor.runtimes["exa"].projection_refreshes.get(), 0);
-        assert_eq!(supervisor.runtimes["exa"].last_seen_revision.get(), 0);
+        assert_eq!(
+            supervisor
+                .cached_view("exa")
+                .unwrap()
+                .projection_refreshes
+                .get(),
+            0
+        );
+        assert_eq!(
+            supervisor
+                .cached_view("exa")
+                .unwrap()
+                .last_seen_revision
+                .get(),
+            0
+        );
 
         supervisor.frame_render(true).unwrap();
-        assert_eq!(supervisor.runtimes["exa"].projection_refreshes.get(), 1);
-        assert_eq!(supervisor.runtimes["exa"].last_seen_revision.get(), 3);
+        assert_eq!(
+            supervisor
+                .cached_view("exa")
+                .unwrap()
+                .projection_refreshes
+                .get(),
+            1
+        );
+        assert_eq!(
+            supervisor
+                .cached_view("exa")
+                .unwrap()
+                .last_seen_revision
+                .get(),
+            3
+        );
         assert!(!supervisor.active_projection_is_stale());
 
         for _ in 0..5 {
             supervisor.frame_render(true).unwrap();
         }
-        assert_eq!(supervisor.runtimes["exa"].projection_refreshes.get(), 1);
+        assert_eq!(
+            supervisor
+                .cached_view("exa")
+                .unwrap()
+                .projection_refreshes
+                .get(),
+            1
+        );
 
         supervisor.open(ROOT_APP_ID).unwrap();
+        let background_ticks = supervisor.cached_view("exa").unwrap().ticks.get();
         revision.fetch_add(1, Ordering::Release);
         revision.fetch_add(1, Ordering::Release);
         for _ in 0..3 {
             supervisor.frame_render(true).unwrap();
         }
-        assert_eq!(supervisor.runtimes["exa"].projection_refreshes.get(), 1);
+        assert_eq!(
+            supervisor
+                .cached_view("exa")
+                .unwrap()
+                .projection_refreshes
+                .get(),
+            1
+        );
+        assert_eq!(
+            supervisor.cached_view("exa").unwrap().ticks.get(),
+            background_ticks
+        );
 
         supervisor.open("exa").unwrap();
         supervisor.frame_render(true).unwrap();
-        assert_eq!(supervisor.runtimes["exa"].projection_refreshes.get(), 2);
-        assert_eq!(supervisor.runtimes["exa"].last_seen_revision.get(), 5);
+        assert_eq!(
+            supervisor
+                .cached_view("exa")
+                .unwrap()
+                .projection_refreshes
+                .get(),
+            2
+        );
+        assert_eq!(
+            supervisor
+                .cached_view("exa")
+                .unwrap()
+                .last_seen_revision
+                .get(),
+            5
+        );
     }
 
-    fn fixture(descriptor_json: &'static str, agent_js: Option<&'static str>) -> EmbeddedApp {
-        EmbeddedApp::new(
-            descriptor_json,
-            r#"{"pocket":2,"name":"fixture","title":"Fixture","version":"1","engine":{"capabilities":{"requires":[]}}}"#,
-            "",
-            None,
-            agent_js,
-            &[],
-        )
+    #[test]
+    fn ordinary_views_load_on_demand_and_keep_the_three_most_recent() {
+        let temp = tempfile::tempdir().unwrap();
+        for app_id in ["one", "two", "three", "four"] {
+            install_view_fixture(temp.path(), app_id);
+        }
+        let catalog = InstalledAppIndex::load(temp.path(), system_app_bundle()).unwrap();
+        let mut supervisor =
+            AppSupervisor::new(temp.path(), catalog, Arc::new(NoServices)).unwrap();
+        assert!(supervisor.runtimes.is_empty());
+
+        for app_id in ["one", "two", "three"] {
+            supervisor.open(app_id).unwrap();
+        }
+        supervisor.open("one").unwrap();
+        supervisor.open("four").unwrap();
+
+        assert_eq!(
+            supervisor
+                .runtimes
+                .iter()
+                .map(|(app_id, _)| app_id.as_str())
+                .collect::<Vec<_>>(),
+            ["three", "one", "four"]
+        );
+        assert_eq!(supervisor.active_id(), "four");
     }
 
-    fn pi_agent_bundle() -> EmbeddedApp {
-        EmbeddedApp::new(
-            include_str!("../../../apps/pi-agent/agent-app.json"),
-            include_str!("../../../apps/pi-agent/pocket.json"),
-            include_str!("../../../apps/pi-agent/dist/app.js"),
-            None,
-            Some(include_str!("../../../apps/pi-agent/dist/agent.js")),
-            include_bytes!("../../../apps/pi-agent/dist/app.pak"),
+    #[test]
+    fn data_actions_keep_the_three_most_recent_runtimes() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("data-action.js");
+        std::fs::write(
+            &source,
+            r#"
+const nativeDb = globalThis.db;
+const handle = nativeDb.open("cache");
+if (handle < 0) throw new Error("open cache.sqlite");
+if (nativeDb.exec(handle, `
+  CREATE TABLE IF NOT EXISTS loads(value INTEGER NOT NULL);
+  INSERT INTO loads(value) SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM loads);
+  UPDATE loads SET value=value+1;
+`) !== 0) throw new Error(nativeDb.lastError(handle));
+globalThis.PocketPiData = {
+  invokeTask() { return JSON.stringify({text:"ok", isError:false}); },
+  invokeTool() { return JSON.stringify({text:"ok", isError:false}); },
+};
+"#,
         )
+        .unwrap();
+
+        let mut databases = BTreeMap::new();
+        let configs = ["one", "two", "three", "four"]
+            .into_iter()
+            .map(|app_id| {
+                let database = Arc::new(Mutex::new(DbModule::new(DbStorage::Dir(
+                    temp.path().join(app_id),
+                ))));
+                databases.insert(app_id, database.clone());
+                DataAppConfig {
+                    app_id: app_id.into(),
+                    source_path: source.clone(),
+                    database,
+                    revision: Arc::new(AtomicU32::new(0)),
+                    net: false,
+                }
+            })
+            .collect();
+        let runner = AppDataRunner::start(configs, Arc::new(NoServices)).unwrap();
+
+        for app_id in ["one", "two", "three", "one", "four", "two"] {
+            let (response, rx) = mpsc::channel();
+            runner
+                .enqueue(
+                    app_id,
+                    DataActionKind::Task,
+                    "run",
+                    Value::Null,
+                    new_action_deadline(),
+                    Some(response),
+                )
+                .unwrap();
+            assert!(!rx.recv_timeout(Duration::from_secs(2)).unwrap().is_error);
+        }
+
+        let load_count = |app_id: &str| {
+            let mut database = databases[app_id].lock().unwrap();
+            let handle = database.open("cache");
+            let value: Value =
+                serde_json::from_str(&database.query(handle, "SELECT value FROM loads", "[]"))
+                    .unwrap();
+            value["rows"][0][0].as_i64().unwrap()
+        };
+        assert_eq!(load_count("one"), 1);
+        assert_eq!(load_count("two"), 2);
+        assert_eq!(load_count("three"), 1);
+        assert_eq!(load_count("four"), 1);
     }
 
-    fn exa_bundle() -> EmbeddedApp {
-        EmbeddedApp::new(
-            include_str!("../../../apps/exa/agent-app.json"),
-            include_str!("../../../apps/exa/pocket.json"),
-            include_str!("../../../apps/exa/dist/app.js"),
-            Some(include_str!("../../../apps/exa/dist/data-action.js")),
-            None,
-            include_bytes!("../../../apps/exa/dist/app.pak"),
+    fn install_view_fixture(workspace: &Path, app_id: &str) {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/exa");
+        let release = workspace.join("apps").join(app_id).join("releases/r1");
+        std::fs::create_dir_all(&release).unwrap();
+        std::fs::write(
+            release.join("agent-app.json"),
+            json!({
+                "id":app_id,
+                "title":app_id,
+                "description":"View cache fixture",
+                "version":"1",
+                "tools":[],
+                "tasks":[],
+                "schedules":[]
+            })
+            .to_string(),
         )
+        .unwrap();
+        std::fs::write(
+            release.join("pocket.json"),
+            json!({
+                "pocket":2,
+                "name":app_id,
+                "title":app_id,
+                "version":"1",
+                "engine":{"capabilities":{"requires":[]}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            release.join("plan.json"),
+            json!({
+                "runtime":"pocket-pi-agentos",
+                "pocketjsRevision":POCKETJS_REVISION,
+                "app":app_id,
+                "modules":[]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::copy(source.join("dist/app.js"), release.join("app.js")).unwrap();
+        std::fs::copy(source.join("dist/app.pak"), release.join("app.pak")).unwrap();
+        std::fs::write(workspace.join("apps").join(app_id).join("current"), "r1").unwrap();
+    }
+
+    fn install_fixture(workspace: &Path, app_id: &str, descriptor: &str) {
+        let release = workspace.join("apps").join(app_id).join("releases/r1");
+        std::fs::create_dir_all(&release).unwrap();
+        std::fs::write(release.join("agent-app.json"), descriptor).unwrap();
+        std::fs::write(
+            release.join("pocket.json"),
+            json!({
+                "pocket":2,
+                "name":app_id,
+                "title":"Fixture",
+                "version":"1",
+                "engine":{"capabilities":{"requires":[]}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            release.join("plan.json"),
+            json!({
+                "runtime":"pocket-pi-agentos",
+                "pocketjsRevision":POCKETJS_REVISION,
+                "app":app_id,
+                "modules":[]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(release.join("app.js"), "").unwrap();
+        std::fs::write(release.join("app.pak"), []).unwrap();
+        let descriptor: Value = serde_json::from_str(descriptor).unwrap();
+        if descriptor["tools"]
+            .as_array()
+            .is_some_and(|tools| !tools.is_empty())
+            || descriptor["tasks"]
+                .as_array()
+                .is_some_and(|tasks| !tasks.is_empty())
+        {
+            std::fs::write(release.join("data-action.js"), "").unwrap();
+        }
+        std::fs::write(workspace.join("apps").join(app_id).join("current"), "r1").unwrap();
+    }
+
+    fn install_checked_in_app(workspace: &Path, app_id: &str) {
+        let release = workspace.join("apps").join(app_id).join("releases/r1");
+        stage_checked_in_app(&release, app_id);
+        std::fs::write(workspace.join("apps").join(app_id).join("current"), "r1").unwrap();
+    }
+
+    fn stage_checked_in_app(release: &Path, app_id: &str) {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("apps")
+            .join(app_id);
+        std::fs::create_dir_all(release).unwrap();
+        for (from, to) in [
+            ("agent-app.json", "agent-app.json"),
+            ("pocket.json", "pocket.json"),
+            ("dist/app.js", "app.js"),
+            ("dist/app.pak", "app.pak"),
+            ("dist/data-action.js", "data-action.js"),
+        ] {
+            std::fs::copy(source.join(from), release.join(to)).unwrap();
+        }
+        let manifest: Value =
+            serde_json::from_slice(&std::fs::read(source.join("pocket.json")).unwrap()).unwrap();
+        std::fs::write(
+            release.join("plan.json"),
+            serde_json::to_vec(&json!({
+                "runtime":"pocket-pi-agentos",
+                "pocketjsRevision":POCKETJS_REVISION,
+                "app":app_id,
+                "modules":manifest.pointer("/engine/capabilities/requires").unwrap()
+            }))
+            .unwrap(),
+        )
+        .unwrap();
     }
 }
