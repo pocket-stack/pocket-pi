@@ -23,11 +23,10 @@ The physical host selects `UartBackend` for a Mac Codex/Claude Code bridge or
 `WirelessBackend` for direct OpenAI/OpenRouter/Anthropic/DeepSeek HTTPS. These remain
 host adapters; they do not belong in the UI or embedded Agent core.
 
-The ESP host also exposes the current HTTP ingress for ordinary App packages.
-That adapter only receives a complete `.pocketapp` and hands it to the shared
-Installer in `pocket-pi-agentos`; it does not write App releases, credentials,
-`current`, or runtime state itself. A future UART ingress must use the same
-Installer boundary.
+The ESP host exposes HTTP and UART ingress for ordinary App packages. Both
+adapters only receive a complete `.pocketapp` and hand it to the shared Installer
+in `pocket-pi-agentos`; neither writes App releases, credentials, `current`, or
+runtime state itself.
 
 ```sh
 cargo xtask build esp32-p4
@@ -75,30 +74,40 @@ App contracts, but may use simpler macOS adapters. ESP-IDF, PSRAM, PPA,
 LittleFS capacity, MIPI-DSI, touch-controller and Wi-Fi/NVS behavior require a
 physical-board test.
 
-## Physical UART bridge
+## Physical provisioning, install and diagnostics
 
-The thin bridge CLI provisions the boot-time model choice and routes framed
-model decisions. Its `uart_bridge` adapters reuse a logged-in Codex Coding Plan
-through the persistent Codex app-server, or Claude Code through `stream-json`.
-Both paths consume provider deltas internally, then coalesce them into one
-final `PPI-RPC-STREAM` result for the current device-side `UartBackend`.
-Wi-Fi can be selected later from the on-device Settings page.
+The physical board is provisioned once with a standalone wireless model backend.
+Model provider, model, thinking level and API key are stored in native NVS;
+Wi-Fi SSID/password use the existing Wi-Fi NVS store. Normal boots load those
+values directly and do not wait for UART.
 
 ```sh
-tools/uart-model-bridge.py /dev/cu.usbserial-... --backend uart --provider codex
+tools/uart-provision.py /dev/cu.usbserial-... \
+  --provider deepseek --provision-wifi
 
-# Submit one boot-time prompt for a repeatable physical E2E test
-tools/uart-model-bridge.py /dev/cu.usbserial-... --backend uart \
-  --provider codex --prompt 'Use write, read, schedule.set and schedule.list.'
+tools/uart-install.py /dev/cu.usbserial-... \
+  target/pocketapps/exa.pocketapp
 
-tools/uart-model-bridge.py /dev/cu.usbserial-... --backend wireless \
-  --provider openai --model gpt-5-mini --provision-wifi
+espflash monitor --port /dev/cu.usbserial-...
+```
+
+The App uploader does not reset the board or configure a model. It only transfers
+one complete package to the same Installer used by HTTP. For unprovisioned
+development-board bring-up, the optional model bridge can still route requests
+to a logged-in Mac Codex or Claude Code without persisting that backend:
+
+All UART CLIs leave DTR/RTS inactive before closing the port so the WCH USB
+serial bridge does not reset a running board.
+
+```sh
+tools/uart-model-bridge.py /dev/cu.usbserial-... --provider codex \
+  --prompt 'Use write, read, schedule.set and schedule.list.'
 ```
 
 The Settings page scans visible networks, opens the shared PocketJS keyboard
 for secured-network passwords, connects, forgets credentials, and requests a
-restart. The ESP host persists only Wi-Fi SSID/password in NVS. Model API keys
-arrive through provisioning and remain outside UI projections.
+restart. Model and Wi-Fi credentials remain outside Agent workspace and UI
+projections.
 
 UART provisioning also seeds the board clock from the Mac for development.
 Standalone operation uses ESP-IDF SNTP after Wi-Fi connects. Both feed the same

@@ -1,13 +1,16 @@
 use core::time::Duration;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, SyncSender};
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Context as _;
+use base64::prelude::{Engine as _, BASE64_STANDARD};
 use embedded_svc::http::{Headers as _, Method};
 use embedded_svc::io::{Read as _, Write as _};
 use esp_idf_svc::http::server::{Configuration as ServerConfiguration, EspHttpServer};
+use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use pocket_pi_agentos::{
     stage_pocketapp_bytes, system_app_bundle, AppDescriptor, AppServiceHost, AppSupervisor,
     InstalledAppIndex, RoutedToolHost, StagedApp, DATA_ACTION_STACK_BYTES, MAX_POCKETAPP_BYTES,
@@ -22,11 +25,17 @@ use super::{
     app_services::EspAppServices,
     backend,
     device_state::{SettingsProjection, WifiSettingsProjection},
-    esp_result, init_wifi, storage, transport, DisplayProbe, EspPlatform, BOARD_NAME, PANEL_HEIGHT,
-    PANEL_WIDTH,
+    esp_result, init_wifi, storage, transport, transport::LineTransport as _, DisplayProbe,
+    EspPlatform, BOARD_NAME, PANEL_HEIGHT, PANEL_WIDTH,
 };
 
 const AGENTOS_FREERTOS_HZ: u32 = 100;
+const UART_INSTALL_BEGIN: &str = "PPI-INSTALL-BEGIN:";
+const UART_INSTALL_CHUNK: &str = "PPI-INSTALL-CHUNK:";
+const UART_INSTALL_READY: &str = "PPI-INSTALL-READY";
+const UART_INSTALL_ACK: &str = "PPI-INSTALL-ACK";
+const UART_INSTALL_UPLOADED: &str = "PPI-INSTALL-UPLOADED";
+const UART_INSTALL_ERROR: &str = "PPI-INSTALL-ERROR:";
 const _: () = assert!(esp_idf_svc::sys::configTICK_RATE_HZ == AGENTOS_FREERTOS_HZ);
 
 #[derive(Clone)]
@@ -43,19 +52,33 @@ struct InstallUi {
 
 pub fn run() -> anyhow::Result<()> {
     let _workspace = storage::mount_workspace()?;
+    let nvs = EspDefaultNvsPartition::take()?;
 
     let uart = Arc::new(
         transport::UartLineTransport::new()
             .map_err(|error| anyhow::anyhow!("initialize UART transport: {error}"))?,
     );
-    let runtime_config =
-        match transport::request_runtime_config(uart.as_ref(), Duration::from_secs(5)) {
-            Ok(config) => config,
-            Err(error) => {
-                log::warn!("No UART runtime config received: {error}");
-                transport::RuntimeConfig::default()
+    let runtime_config = match transport::load_runtime_config(nvs.clone())
+        .map_err(anyhow::Error::msg)?
+    {
+        Some(config) => {
+            log::info!("loaded wireless model configuration from NVS");
+            config
+        }
+        None => {
+            let config = transport::request_runtime_config(uart.as_ref(), Duration::from_secs(20))
+                .map_err(|error| anyhow::anyhow!(
+                    "Pocket Pi is not provisioned; run tools/uart-provision.py: {error}"
+                ))?;
+            if matches!(config.model.backend, ModelBackendSettings::Wireless { .. }) {
+                transport::persist_runtime_config(nvs.clone(), &config)
+                    .map_err(anyhow::Error::msg)?;
+                uart.write_line("PPI-CONFIG-STORED");
+                log::info!("stored wireless model configuration in NVS");
             }
-        };
+            config
+        }
+    };
     if let Some(seconds) = runtime_config.unix_time_seconds {
         let time = esp_idf_svc::sys::timeval {
             tv_sec: seconds as i64,
@@ -67,6 +90,7 @@ pub fn run() -> anyhow::Result<()> {
     }
 
     let mut wifi = match init_wifi(
+        nvs.clone(),
         runtime_config.wifi_ssid.as_deref(),
         runtime_config.wifi_password.as_deref(),
     ) {
@@ -119,7 +143,7 @@ pub fn run() -> anyhow::Result<()> {
     let uart_poc = matches!(model_settings.backend, ModelBackendSettings::Uart { .. });
     let backend: Arc<dyn ModelBackend> = match model_settings.backend {
         ModelBackendSettings::Uart { .. } => {
-            let transport: Arc<dyn transport::LineTransport> = uart;
+            let transport: Arc<dyn transport::LineTransport> = uart.clone();
             Arc::new(backend::UartBackend::new(transport))
         }
         ModelBackendSettings::Wireless { provider } => Arc::new(
@@ -143,7 +167,7 @@ pub fn run() -> anyhow::Result<()> {
     let services: Arc<dyn AppServiceHost> = Arc::new(EspAppServices::new(
         network_ready.clone(),
         catalog.clone(),
-        wifi.as_ref().map(|wifi| wifi.nvs.clone()),
+        Some(nvs),
     ));
     let mut supervisor = with_psram_pthread_config(DATA_ACTION_STACK_BYTES, || {
         AppSupervisor::new(storage::WORKSPACE_ROOT, catalog, services)
@@ -182,7 +206,14 @@ pub fn run() -> anyhow::Result<()> {
             .boot_agent(&config.to_string(), backend, Arc::new(routed_tools))
             .map_err(anyhow::Error::msg)
     })?;
-    let (_install_server, install_rx, install_slot) = start_install_server()?;
+    let install_root = prepare_install_root()?;
+    let (install_tx, install_rx) = mpsc::sync_channel(1);
+    let install_slot = Arc::new(AtomicBool::new(false));
+    let _install_server = start_install_server(
+        install_root.clone(),
+        install_tx.clone(),
+        install_slot.clone(),
+    )?;
 
     let mut messages = vec![Message {
         role: "assistant",
@@ -200,15 +231,39 @@ pub fn run() -> anyhow::Result<()> {
     let mut pending_install: Option<StagedApp> = None;
     let mut install_ui: Option<InstallUi> = None;
     let mut install_requested = false;
+    let mut pending_uninstall: Option<String> = None;
+    let mut uninstall_error: Option<String> = None;
     let mut last_tick = Instant::now();
     let mut last_runtime_pump = Instant::now();
     let mut last_projection_refresh = Instant::now();
     let mut last_heartbeat = Instant::now();
     let mut last_wifi_poll = Instant::now();
+    let mut last_uart_install_poll = Instant::now();
     let mut last_wifi_connected = wifi.as_ref().is_some_and(|wifi| wifi.is_connected());
 
     loop {
-        if pending_install.is_none() && !busy && !supervisor.services_busy() {
+        if last_uart_install_poll.elapsed() >= Duration::from_millis(250)
+            && pending_install.is_none()
+            && pending_uninstall.is_none()
+            && !busy
+            && !supervisor.services_busy()
+        {
+            last_uart_install_poll = Instant::now();
+            if let Ok(begin) = uart.read_frame(UART_INSTALL_BEGIN, Duration::from_millis(1)) {
+                receive_uart_install(
+                    uart.as_ref(),
+                    &begin,
+                    &install_root,
+                    &install_tx,
+                    install_slot.as_ref(),
+                );
+            }
+        }
+        if pending_install.is_none()
+            && pending_uninstall.is_none()
+            && !busy
+            && !supervisor.services_busy()
+        {
             if let Ok(staged) = install_rx.try_recv() {
                 install_ui = Some(InstallUi {
                     state: "review",
@@ -254,6 +309,17 @@ pub fn run() -> anyhow::Result<()> {
                         Some("invokeTask") => {
                             if let Some(task) = action.get("task").and_then(Value::as_str) {
                                 pending_ui_task = Some(task.to_owned());
+                            }
+                        }
+                        Some("uninstallApp") => {
+                            if let Some(app_id) = action.get("app").and_then(Value::as_str) {
+                                if busy || supervisor.services_busy() {
+                                    uninstall_error = Some("APP SERVICES ARE BUSY".into());
+                                } else {
+                                    pending_uninstall = Some(app_id.to_owned());
+                                    uninstall_error = None;
+                                }
+                                projection_dirty = true;
                             }
                         }
                         Some("installApp")
@@ -401,7 +467,12 @@ pub fn run() -> anyhow::Result<()> {
         }
 
         if last_tick.elapsed() >= Duration::from_secs(1) {
-            if install_ui.is_none() && !busy && agent_status == "IDLE" && initial_prompt.is_none() {
+            if install_ui.is_none()
+                && pending_uninstall.is_none()
+                && !busy
+                && agent_status == "IDLE"
+                && initial_prompt.is_none()
+            {
                 if let Some(wake) = native_tools.claim_due() {
                     submit_prompt(
                         wake.prompt,
@@ -447,6 +518,8 @@ pub fn run() -> anyhow::Result<()> {
                 native_tools.as_ref(),
                 supervisor.catalog(),
                 install_ui.as_ref(),
+                pending_uninstall.as_deref(),
+                uninstall_error.as_deref(),
             );
             supervisor.update_root(&projection)?;
             projection_dirty = false;
@@ -511,6 +584,7 @@ pub fn run() -> anyhow::Result<()> {
         if agent_status == "IDLE"
             && !busy
             && install_ui.is_none()
+            && pending_uninstall.is_none()
             && initial_prompt.is_some()
             && Instant::now() >= initial_prompt_not_before
             && (!wireless_model || network_ready.load(Ordering::Acquire))
@@ -574,9 +648,21 @@ pub fn run() -> anyhow::Result<()> {
             }
         }
 
+        if let Some(app_id) = pending_uninstall.take() {
+            match supervisor.uninstall_app(&app_id) {
+                Ok(_) => log::info!("App uninstall succeeded: {app_id}"),
+                Err(error) => {
+                    log::error!("App uninstall failed: {error:#}");
+                    uninstall_error = Some(format!("{error:#}"));
+                }
+            }
+            projection_dirty = true;
+            redraw = true;
+        }
+
         // A UI-requested task runs only after its loading state has reached the
         // panel. This preserves immediate touch feedback even when HTTPS is slow.
-        if install_ui.is_none() && !busy {
+        if install_ui.is_none() && pending_uninstall.is_none() && !busy {
             if let Some(task) = pending_ui_task.take() {
                 let started = Instant::now();
                 let result = supervisor.invoke_active_task(&task, &Value::Null);
@@ -611,15 +697,22 @@ pub fn run() -> anyhow::Result<()> {
     }
 }
 
-fn start_install_server(
-) -> anyhow::Result<(EspHttpServer<'static>, Receiver<StagedApp>, Arc<AtomicBool>)> {
-    let install_root = std::path::Path::new(storage::WORKSPACE_ROOT).join(".system/install");
+fn prepare_install_root() -> anyhow::Result<PathBuf> {
+    let install_root = Path::new(storage::WORKSPACE_ROOT).join(".system/install");
     if let Err(error) = std::fs::remove_dir_all(&install_root) {
         if error.kind() != std::io::ErrorKind::NotFound {
             return Err(error).context("clear stale App install staging");
         }
     }
     std::fs::create_dir_all(&install_root)?;
+    Ok(install_root)
+}
+
+fn start_install_server(
+    install_root: PathBuf,
+    tx: SyncSender<StagedApp>,
+    slot: Arc<AtomicBool>,
+) -> anyhow::Result<EspHttpServer<'static>> {
     let mut server = EspHttpServer::new(&ServerConfiguration {
         stack_size: 12 * 1024,
         ..Default::default()
@@ -631,8 +724,6 @@ fn start_install_server(
         Ok(())
     })?;
 
-    let (tx, rx) = mpsc::sync_channel(1);
-    let slot = Arc::new(AtomicBool::new(false));
     let handler_slot = slot.clone();
     server.fn_handler::<anyhow::Error, _>("/install", Method::Post, move |mut request| {
         if handler_slot
@@ -644,13 +735,7 @@ fn start_install_server(
                 .write_all(b"another install is pending")?;
             return Ok(());
         }
-        let job = install_root.join(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or_default()
-                .to_string(),
-        );
+        let job = install_job(&install_root);
         let result = (|| -> anyhow::Result<StagedApp> {
             let length = usize::try_from(
                 request
@@ -694,14 +779,88 @@ fn start_install_server(
         Ok(())
     })?;
     log::info!("App installer listening on http://<device-ip>/");
-    Ok((server, rx, slot))
+    Ok(server)
+}
+
+fn receive_uart_install(
+    transport: &dyn transport::LineTransport,
+    begin: &str,
+    install_root: &Path,
+    tx: &SyncSender<StagedApp>,
+    slot: &AtomicBool,
+) {
+    if slot
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        transport.write_line(&format!("{UART_INSTALL_ERROR}installer is busy"));
+        return;
+    }
+
+    let job = install_job(install_root);
+    let result = (|| -> anyhow::Result<()> {
+        let length = begin
+            .strip_prefix(UART_INSTALL_BEGIN)
+            .context("invalid upload header")?
+            .parse::<usize>()
+            .context("invalid package length")?;
+        anyhow::ensure!(length > 0, "package is empty");
+        anyhow::ensure!(length <= MAX_POCKETAPP_BYTES, "package exceeds 2 MiB");
+
+        let mut bytes = Vec::with_capacity(length);
+        transport.write_line(UART_INSTALL_READY);
+        while bytes.len() < length {
+            let frame = transport
+                .read_frame(UART_INSTALL_CHUNK, Duration::from_secs(10))
+                .map_err(anyhow::Error::msg)?;
+            let payload = frame
+                .strip_prefix(UART_INSTALL_CHUNK)
+                .context("invalid chunk header")?;
+            let chunk = BASE64_STANDARD
+                .decode(payload)
+                .context("invalid chunk encoding")?;
+            anyhow::ensure!(!chunk.is_empty(), "empty chunk");
+            anyhow::ensure!(
+                bytes.len() + chunk.len() <= length,
+                "package exceeds declared length"
+            );
+            bytes.extend_from_slice(&chunk);
+            transport.write_line(UART_INSTALL_ACK);
+        }
+
+        std::fs::create_dir_all(&job)?;
+        let staged = stage_pocketapp_bytes(&bytes, &job.join("release"))?;
+        tx.try_send(staged)
+            .map_err(|_| anyhow::anyhow!("installer is busy"))?;
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => transport.write_line(UART_INSTALL_UPLOADED),
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&job);
+            slot.store(false, Ordering::Release);
+            let message = format!("{error:#}").replace(['\r', '\n'], " ");
+            transport.write_line(&format!("{UART_INSTALL_ERROR}{message}"));
+        }
+    }
+}
+
+fn install_job(install_root: &Path) -> PathBuf {
+    install_root.join(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+            .to_string(),
+    )
 }
 
 fn with_psram_pthread_config<T>(
     stack_size: usize,
     action: impl FnOnce() -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
-    // Large persistent workers use PSRAM stacks. App Data passes this setting
+    // Large persistent workers use PSRAM stacks. App Data Action passes this setting
     // to its NET child; the platform default is restored after each spawn.
     let default = unsafe { esp_idf_svc::sys::esp_pthread_get_default_config() };
     let mut config = default;
@@ -758,6 +917,8 @@ fn root_projection(
     tools: &CoreToolHost,
     catalog: &InstalledAppIndex,
     install: Option<&InstallUi>,
+    uninstalling_app: Option<&str>,
+    uninstall_error: Option<&str>,
 ) -> Value {
     let schedule = tools.schedule_projection();
     let schedule_text = match schedule.next_in_seconds {
@@ -827,6 +988,8 @@ fn root_projection(
             "scheduleEveryMinutes":app.schedules.first().map(|schedule| schedule.every_minutes),
         })).collect::<Vec<_>>(),
         "install":install,
+        "uninstallingApp":uninstalling_app,
+        "uninstallError":uninstall_error,
         "settings":{
             "wifi":{
                 "connectedSsid":settings.wifi.connected_ssid,
