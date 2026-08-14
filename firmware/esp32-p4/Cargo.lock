@@ -1201,6 +1201,7 @@ name = "pocket-pi-p4"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "embedded-svc",
  "embuild",
  "esp-idf-svc",

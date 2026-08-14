@@ -28,7 +28,7 @@ body 16→18px；不会引入 runtime font loader 或第二套字体。
 | `PocketHeader` | 112px shell header、back/status affordance、App title、两行 metadata | navigation side effect、App data loading | Pi Agent、Exa、Robinhood |
 | `PageIntro` | eyebrow、page title、一行说明 | 页面 query、filter、scroll | Pi Agent installer、Exa |
 | `SectionHeading` | section title、optional detail、optional `VIEW ALL` affordance | list data、tap behavior | Pi Agent installer、Robinhood |
-| `ActionButton` | primary/neutral/danger/disabled visual state、统一 18px label | action execution、loading state machine | Pi Agent、Robinhood |
+| `ActionButton` | primary/neutral/danger/disabled visual state、统一 18px label | action execution、loading state machine | Pi Agent installer/Apps uninstall、Robinhood |
 | `statusBadge` recipe | 短 label 的 neutral/info/success/warning/danger surface + text classes | 长状态文案、业务判断 | Exa result、Robinhood account status |
 | `EmptyState` | optional icon、title、detail、regular/compact layout | empty 条件、retry action | Exa、Robinhood |
 | `MetricCard` | metric label、formatted value、optional positive/negative tone | 数值计算、currency formatting、time range | Robinhood value/cash/buying power |

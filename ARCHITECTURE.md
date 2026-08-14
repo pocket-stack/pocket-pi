@@ -27,9 +27,9 @@ The authoritative detailed design is
   FS/SQLite mounts. There is no separate persistent App Catalog service.
 - `tools/xtask` packages ordinary Apps without moving their product logic into
   the AgentOS runtime or host adapters.
-- HTTP is the current package ingress. It hands the complete `.pocketapp` to the
-  Installer, which alone validates, stores credentials, creates `current` and
-  activates runtime metadata. A future UART ingress must use the same boundary.
+- HTTP and UART are package ingress adapters. Both hand the complete `.pocketapp`
+  to the Installer, which alone validates, stores credentials, creates `current`
+  and activates runtime metadata.
 - `crates/pocket-pi-embedded` provides the bounded JavaScript Agent Loop bridge.
   In AgentOS hosts, the loop is loaded from the Pi Agent System App release into
   the same PocketJS Guest as its Root View.
@@ -59,6 +59,11 @@ LRU caches. Only the foreground View ticks or renders. On ESP32-P4, App QuickJS
 heaps and large worker stacks allocate explicitly from PSRAM without changing
 the platform-wide `malloc()` policy.
 
+Uninstall is the reverse of ordinary App activation inside the same
+`AppSupervisor`: it removes the App's Tool routes, schedules, cached View/Data
+Action Guests, native credentials/session state and complete App data root. It
+does not introduce a second lifecycle manager or affect the resident Pi Agent.
+
 Ordinary Apps receive capability-scoped data roots. Pi Agent alone owns the
 top-level `/workspace` and cross-App Tool Registry.
 
@@ -72,8 +77,11 @@ crates/pocket-pi-tools/     native workspace/shell/time/schedule Tools
 crates/pocket-pi-protocols/ provider codecs
 hosts/esp32-p4-sim/         macOS development simulator for ESP32-P4 contracts
 firmware/esp32-p4/          first supported target and reference implementation
-tools/uart_bridge/          Mac Codex/Claude streaming adapters
-tools/uart-model-bridge.py  UART framing and provisioning CLI
+tools/uart_io.py            shared raw UART read/write helpers
+tools/uart-provision.py     one-time wireless model provisioning
+tools/uart-install.py       App package ingress over UART
+tools/uart_bridge/          development-only Codex/Claude adapters
+tools/uart-model-bridge.py  optional development-only model bridge
 ```
 
 ## Build entry points

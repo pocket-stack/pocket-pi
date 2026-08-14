@@ -28,7 +28,7 @@ pub const POCKETJS_REVISION: &str = "e12cf12f82cc60b636368119d49a06eb9ed2a3d5";
 const VIEWPORT: (f32, f32) = (720.0, 1280.0);
 pub const MAX_POCKETAPP_BYTES: usize = 2 * 1024 * 1024;
 const VIEW_RUNTIME_LIMIT: usize = 3;
-const DATA_RUNTIME_LIMIT: usize = 3;
+const ACTION_RUNTIME_LIMIT: usize = 3;
 
 fn take_runtime<T>(runtimes: &mut Vec<(String, T)>, app_id: &str) -> Option<T> {
     runtimes
@@ -598,6 +598,13 @@ impl InstalledAppIndex {
         add_app_tools(&app, &mut index.tool_owner);
         index.apps.insert(app.descriptor.id.clone(), app);
     }
+
+    fn remove(&self, app_id: &str) -> Option<InstalledApp> {
+        let mut index = self.inner.write().expect("installed App index lock");
+        let app = index.apps.remove(app_id)?;
+        index.tool_owner.retain(|_, owner| owner != app_id);
+        Some(app)
+    }
 }
 
 fn validate_app_tools(app: &InstalledApp, owners: &BTreeMap<String, String>) -> Result<()> {
@@ -796,7 +803,7 @@ pub trait AppServiceHost: Send + Sync {
     ) -> Result<Value, String>;
 
     /// Execute one policy-checked PocketJS HTTP request. This is called only
-    /// from the native NET worker, never from the QuickJS/App Data thread.
+    /// from the native NET worker, never from the QuickJS Data Action thread.
     fn http(
         &self,
         _app_id: &str,
@@ -825,7 +832,11 @@ pub trait AppServiceHost: Send + Sync {
         }
     }
 
-    fn remove_credentials(&self, _ids: &[String]) -> std::result::Result<(), String> {
+    fn remove_app_state(
+        &self,
+        _app_id: &str,
+        _credential_ids: &[String],
+    ) -> std::result::Result<(), String> {
         Ok(())
     }
 }
@@ -858,8 +869,16 @@ struct DataActionRequest {
     response: Option<mpsc::Sender<ToolResult>>,
 }
 
+enum DataActionMessage {
+    Run(DataActionRequest),
+    RemoveApp {
+        app_id: String,
+        done: mpsc::Sender<Result<()>>,
+    },
+}
+
 #[derive(Clone)]
-struct DataAppConfig {
+struct DataActionConfig {
     app_id: String,
     source_path: PathBuf,
     database: SharedDb,
@@ -968,7 +987,7 @@ struct DataActionRuntime {
 }
 
 impl DataActionRuntime {
-    fn load(config: &DataAppConfig, services: Arc<dyn AppServiceHost>) -> Result<Self> {
+    fn load(config: &DataActionConfig, services: Arc<dyn AppServiceHost>) -> Result<Self> {
         let guest = new_app_guest().context("create App Data Action Guest")?;
         mount_shared_db(&guest, config.database.clone())?;
         let action_deadline = Rc::new(Cell::new(None));
@@ -1094,16 +1113,16 @@ fn parse_data_result(line: &str) -> Result<ToolResult> {
     })
 }
 
-struct AppDataRunner {
-    tx: mpsc::SyncSender<DataActionRequest>,
-    configs: Arc<Mutex<BTreeMap<String, DataAppConfig>>>,
+struct DataActionRunner {
+    tx: mpsc::SyncSender<DataActionMessage>,
+    configs: Arc<Mutex<BTreeMap<String, DataActionConfig>>>,
     next_run_id: AtomicU32,
     busy: Arc<AtomicBool>,
 }
 
-impl AppDataRunner {
-    fn start(configs: Vec<DataAppConfig>, services: Arc<dyn AppServiceHost>) -> Result<Self> {
-        let (tx, rx) = mpsc::sync_channel::<DataActionRequest>(DATA_ACTION_QUEUE);
+impl DataActionRunner {
+    fn start(configs: Vec<DataActionConfig>, services: Arc<dyn AppServiceHost>) -> Result<Self> {
+        let (tx, rx) = mpsc::sync_channel::<DataActionMessage>(DATA_ACTION_QUEUE);
         let configs = Arc::new(Mutex::new(
             configs
                 .into_iter()
@@ -1114,17 +1133,33 @@ impl AppDataRunner {
         let busy = Arc::new(AtomicBool::new(false));
         let worker_busy = busy.clone();
         std::thread::Builder::new()
-            .name("app-data".to_owned())
+            .name("data-actions".to_owned())
             .stack_size(DATA_ACTION_STACK_BYTES)
             .spawn(move || {
                 let mut runtimes = Vec::<(String, DataActionRuntime)>::new();
-                while let Ok(request) = rx.recv() {
+                while let Ok(message) = rx.recv() {
                     worker_busy.store(true, Ordering::Release);
+                    let request = match message {
+                        DataActionMessage::Run(request) => request,
+                        DataActionMessage::RemoveApp { app_id, done } => {
+                            let result = worker_configs
+                                .lock()
+                                .map_err(|_| anyhow!("App Data Action config lock was poisoned"))
+                                .map(|mut configs| {
+                                    configs.remove(&app_id);
+                                    runtimes
+                                        .retain(|(runtime_app_id, _)| runtime_app_id != &app_id);
+                                });
+                            let _ = done.send(result);
+                            worker_busy.store(false, Ordering::Release);
+                            continue;
+                        }
+                    };
                     let result = (|| -> Result<ToolResult> {
                         let runtime = match take_runtime(&mut runtimes, &request.app_id) {
                             Some(runtime) => runtime,
                             None => {
-                                make_runtime_room(&mut runtimes, DATA_RUNTIME_LIMIT, None);
+                                make_runtime_room(&mut runtimes, ACTION_RUNTIME_LIMIT, None);
                                 let config = worker_configs
                                     .lock()
                                     .map_err(|_| {
@@ -1192,7 +1227,7 @@ impl AppDataRunner {
     ) -> Result<u64> {
         let run_id = u64::from(self.next_run_id.fetch_add(1, Ordering::Relaxed));
         self.tx
-            .try_send(DataActionRequest {
+            .try_send(DataActionMessage::Run(DataActionRequest {
                 run_id,
                 app_id: app_id.to_owned(),
                 kind,
@@ -1200,7 +1235,7 @@ impl AppDataRunner {
                 args,
                 deadline,
                 response,
-            })
+            }))
             .map_err(|error| anyhow!("queue App Data Action: {error}"))?;
         Ok(run_id)
     }
@@ -1209,7 +1244,7 @@ impl AppDataRunner {
         self.busy.load(Ordering::Acquire)
     }
 
-    fn register(&self, config: DataAppConfig) -> Result<()> {
+    fn register(&self, config: DataActionConfig) -> Result<()> {
         let mut configs = self
             .configs
             .lock()
@@ -1228,9 +1263,20 @@ impl AppDataRunner {
             configs.remove(app_id);
         }
     }
+
+    fn remove_app(&self, app_id: &str) -> Result<()> {
+        let (done, response) = mpsc::channel();
+        self.tx
+            .send(DataActionMessage::RemoveApp {
+                app_id: app_id.to_owned(),
+                done,
+            })
+            .context("stop App Data Action runtime")?;
+        response.recv().context("App Data Action runner stopped")?
+    }
 }
 
-struct AppRuntime {
+struct ViewRuntime {
     guest: Guest,
     surface: UiSurface,
     _fs: Rc<RefCell<FsModule>>,
@@ -1243,7 +1289,7 @@ struct AppRuntime {
     ticks: Cell<u32>,
 }
 
-impl AppRuntime {
+impl ViewRuntime {
     fn load(
         app: &InstalledApp,
         fs_root: &Path,
@@ -1545,16 +1591,16 @@ pub struct AppSupervisor {
     workspace: PathBuf,
     catalog: InstalledAppIndex,
     services: Arc<dyn AppServiceHost>,
-    data_runner: AppDataRunner,
+    action_runner: DataActionRunner,
     databases: BTreeMap<String, SharedDb>,
     revisions: BTreeMap<String, AppRevision>,
     /// The Pi Agent System App is booted once and remains resident for the
     /// entire supervisor lifetime. Foreground navigation never replaces it.
-    system: AppRuntime,
+    system: ViewRuntime,
     agent: Option<GuestAgent>,
     agent_tools: Option<Arc<dyn ToolHost>>,
     // Least recently used first. Only the selected View advances.
-    runtimes: Vec<(String, AppRuntime)>,
+    runtimes: Vec<(String, ViewRuntime)>,
     active_app: Option<String>,
     schedules: AppScheduleStore,
 }
@@ -1585,7 +1631,7 @@ impl AppSupervisor {
             .filter_map(|app| {
                 let descriptor = &app.descriptor;
                 let source_path = app.release_dir.join("data-action.js");
-                source_path.is_file().then(|| DataAppConfig {
+                source_path.is_file().then(|| DataActionConfig {
                     app_id: descriptor.id.clone(),
                     source_path,
                     database: databases
@@ -1606,7 +1652,7 @@ impl AppSupervisor {
                 })
             })
             .collect();
-        let data_runner = AppDataRunner::start(data_configs, services.clone())?;
+        let action_runner = DataActionRunner::start(data_configs, services.clone())?;
         log::info!("loading Pi Agent System App");
         let system = load_runtime(&workspace, &catalog, &databases, &revisions, ROOT_APP_ID)?;
         log::info!("Pi Agent System App loaded");
@@ -1614,7 +1660,7 @@ impl AppSupervisor {
             workspace,
             catalog,
             services,
-            data_runner,
+            action_runner,
             databases,
             revisions,
             system,
@@ -1631,7 +1677,7 @@ impl AppSupervisor {
     }
 
     pub fn services_busy(&self) -> bool {
-        self.services.busy() || self.data_runner.busy()
+        self.services.busy() || self.action_runner.busy()
     }
 
     pub fn activate_new_app(
@@ -1668,9 +1714,9 @@ impl AppSupervisor {
             self.activate_new_app_inner(staging_release, descriptor, credentials, &app_root);
         if result.is_err() {
             if let Some(app_id) = app_root.file_name().and_then(|value| value.to_str()) {
-                self.data_runner.unregister(app_id);
+                self.action_runner.unregister(app_id);
+                let _ = self.services.remove_app_state(app_id, &credential_ids);
             }
-            let _ = self.services.remove_credentials(&credential_ids);
             let _ = std::fs::remove_dir_all(&app_root);
         }
         result
@@ -1697,7 +1743,7 @@ impl AppSupervisor {
             VIEW_RUNTIME_LIMIT,
             self.active_app.as_deref(),
         );
-        let runtime = AppRuntime::load(
+        let runtime = ViewRuntime::load(
             &app,
             &fs_root,
             &tmp_root,
@@ -1711,7 +1757,7 @@ impl AppSupervisor {
             .is_some_and(|capabilities| capabilities.iter().any(|value| value == "net.http"));
         let staged_data = staging_release.join("data-action.js");
         if staged_data.is_file() {
-            let candidate = DataAppConfig {
+            let candidate = DataActionConfig {
                 app_id: descriptor.id.clone(),
                 source_path: staged_data,
                 database: database.clone(),
@@ -1733,7 +1779,7 @@ impl AppSupervisor {
 
         let has_data_action = release_dir.join("data-action.js").is_file();
         if has_data_action {
-            self.data_runner.register(DataAppConfig {
+            self.action_runner.register(DataActionConfig {
                 app_id: descriptor.id.clone(),
                 source_path: release_dir.join("data-action.js"),
                 database: database.clone(),
@@ -1753,7 +1799,7 @@ impl AppSupervisor {
                 .map_err(anyhow::Error::msg)?;
         }
         if let Err(error) = atomic_write(&app_root.join("current"), descriptor.version.as_bytes()) {
-            self.data_runner.unregister(&descriptor.id);
+            self.action_runner.unregister(&descriptor.id);
             if let (Some(agent), Some(prior)) = (&self.agent, prior_tools) {
                 let _ = agent.replace_tools(&self.system.guest, prior);
             }
@@ -1767,6 +1813,59 @@ impl AppSupervisor {
         self.schedules
             .register(descriptor.id.clone(), schedule_path, schedules);
         Ok(descriptor)
+    }
+
+    pub fn uninstall_app(&mut self, app_id: &str) -> Result<AppDescriptor> {
+        anyhow::ensure!(app_id != ROOT_APP_ID, "cannot uninstall the System App");
+        anyhow::ensure!(!self.services_busy(), "App services are busy");
+        let app = self
+            .catalog
+            .app(app_id)
+            .ok_or_else(|| anyhow!("unknown App: {app_id}"))?;
+
+        let removed_tools = app
+            .descriptor
+            .tools
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect::<BTreeSet<_>>();
+        if let (Some(agent), Some(tools)) = (&self.agent, &self.agent_tools) {
+            let next = tools
+                .definitions()
+                .into_iter()
+                .filter(|tool| {
+                    tool.get("name")
+                        .and_then(Value::as_str)
+                        .is_none_or(|name| !removed_tools.contains(name))
+                })
+                .collect();
+            agent
+                .replace_tools(&self.system.guest, next)
+                .map_err(anyhow::Error::msg)?;
+        }
+
+        self.schedules.remove(app_id);
+        self.action_runner.remove_app(app_id)?;
+        if self.active_app.as_deref() == Some(app_id) {
+            self.active_app = None;
+        }
+        self.runtimes
+            .retain(|(runtime_app_id, _)| runtime_app_id != app_id);
+        self.databases.remove(app_id);
+        self.revisions.remove(app_id);
+
+        let credential_ids = descriptor_credential_ids(&app.descriptor)
+            .into_iter()
+            .collect::<Vec<_>>();
+        self.services
+            .remove_app_state(app_id, &credential_ids)
+            .map_err(anyhow::Error::msg)?;
+        std::fs::remove_dir_all(self.workspace.join("apps").join(app_id))
+            .with_context(|| format!("delete App {app_id}"))?;
+        self.catalog
+            .remove(app_id)
+            .expect("installed App remains indexed during uninstall");
+        Ok(app.descriptor)
     }
 
     pub fn active_id(&self) -> &str {
@@ -1908,7 +2007,7 @@ impl AppSupervisor {
             return;
         };
         let args = serde_json::from_str(args_json).unwrap_or(Value::Null);
-        match self.data_runner.enqueue(
+        match self.action_runner.enqueue(
             &app_id,
             DataActionKind::Tool,
             name,
@@ -1928,7 +2027,7 @@ impl AppSupervisor {
     /// native services never hide touch feedback.
     pub fn invoke_active_task(&mut self, name: &str, args: &Value) -> ToolResult {
         let app_id = self.active_id().to_owned();
-        match self.data_runner.enqueue(
+        match self.action_runner.enqueue(
             &app_id,
             DataActionKind::Task,
             name,
@@ -1950,7 +2049,7 @@ impl AppSupervisor {
         let mut results = Vec::new();
         while let Some(due) = self.schedules.claim_due() {
             let label = format!("{}.{}", due.app_id, due.task);
-            let result = match self.data_runner.enqueue(
+            let result = match self.action_runner.enqueue(
                 &due.app_id,
                 DataActionKind::Task,
                 &due.task,
@@ -1972,14 +2071,14 @@ impl AppSupervisor {
         results
     }
 
-    fn active(&self) -> &AppRuntime {
+    fn active(&self) -> &ViewRuntime {
         self.active_app
             .as_deref()
             .and_then(|app_id| self.cached_view(app_id))
             .unwrap_or(&self.system)
     }
 
-    fn cached_view(&self, app_id: &str) -> Option<&AppRuntime> {
+    fn cached_view(&self, app_id: &str) -> Option<&ViewRuntime> {
         self.runtimes
             .iter()
             .find(|(cached_id, _)| cached_id == app_id)
@@ -1993,7 +2092,7 @@ fn load_runtime(
     databases: &BTreeMap<String, SharedDb>,
     revisions: &BTreeMap<String, AppRevision>,
     app_id: &str,
-) -> Result<AppRuntime> {
+) -> Result<ViewRuntime> {
     let app = catalog
         .app(app_id)
         .ok_or_else(|| anyhow!("unknown App: {app_id}"))?;
@@ -2006,7 +2105,7 @@ fn load_runtime(
         .get(app_id)
         .cloned()
         .ok_or_else(|| anyhow!("App {app_id} has no revision owner"))?;
-    AppRuntime::load(&app, &fs_root, &tmp_root, db, revision)
+    ViewRuntime::load(&app, &fs_root, &tmp_root, db, revision)
         .with_context(|| format!("load App {app_id}"))
 }
 
@@ -2303,6 +2402,11 @@ impl AppScheduleStore {
         self.schedules.extend(schedules);
     }
 
+    fn remove(&mut self, app_id: &str) {
+        self.paths.remove(app_id);
+        self.schedules.retain(|schedule| schedule.app_id != app_id);
+    }
+
     fn finish(&mut self, due: &DueTask, ok: bool) {
         if let Some(item) = self
             .schedules
@@ -2381,6 +2485,69 @@ mod tests {
             _deadline: Instant,
         ) -> std::result::Result<Value, String> {
             Err("unexpected App service call".into())
+        }
+    }
+
+    #[derive(Default)]
+    struct TrackingServices {
+        credentials: Mutex<BTreeMap<String, String>>,
+        removed_apps: Mutex<Vec<String>>,
+    }
+
+    impl AppServiceHost for TrackingServices {
+        fn call(
+            &self,
+            _app_id: &str,
+            _service: &str,
+            _operation: &str,
+            _args: &Value,
+            _deadline: Instant,
+        ) -> std::result::Result<Value, String> {
+            Err("simulated service failure".into())
+        }
+
+        fn store_credentials(
+            &self,
+            credentials: &BTreeMap<String, String>,
+        ) -> std::result::Result<(), String> {
+            self.credentials.lock().unwrap().extend(credentials.clone());
+            Ok(())
+        }
+
+        fn remove_app_state(
+            &self,
+            app_id: &str,
+            credential_ids: &[String],
+        ) -> std::result::Result<(), String> {
+            let mut credentials = self.credentials.lock().unwrap();
+            for id in credential_ids {
+                credentials.remove(id);
+            }
+            self.removed_apps.lock().unwrap().push(app_id.to_owned());
+            Ok(())
+        }
+    }
+
+    struct RecordingBackend(Arc<Mutex<Vec<Value>>>);
+
+    impl ModelBackend for RecordingBackend {
+        fn complete(
+            &self,
+            request_json: &str,
+            _on_event: &mut dyn FnMut(pocket_pi_embedded::ModelStreamEvent),
+        ) -> std::result::Result<String, String> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(serde_json::from_str(request_json).unwrap());
+            Ok(json!({
+                "thinking":"",
+                "text":"done",
+                "toolCalls":[],
+                "usage":{},
+                "stopReason":"stop"
+            })
+            .to_string())
         }
     }
 
@@ -2625,6 +2792,130 @@ mod tests {
     }
 
     #[test]
+    fn uninstall_removes_app_owned_state_and_allows_reinstall() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("device");
+        let services = Arc::new(TrackingServices::default());
+        let catalog = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
+        let mut supervisor =
+            AppSupervisor::new(&workspace, catalog.clone(), services.clone()).unwrap();
+        let (tools, _requests) = RoutedToolHost::new(Arc::new(NoTools), catalog);
+        let model_requests = Arc::new(Mutex::new(Vec::new()));
+        supervisor
+            .boot_agent(
+                r#"{"model":"offline"}"#,
+                Arc::new(RecordingBackend(model_requests.clone())),
+                Arc::new(tools),
+            )
+            .unwrap();
+
+        let staging = temp.path().join("staged-robinhood");
+        stage_checked_in_app(&staging, "robinhood");
+        let credentials = BTreeMap::from([(
+            "robinhood.oauth-access-token".to_owned(),
+            "secret".to_owned(),
+        )]);
+        supervisor
+            .activate_new_app(&staging, credentials.clone())
+            .unwrap();
+        supervisor.open("robinhood").unwrap();
+        std::fs::write(
+            workspace.join("apps/robinhood/data/user-state"),
+            "delete me",
+        )
+        .unwrap();
+
+        let (response, result) = mpsc::channel();
+        supervisor
+            .action_runner
+            .enqueue(
+                "robinhood",
+                DataActionKind::Task,
+                "refreshPortfolio",
+                Value::Null,
+                new_action_deadline(),
+                Some(response),
+            )
+            .unwrap();
+        let _ = result.recv_timeout(Duration::from_secs(2)).unwrap();
+        while supervisor.services_busy() {
+            std::thread::yield_now();
+        }
+
+        assert_eq!(supervisor.schedules.schedules.len(), 1);
+        assert!(supervisor.cached_view("robinhood").is_some());
+        assert_eq!(*services.credentials.lock().unwrap(), credentials);
+        assert!(supervisor.uninstall_app(ROOT_APP_ID).is_err());
+
+        supervisor.uninstall_app("robinhood").unwrap();
+
+        assert_eq!(supervisor.active_id(), ROOT_APP_ID);
+        assert!(supervisor.catalog().descriptor("robinhood").is_none());
+        assert!(supervisor.cached_view("robinhood").is_none());
+        assert!(!supervisor.databases.contains_key("robinhood"));
+        assert!(!supervisor.revisions.contains_key("robinhood"));
+        assert!(supervisor.schedules.schedules.is_empty());
+        assert!(!workspace.join("apps/robinhood").exists());
+        assert!(services.credentials.lock().unwrap().is_empty());
+        assert_eq!(
+            *services.removed_apps.lock().unwrap(),
+            vec!["robinhood".to_owned()]
+        );
+
+        let (response, result) = mpsc::channel();
+        supervisor
+            .action_runner
+            .enqueue(
+                "robinhood",
+                DataActionKind::Task,
+                "refreshPortfolio",
+                Value::Null,
+                new_action_deadline(),
+                Some(response),
+            )
+            .unwrap();
+        assert!(
+            result
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .is_error
+        );
+
+        supervisor.prompt_agent("check available tools").unwrap();
+        let mut done = false;
+        for _ in 0..200 {
+            done |= supervisor
+                .frame()
+                .unwrap()
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Done));
+            if done {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(done);
+        let requests = model_requests.lock().unwrap();
+        assert!(requests[0]["context"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|tool| !tool["name"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with("portfolio.")));
+        drop(requests);
+
+        let restarted = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
+        assert!(restarted.descriptor("robinhood").is_none());
+
+        let staging = temp.path().join("reinstall-robinhood");
+        stage_checked_in_app(&staging, "robinhood");
+        supervisor.activate_new_app(&staging, credentials).unwrap();
+        assert!(supervisor.catalog().descriptor("robinhood").is_some());
+    }
+
+    #[test]
     fn app_revisions_coalesce_at_the_foreground_frame_boundary() {
         let temp = tempfile::tempdir().unwrap();
         install_checked_in_app(temp.path(), "exa");
@@ -2787,7 +3078,7 @@ globalThis.PocketPiData = {
                     temp.path().join(app_id),
                 ))));
                 databases.insert(app_id, database.clone());
-                DataAppConfig {
+                DataActionConfig {
                     app_id: app_id.into(),
                     source_path: source.clone(),
                     database,
@@ -2796,7 +3087,7 @@ globalThis.PocketPiData = {
                 }
             })
             .collect();
-        let runner = AppDataRunner::start(configs, Arc::new(NoServices)).unwrap();
+        let runner = DataActionRunner::start(configs, Arc::new(NoServices)).unwrap();
 
         for app_id in ["one", "two", "three", "one", "four", "two"] {
             let (response, rx) = mpsc::channel();

@@ -92,47 +92,65 @@ espflash flash --baud 921600 --port "$DEVICE_PORT" \
   firmware/esp32-p4/target/riscv32imafc-esp-espidf/release/pocket-pi-p4
 ```
 
-For development, the simplest model path is UART to a logged-in Mac Codex:
+Provision the board once with a direct wireless model backend. DeepSeek is the
+default provider and uses `deepseek-v4-flash` unless `--model` is supplied:
 
 ```sh
-python3 tools/uart-model-bridge.py "$DEVICE_PORT" \
-  --backend uart --provider codex
+python3 tools/uart-provision.py "$DEVICE_PORT" \
+  --provider deepseek --provision-wifi
 ```
 
-Claude Code can be used instead:
+The command reads the DeepSeek key from macOS Keychain when available, otherwise
+it prompts without echoing the value. It stores model provider, model, thinking
+level and API key in native NVS. Wi-Fi credentials use the existing Wi-Fi NVS
+store and can later be changed from Settings. Subsequent boots load both stores
+directly and do not wait for a Mac or UART bridge.
+
+Other direct providers are selected explicitly:
 
 ```sh
-python3 tools/uart-model-bridge.py "$DEVICE_PORT" \
-  --backend uart --provider claude-code
+python3 tools/uart-provision.py "$DEVICE_PORT" \
+  --provider openai --model gpt-5-mini
 ```
 
-The bridge can also send a repeatable boot prompt:
+For bring-up on an unprovisioned development board only, the optional model
+bridge can route requests to a logged-in Mac Codex or Claude Code. It is not
+part of standalone startup and is never stored as the device backend:
 
 ```sh
-python3 tools/uart-model-bridge.py "$DEVICE_PORT" \
-  --backend uart --provider codex \
+python3 tools/uart-model-bridge.py "$DEVICE_PORT" --provider codex \
   --prompt 'Use write, read, schedule.set and schedule.list.'
 ```
 
-For standalone use, provision Wi-Fi and a direct model provider over UART:
+Use `espflash monitor` when only serial logs are needed:
 
 ```sh
-python3 tools/uart-model-bridge.py "$DEVICE_PORT" \
-  --backend wireless --provider openai --model gpt-5-mini --provision-wifi
+espflash monitor --port "$DEVICE_PORT"
 ```
 
-The provisioning command asks for the Wi-Fi credentials and API key
-interactively. Wi-Fi can subsequently be changed from the device Settings UI
-without reflashing. Credentials are kept out of Agent workspace files and
-PocketJS UI state.
+To install over the local network, open `http://<device-ip>/` from a computer or
+phone and upload the `.pocketapp`. When local peer access is unavailable, upload
+the same artifact over USB UART:
 
-To install an ordinary App, open `http://<device-ip>/` from a computer or phone,
-upload its `.pocketapp`, then confirm on the Pocket Pi screen. Every credential
-declared by the App must be present in the package. Installer removes those values
-from the package and stores them in native NVS; they are not exposed through the
-App filesystem or Agent workspace. HTTP is the current upload ingress; activation
-always goes through the same Installer. A future UART ingress may deliver the same
-artifact, but may not write App storage, credentials or runtime state directly.
+```sh
+python3 tools/uart-install.py "$DEVICE_PORT" \
+  target/pocketapps/exa.pocketapp
+```
+
+Both transports stop at the same review screen; installation starts only after
+confirmation on Pocket Pi. Every credential declared by the App must be present
+in the package. Installer removes those values from the package and stores them in
+native NVS; they are not exposed through the App filesystem or Agent workspace.
+Neither HTTP nor UART writes App storage, credentials or runtime state directly.
+UART upload does not reset the board or change its model configuration.
+The UART CLIs leave DTR/RTS inactive before closing the port so the USB serial
+bridge does not reset a running Pocket Pi.
+
+To remove an ordinary App, open **Apps**, tap **UNINSTALL APP**, then tap the
+`X` on that App's row. Uninstall removes the App release, SQLite/data files,
+schedules, credentials, native session state and cached View/Data Action
+Runtimes. It does not retain App data or provide rollback. The resident Pi Agent
+System App cannot be uninstalled.
 
 ### 2. Develop with the ESP32-P4 simulator on macOS
 
@@ -177,12 +195,13 @@ Backends belong to their host composition, not to the Agent core:
 | Host | Supported backends |
 |---|---|
 | ESP32 simulator | local Codex, OpenAI, OpenRouter, Anthropic, DeepSeek V4 |
-| Physical ESP32-P4 | UART to Mac Codex or Claude Code; wireless OpenAI, OpenRouter, Anthropic or DeepSeek V4 |
+| Physical ESP32-P4 | standalone wireless OpenAI, OpenRouter, Anthropic or DeepSeek V4 |
 
-`UartBackend` and `WirelessBackend` implement the same model-completion
-contract. Wireless providers may emit progress events internally; the current
-UART bridge coalesces provider chunks into one final framed result before it
-reaches the device. Provider request/streaming codecs live in
+The optional development-only `UartBackend` and the standalone
+`WirelessBackend` implement the same model-completion contract. Wireless
+providers may emit progress events internally; the development bridge coalesces
+provider chunks into one final framed result before it reaches an unprovisioned
+device. Provider request/streaming codecs live in
 `pocket-pi-protocols`; serial framing, desktop CLIs and ESP-IDF HTTPS stay in
 their platform layers.
 
@@ -216,6 +235,7 @@ includes:
 - Chat with provider-dependent incremental replies, recent-turn history and a
   full-message reader;
 - Files with workspace metadata, file viewing and scrolling;
+- Apps with install discovery and destructive uninstall mode;
 - Settings with Wi-Fi scanning, selection and password entry;
 - touch keyboard and next-schedule status.
 
@@ -233,8 +253,11 @@ crates/pocket-pi-protocols/   model request, response and streaming codecs
 crates/pocket-pi-agentos/     App Supervisor, System App lifecycle and App contracts
 hosts/esp32-p4-sim/           macOS development simulator for ESP32-P4 contracts
 firmware/esp32-p4/            first supported device and reference implementation
-tools/uart_bridge/            Mac Codex and Claude Code streaming adapters
-tools/uart-model-bridge.py    UART framing and provisioning CLI
+tools/uart_io.py              shared raw UART read/write helpers
+tools/uart-provision.py       one-time wireless model provisioning
+tools/uart-install.py         App package ingress over UART
+tools/uart_bridge/            development-only Codex/Claude adapters
+tools/uart-model-bridge.py    optional development-only model bridge
 ```
 
 Dependencies point inward: hosts depend on shared runtimes, tools, UI and
@@ -247,16 +270,25 @@ and [docs/esp32-p4-port.md](docs/esp32-p4-port.md) for board-specific details.
 
 ## Current validation
 
-On **2026-08-14**, the workspace completed 34 Rust tests and 3 App text behavior
+On **2026-08-14**, the workspace completed 35 Rust tests and 3 App text behavior
 tests with no failures, passed workspace Clippy with warnings denied, and built
 the ESP32-P4 release firmware. A simulator LAN smoke uploaded the generated Exa
 package through `POST /install` and received HTTP 202; the core install test
-then proves activation, Tool routing, SQLite ownership and restart recovery for
-a previously absent App.
+proves activation, Tool routing, SQLite ownership and restart recovery for a
+previously absent App. The uninstall lifecycle test proves complete App-owned
+state removal, live Tool removal, restart absence and reinstall. A physical
+ESP32-P4 then accepted the same Exa package over UART, stopped at the shared
+review screen, installed after touch confirmation, uninstalled it from Apps,
+kept it absent across restart, and accepted a clean UART reinstall.
+The split UART tools were then verified on the same board: one-time DeepSeek
+provisioning received `PPI-CONFIG-STORED`; a bridge-free reset logged
+`loaded wireless model configuration from NVS`, restored Wi-Fi/DHCP on
+the saved network, and reached an idle Pi Agent; the independent App uploader
+transferred Exa to the shared review screen without resetting the board.
 
-Fresh physical flash/boot, phone upload, Wi-Fi/DHCP, provider calls and
-unattended memory pressure remain separate evidence tiers. Simulator and
-cross-build success do not substitute for fresh physical-board acceptance.
+Phone upload, fresh provider calls and unattended memory pressure remain
+separate evidence tiers. Simulator and cross-build success do not substitute
+for fresh physical-board acceptance.
 
 ## Development checks
 

@@ -409,18 +409,24 @@ impl AppServiceHost for EspAppServices {
         Ok(())
     }
 
-    fn remove_credentials(&self, ids: &[String]) -> Result<(), String> {
+    fn remove_app_state(&self, app_id: &str, credential_ids: &[String]) -> Result<(), String> {
         let mut stored = self
             .inner
             .credentials
             .lock()
             .map_err(|_| "credential store lock was poisoned".to_owned())?;
-        for id in ids {
+        for id in credential_ids {
             stored.remove(id);
         }
         if let Some(partition) = &self.inner.nvs {
             persist_credentials(partition.clone(), &stored)?;
         }
+        drop(stored);
+        self.inner
+            .mcp
+            .lock()
+            .map_err(|_| "MCP state lock was poisoned".to_owned())?
+            .retain(|(owner, _), _| owner != app_id);
         Ok(())
     }
 }

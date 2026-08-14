@@ -23,6 +23,7 @@ opt-level = "z"
 
 [dependencies]
 anyhow = "1"
+base64 = "0.23.1"
 log = "0.4"
 serde_json = "1"
 pocket-pi-agentos = { path = "../../crates/pocket-pi-agentos" }

@@ -22,7 +22,7 @@ use device_state::{SettingsProjection, WifiNetworkProjection};
 const BOARD_NAME: &str = "Waveshare ESP32-P4-WIFI6-Touch-LCD-5";
 const PANEL_WIDTH: u32 = 720;
 const PANEL_HEIGHT: u32 = 1280;
-const WIFI_NVS_NAMESPACE: &str = "pocket_pi";
+const DEVICE_NVS_NAMESPACE: &str = "pocket_pi";
 const WIFI_NVS_SSID_KEY: &str = "wifi_ssid";
 const WIFI_NVS_PASSWORD_KEY: &str = "wifi_pass";
 const AGENTOS_LAUNCHER_STACK_BYTES: u32 = 4 * 1024;
@@ -144,12 +144,12 @@ impl PlatformTools for EspPlatform {
 }
 
 fn init_wifi(
+    nvs: EspDefaultNvsPartition,
     provisioned_ssid: Option<&str>,
     provisioned_password: Option<&str>,
 ) -> anyhow::Result<WifiConnection> {
     let peripherals = Peripherals::take()?;
     let system_loop = EspSystemEventLoop::take()?;
-    let nvs = EspDefaultNvsPartition::take()?;
     let mut driver = WifiDriver::new(peripherals.modem, system_loop, Some(nvs.clone()))?;
     driver.set_configuration(&Configuration::Client(ClientConfiguration::default()))?;
     driver.start()?;
@@ -274,7 +274,7 @@ impl WifiConnection {
                 if pending.persist_on_success {
                     let result = (|| {
                         let storage =
-                            EspDefaultNvs::new(self.nvs.clone(), WIFI_NVS_NAMESPACE, true)?;
+                            EspDefaultNvs::new(self.nvs.clone(), DEVICE_NVS_NAMESPACE, true)?;
                         storage.set_str(WIFI_NVS_SSID_KEY, &pending.ssid)?;
                         storage.set_str(WIFI_NVS_PASSWORD_KEY, &pending.password)?;
                         Ok::<(), anyhow::Error>(())
@@ -313,7 +313,7 @@ impl WifiConnection {
         if self.driver.is_connected()? {
             self.driver.disconnect()?;
         }
-        let storage = EspDefaultNvs::new(self.nvs.clone(), WIFI_NVS_NAMESPACE, true)?;
+        let storage = EspDefaultNvs::new(self.nvs.clone(), DEVICE_NVS_NAMESPACE, true)?;
         storage.remove(WIFI_NVS_SSID_KEY)?;
         storage.remove(WIFI_NVS_PASSWORD_KEY)?;
         Ok(())
@@ -353,7 +353,7 @@ fn load_wifi_credentials(
     provisioned_ssid: Option<&str>,
     provisioned_password: Option<&str>,
 ) -> anyhow::Result<(String, String)> {
-    let storage = EspDefaultNvs::new(partition, WIFI_NVS_NAMESPACE, true)?;
+    let storage = EspDefaultNvs::new(partition, DEVICE_NVS_NAMESPACE, true)?;
     if let (Some(ssid), Some(password)) = (provisioned_ssid, provisioned_password) {
         validate_wifi_ssid(ssid)?;
         validate_wifi_password(password)?;

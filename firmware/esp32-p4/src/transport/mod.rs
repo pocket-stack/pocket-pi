@@ -3,7 +3,7 @@ mod uart;
 
 use std::time::Duration;
 
-pub use provisioning::{request_runtime_config, RuntimeConfig};
+pub use provisioning::{load_runtime_config, persist_runtime_config, request_runtime_config};
 pub use uart::UartLineTransport;
 
 pub trait LineTransport: Send + Sync {

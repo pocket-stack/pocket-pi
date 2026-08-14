@@ -1,20 +1,15 @@
 #!/usr/bin/env python3
-"""Bridge ESP32 Pocket Pi model decisions to a logged-in Mac CLI."""
+"""Development-only bridge from Pocket Pi model requests to Codex or Claude Code."""
 
 from __future__ import annotations
 
 import argparse
-import getpass
 import json
-import os
-import select
 import signal
-import subprocess
-import termios
 import time
-import tty
 
 from uart_bridge import create_backend
+from uart_io import close_port, open_port, read_lines, reset_device, write_line
 
 CONFIG_REQUEST = "PPI-CONFIG-REQUEST"
 CONFIG_RESPONSE = "PPI-CONFIG:"
@@ -22,39 +17,6 @@ READY = "PPI-RPC-READY"
 WAITING = "PPI-RPC-WAITING"
 REQUEST = "PPI-RPC-REQUEST:"
 STREAM = "PPI-RPC-STREAM:"
-DEEPSEEK_KEYCHAIN_SERVICE = "Pocket Pi Credentials"
-DEEPSEEK_KEYCHAIN_ACCOUNT = "deepseek-api-key"
-
-
-def keychain_secret(service: str, account: str) -> str | None:
-    """Read one generic-password value without ever printing it."""
-    try:
-        result = subprocess.run(
-            ["security", "find-generic-password", "-s", service, "-a", account, "-w"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except FileNotFoundError:
-        return None
-    value = result.stdout.strip()
-    return value if result.returncode == 0 and value else None
-
-
-def deepseek_api_key() -> str | None:
-    """Load the user-provided DeepSeek key from macOS Keychain."""
-    return keychain_secret(DEEPSEEK_KEYCHAIN_SERVICE, DEEPSEEK_KEYCHAIN_ACCOUNT)
-
-
-def write_line(fd: int, line: str) -> None:
-    payload = memoryview(f"{line}\r\n".encode())
-    while payload:
-        try:
-            count = os.write(fd, payload)
-        except BlockingIOError:
-            select.select([], [fd], [], 0.5)
-            continue
-        payload = payload[count:]
 
 
 def log_tool_failure(request: dict[str, object]) -> None:
@@ -81,25 +43,12 @@ def log_tool_failure(request: dict[str, object]) -> None:
 
 
 def config(args: argparse.Namespace) -> dict[str, object]:
-    provider = args.provider or ("codex" if args.backend == "uart" else "openai")
     value: dict[str, object] = {
-        "modelBackend": args.backend,
-        "modelProvider": provider,
+        "modelBackend": "uart",
+        "modelProvider": args.provider,
         "unixTimeSeconds": int(time.time()),
+        "thinkingLevel": args.thinking_level,
     }
-    if args.model:
-        value["model"] = args.model
-    value["thinkingLevel"] = args.thinking_level
-    if args.provision_wifi:
-        value["wifiSsid"] = input("Wi-Fi SSID: ").strip()
-        value["wifiPassword"] = getpass.getpass("Wi-Fi password: ")
-    if args.backend == "wireless":
-        key = deepseek_api_key() if provider == "deepseek" else None
-        if key:
-            value["modelApiKey"] = key
-            print("DeepSeek: reusing Keychain API key (RAM only on device)", flush=True)
-        else:
-            value["modelApiKey"] = getpass.getpass(f"{provider} API key: ")
     if args.prompt:
         value["initialPrompt"] = args.prompt
         if args.prompt_delay_seconds:
@@ -110,12 +59,7 @@ def config(args: argparse.Namespace) -> dict[str, object]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("port")
-    parser.add_argument("--backend", choices=("uart", "wireless"), default="uart")
-    parser.add_argument(
-        "--provider",
-        choices=("codex", "claude-code", "openai", "openrouter", "anthropic", "deepseek"),
-    )
-    parser.add_argument("--model")
+    parser.add_argument("--provider", choices=("codex", "claude-code"), default="codex")
     parser.add_argument("--thinking-level", choices=("high", "xhigh"), default="high")
     parser.add_argument("--prompt", help="submit one prompt after the board agent is ready")
     parser.add_argument(
@@ -126,48 +70,24 @@ def main() -> int:
         metavar="0..120",
         help="delay the repeatable boot prompt while device services settle",
     )
-    parser.add_argument("--provision-wifi", action="store_true")
     args = parser.parse_args()
-    provider = args.provider or ("codex" if args.backend == "uart" else "openai")
-    if args.backend == "uart" and provider not in ("codex", "claude-code"):
-        parser.error("UART provider must be codex or claude-code")
-    if args.backend == "wireless" and provider not in ("openai", "openrouter", "anthropic", "deepseek"):
-        parser.error("wireless provider must be openai, openrouter, anthropic or deepseek")
     runtime_config = config(args)
-    model_backend = create_backend(provider) if args.backend == "uart" else None
+    model_backend = create_backend(args.provider)
 
-    try:
-        subprocess.run(
-            ["espflash", "reset", "--port", args.port, "--non-interactive"],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except FileNotFoundError:
-        pass
+    reset_device(args.port)
+    fd = open_port(args.port)
 
-    fd = os.open(args.port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
-    tty.setraw(fd)
-    attributes = termios.tcgetattr(fd)
-    attributes[4] = termios.B115200
-    attributes[5] = termios.B115200
-    termios.tcsetattr(fd, termios.TCSANOW, attributes)
     def stop(_signum: int, _frame: object) -> None:
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
     pending = b""
-    print(f"Pocket Pi UART bridge ready: {provider} on {args.port}", flush=True)
+    print(f"Pocket Pi development model bridge ready: {args.provider} on {args.port}", flush=True)
     try:
         while True:
-            readable, _, _ = select.select([fd], [], [], 0.2)
-            if not readable:
-                continue
-            pending += os.read(fd, 4096)
-            while b"\n" in pending:
-                raw, pending = pending.split(b"\n", 1)
-                line = raw.decode(errors="replace").strip()
+            lines, pending = read_lines(fd, pending, 0.2)
+            for line in lines:
                 if line.endswith(CONFIG_REQUEST):
                     frame = CONFIG_RESPONSE + json.dumps(runtime_config, separators=(",", ":"))
                     for _ in range(3):
@@ -178,8 +98,6 @@ def main() -> int:
                     write_line(fd, READY)
                 elif line.startswith(REQUEST):
                     try:
-                        if model_backend is None:
-                            raise RuntimeError("wireless mode does not provide a UART model backend")
                         stream_stats = [0, 0]
                         request_payload = json.loads(line[len(REQUEST) :])
                         log_tool_failure(request_payload)
@@ -223,9 +141,8 @@ def main() -> int:
     except (KeyboardInterrupt, OSError):
         return 0
     finally:
-        if model_backend is not None:
-            model_backend.close()
-        os.close(fd)
+        model_backend.close()
+        close_port(fd)
 
 
 if __name__ == "__main__":

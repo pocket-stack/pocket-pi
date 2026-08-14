@@ -34,6 +34,8 @@ type Projection = {
   schedule?: { name?: string | null; prompt?: string; next?: string; everyMinutes?: number | null };
   apps?: InstalledApp[];
   install?: InstallProjection | null;
+  uninstallingApp?: string | null;
+  uninstallError?: string | null;
   settings?: {
     wifi?: {
       connectedSsid?: string | null;
@@ -68,6 +70,7 @@ const [projection, setProjection] = createSignal<Projection>({
   messages: [{ role: "assistant", text: "BOOTING PI AGENT..." }],
 });
 const [installDetail, setInstallDetail] = createSignal<InstallProjection | null>(null);
+const [uninstallMode, setUninstallMode] = createSignal(false);
 const [screen, setScreen] = createSignal<Screen>("chat");
 const [activeTab, setActiveTab] = createSignal<Tab>("chat");
 const [chatScroll, setChatScroll] = createSignal(0);
@@ -84,7 +87,6 @@ const [uppercase, setUppercase] = createSignal(false);
 const [keyboardPurpose, setKeyboardPurpose] = createSignal<KeyboardPurpose>({ type: "prompt" });
 const [pressedKey, setPressedKey] = createSignal<string | null>(null);
 const [wifiOffset, setWifiOffset] = createSignal(0);
-const fileCache = new Map<string, FileEntry[]>();
 
 const letterRows = ["qwertyuiop", "asdfghjkl", "zxcvbnm"];
 const numberRows = ["1234567890", "-/:;()$&@", ".,?!'\"+"];
@@ -126,21 +128,13 @@ function moveViewerPage(direction: -1 | 1) {
   setViewer({ ...current, pageIndex: nextIndex, page: filePage(current.text, start) });
 }
 
-function refreshFiles(path = filePath(), force = false) {
-  const cached = fileCache.get(path);
-  if (!force && cached) {
-    setFiles(cached);
-    setFileError("");
-    setFileOffset((value) => Math.min(value, Math.max(0, cached.length - 8)));
-    return;
-  }
+function refreshFiles(path = filePath()) {
   try {
     const next = (readdirSync(path, { withFileTypes: true }) as DirEntry[]).map((entry) => ({
       name: entry.name,
       kind: entry.isDirectory() ? "dir" as const : "file" as const,
       size: entry.size,
     }));
-    fileCache.set(path, next);
     setFiles(next);
     setFileError("");
     setFileOffset((value) => Math.min(value, Math.max(0, next.length - 8)));
@@ -285,10 +279,16 @@ function FilesScreen() {
 
 function AppsScreen() {
   const apps = () => projection().apps ?? [];
+  const uninstalling = () => projection().uninstallingApp;
+  const status = () => projection().uninstallError
+    ? "UNINSTALL FAILED  ·  " + projection().uninstallError
+    : uninstalling()
+      ? "UNINSTALLING " + uninstalling()!.toUpperCase() + "..."
+      : "APP DATA STAYS ISOLATED.  PI AGENT CAN USE EACH APP'S TOOLS.";
   return (
     <View class="flex-col w-full h-full bg-slate-50">
       <Header title="APPS" />
-      <View class="h-[1060] px-6 pt-7 flex-col gap-4">
+      <View class="relative h-[1060] px-6 pt-7 flex-col gap-4">
         <Text class="text-base text-slate-500 font-bold">{String(apps().length) + " INSTALLED APPS"}</Text>
         <Show when={apps().length > 0} fallback={
           <View class="h-[214] px-7 items-center justify-center bg-slate-100"><Text class="text-lg text-slate-500 font-bold">NO OPTIONAL APPS INSTALLED</Text></View>
@@ -297,14 +297,23 @@ function AppsScreen() {
             <View class="w-[672] h-[150] px-6 flex-row items-center justify-between bg-white">
               <View class="flex-row items-center gap-5">
                 <View class="w-[68] h-[68] items-center justify-center bg-orange-100"><Text class="text-xl text-orange-700 font-bold">{app.title.slice(0, 1).toUpperCase()}</Text></View>
-                <View class="w-[500] flex-col gap-2"><Text class="text-xl text-slate-900 font-bold">{app.title}</Text><Text class="text-lg text-slate-600">{app.description}</Text><Show when={app.scheduleEveryMinutes}><Text class="text-base text-slate-500">{"UPDATES EVERY " + String(app.scheduleEveryMinutes) + " MINUTES"}</Text></Show></View>
+                <View class="w-[448] flex-col gap-2"><Text class="text-xl text-slate-900 font-bold">{app.title}</Text><Text class="text-lg text-slate-600">{app.description}</Text><Show when={app.scheduleEveryMinutes}><Text class="text-base text-slate-500">{"UPDATES EVERY " + String(app.scheduleEveryMinutes) + " MINUTES"}</Text></Show></View>
               </View>
-              <Text class="text-2xl text-orange-600">›</Text>
+              <Show when={uninstallMode()} fallback={<Text class="text-2xl text-orange-600">›</Text>}>
+                <View class="w-[68] h-[68]"><ActionButton label={uninstalling() === app.id ? "..." : "X"} disabled={Boolean(uninstalling())} tone="danger" /></View>
+              </Show>
             </View>
           )}</For>
         </Show>
-        <View class="mt-4 h-[112] px-6 justify-center bg-slate-100">
-          <Text class="text-base text-slate-600">{"APP DATA STAYS ISOLATED.\nPI AGENT CAN USE EACH APP'S TOOLS."}</Text>
+        <View class="absolute left-[24] top-[820] w-[672] h-[112] px-6 bg-slate-100">
+          <StatusBar text={status()} tone={projection().uninstallError ? "danger" : "neutral"} />
+        </View>
+        <View class="absolute left-[24] top-[948] w-[672] h-[80]">
+          <ActionButton
+            label={uninstallMode() ? "DONE" : "UNINSTALL APP"}
+            disabled={(!uninstallMode() && apps().length === 0) || Boolean(uninstalling())}
+            tone={uninstallMode() ? "neutral" : "danger"}
+          />
         </View>
       </View>
       <BottomBar />
@@ -522,9 +531,10 @@ function Root() {
 
 function openTab(tab: Tab) {
   batch(() => {
+    if (tab !== "apps") setUninstallMode(false);
     setActiveTab(tab);
     setScreen(tab);
-    if (tab === "files") refreshFiles();
+    if (tab === "files") refreshFiles(filePath());
   });
 }
 
@@ -600,7 +610,7 @@ function handleKeyboardTap(x: number, y: number): string {
 }
 
 mount(() => <Root />);
-queueMicrotask(() => refreshFiles("", true));
+queueMicrotask(() => refreshFiles(""));
 
 (globalThis as any).PocketPiApp = {
   tick() {
@@ -630,6 +640,7 @@ queueMicrotask(() => refreshFiles("", true));
       }
       return "";
     }
+    if (projection().uninstallingApp) return "";
     if (screen() === "keyboard") return handleKeyboardTap(x, y);
     if (screen() === "viewer") {
       const current = viewer();
@@ -713,8 +724,18 @@ queueMicrotask(() => refreshFiles("", true));
       return "";
     }
     if (screen() === "apps") {
-      const app = (projection().apps ?? [])[Math.floor((y - 162) / 166)];
-      if (y >= 162 && app) return JSON.stringify({ type: "navigate", app: app.id });
+      const apps = projection().apps ?? [];
+      if (y >= 1060 && y < 1140 && (uninstallMode() || apps.length > 0) && !projection().uninstallingApp) {
+        setUninstallMode(!uninstallMode());
+        return "";
+      }
+      const app = apps[Math.floor((y - 162) / 166)];
+      if (y >= 162 && app && !projection().uninstallingApp) {
+        if (uninstallMode()) {
+          return x >= 604 && x < 696 ? JSON.stringify({ type: "uninstallApp", app: app.id }) : "";
+        }
+        return JSON.stringify({ type: "navigate", app: app.id });
+      }
       return "";
     }
     if (screen() === "settings") {

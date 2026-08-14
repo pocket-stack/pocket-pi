@@ -349,6 +349,8 @@ struct Product {
     pending_install: Option<StagedApp>,
     install_ui: Option<InstallUi>,
     install_requested: bool,
+    pending_uninstall: Option<String>,
+    uninstall_error: Option<String>,
 }
 
 struct InstallUi {
@@ -405,6 +407,8 @@ impl Product {
             pending_install: None,
             install_ui: None,
             install_requested: false,
+            pending_uninstall: None,
+            uninstall_error: None,
         })
     }
 
@@ -447,6 +451,17 @@ impl Product {
             Some("invokeTask") => {
                 if let Some(task) = action.get("task").and_then(Value::as_str) {
                     self.pending_ui_task = Some(task.to_owned());
+                }
+            }
+            Some("uninstallApp") => {
+                if let Some(app_id) = action.get("app").and_then(Value::as_str) {
+                    if self.busy || self.supervisor.services_busy() {
+                        self.uninstall_error = Some("APP SERVICES ARE BUSY".into());
+                    } else {
+                        self.pending_uninstall = Some(app_id.to_owned());
+                        self.uninstall_error = None;
+                    }
+                    self.projection_dirty = true;
                 }
             }
             Some("installApp")
@@ -555,8 +570,22 @@ impl Product {
         self.projection_dirty = true;
     }
 
+    fn run_pending_uninstall(&mut self) {
+        let Some(app_id) = self.pending_uninstall.take() else {
+            return;
+        };
+        if let Err(error) = self.supervisor.uninstall_app(&app_id) {
+            self.uninstall_error = Some(format!("{error:#}"));
+        }
+        self.projection_dirty = true;
+    }
+
     fn poll(&mut self) -> Result<()> {
-        if self.pending_install.is_none() && !self.busy && !self.supervisor.services_busy() {
+        if self.pending_install.is_none()
+            && self.pending_uninstall.is_none()
+            && !self.busy
+            && !self.supervisor.services_busy()
+        {
             if let Ok(staged) = self.install_rx.try_recv() {
                 self.install_ui = Some(InstallUi {
                     state: "review",
@@ -573,7 +602,7 @@ impl Product {
             self.projection_dirty = true;
         }
         if self.last_schedule_poll.elapsed() >= Duration::from_secs(1) {
-            if self.install_ui.is_none() && !self.busy {
+            if self.install_ui.is_none() && self.pending_uninstall.is_none() && !self.busy {
                 if let Some(wake) = self.native_tools.claim_due() {
                     self.send_prompt(wake.prompt);
                 }
@@ -685,6 +714,8 @@ impl Product {
                 "scheduleEveryMinutes":app.schedules.first().map(|schedule| schedule.every_minutes),
             })).collect::<Vec<_>>(),
             "install":install,
+            "uninstallingApp":self.pending_uninstall,
+            "uninstallError":self.uninstall_error,
             "settings":{
                 "wifi":{
                     "connectedSsid":self.wifi_connected,
@@ -800,6 +831,7 @@ fn headless(
     for frame in 0..7_500 {
         product.poll()?;
         product.run_pending_install();
+        product.run_pending_uninstall();
         // Give PocketJS a few ticks to settle reactive insertions and layout
         // before taking a deterministic screenshot.
         if (!wait_for_turn || !product.busy) && !product.supervisor.services_busy() {
@@ -954,6 +986,7 @@ impl WindowApp {
         frame.present();
         state.product.run_pending_ui_task();
         state.product.run_pending_install();
+        state.product.run_pending_uninstall();
         state.window.request_redraw();
         Ok(())
     }
