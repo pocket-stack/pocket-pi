@@ -13,7 +13,7 @@ use esp_idf_svc::http::server::{Configuration as ServerConfiguration, EspHttpSer
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use pocket_pi_agentos::{
     stage_pocketapp_bytes, system_app_bundle, AppDescriptor, AppServiceHost, AppSupervisor,
-    InstalledAppIndex, RoutedToolHost, StagedApp, DATA_ACTION_STACK_BYTES, MAX_POCKETAPP_BYTES,
+    InstalledAppIndex, RoutedToolHost, StagedApp, ACTION_STACK_BYTES, MAX_POCKETAPP_BYTES,
 };
 use pocket_pi_embedded::{AgentEvent, ModelBackend, ToolHost, MODEL_WORKER_STACK_BYTES};
 use pocket_pi_protocols::model::ModelBackendSettings;
@@ -24,7 +24,7 @@ use serde_json::{json, Value};
 use super::{
     app_services::EspAppServices,
     backend,
-    device_state::{SettingsProjection, WifiSettingsProjection},
+    device_state::{SettingsFacts, WifiSettingsFacts},
     esp_result, init_wifi, storage, transport, transport::LineTransport as _, DisplayProbe,
     EspPlatform, BOARD_NAME, PANEL_HEIGHT, PANEL_WIDTH,
 };
@@ -106,7 +106,7 @@ pub fn run() -> anyhow::Result<()> {
     let mut settings = wifi
         .as_ref()
         .map(|wifi| {
-            wifi.projection(if wifi.is_connecting() {
+            wifi.facts(if wifi.is_connecting() {
                 "CONNECTING..."
             } else if wifi.is_connected() {
                 "CONNECTED"
@@ -114,10 +114,10 @@ pub fn run() -> anyhow::Result<()> {
                 "NOT CONNECTED"
             })
         })
-        .unwrap_or_else(|| SettingsProjection {
+        .unwrap_or_else(|| SettingsFacts {
             firmware_version: env!("CARGO_PKG_VERSION").into(),
             workspace_free_bytes: storage::workspace_free_bytes().ok(),
-            wifi: WifiSettingsProjection {
+            wifi: WifiSettingsFacts {
                 status: "WI-FI DRIVER UNAVAILABLE".into(),
                 ..Default::default()
             },
@@ -169,7 +169,7 @@ pub fn run() -> anyhow::Result<()> {
         catalog.clone(),
         Some(nvs),
     ));
-    let mut supervisor = with_psram_pthread_config(DATA_ACTION_STACK_BYTES, || {
+    let mut supervisor = with_psram_pthread_config(ACTION_STACK_BYTES, || {
         AppSupervisor::new(storage::WORKSPACE_ROOT, catalog, services)
     })?;
     supervisor.frame()?;
@@ -199,7 +199,7 @@ pub fn run() -> anyhow::Result<()> {
         "provider":provider,
         "model":resolved_model,
         "thinkingLevel":model_settings.thinking_level.id(),
-        "systemPrompt":"You are Pi Agent, the first-class system App in Pocket Pi AgentOS on an ESP32-P4. You can manage the top-level /workspace and use installed App tools. Use /workspace for durable memory, notes, plans, and artifacts; read and update relevant files when continuity matters. Installed Apps own their tools, state, tasks, and views. Be concise."
+        "systemPrompt":"You are Pi Agent, the first-class system App in Pocket Pi AgentOS on an ESP32-P4. You can manage the top-level /workspace and use installed App tools. Use /workspace for durable memory, notes, plans, and artifacts; read and update relevant files when continuity matters. Installed Apps own their Data, Actions, and Views. Be concise."
     });
     with_psram_pthread_config(MODEL_WORKER_STACK_BYTES, || {
         supervisor
@@ -226,8 +226,8 @@ pub fn run() -> anyhow::Result<()> {
         Instant::now() + Duration::from_secs(runtime_config.initial_prompt_delay_seconds);
     let mut touch_was_down = false;
     let mut redraw = true;
-    let mut projection_dirty = true;
-    let mut pending_ui_task: Option<String> = None;
+    let mut system_dirty = true;
+    let mut pending_ui_action: Option<(String, Value)> = None;
     let mut pending_install: Option<StagedApp> = None;
     let mut install_ui: Option<InstallUi> = None;
     let mut install_requested = false;
@@ -235,7 +235,7 @@ pub fn run() -> anyhow::Result<()> {
     let mut uninstall_error: Option<String> = None;
     let mut last_tick = Instant::now();
     let mut last_runtime_pump = Instant::now();
-    let mut last_projection_refresh = Instant::now();
+    let mut last_system_refresh = Instant::now();
     let mut last_heartbeat = Instant::now();
     let mut last_wifi_poll = Instant::now();
     let mut last_uart_install_poll = Instant::now();
@@ -272,14 +272,14 @@ pub fn run() -> anyhow::Result<()> {
                 });
                 pending_install = Some(staged);
                 supervisor.open(pocket_pi_agentos::ROOT_APP_ID)?;
-                projection_dirty = true;
+                system_dirty = true;
                 redraw = true;
             }
         }
         while let Ok(request) = app_rx.try_recv() {
             request.handle(&mut supervisor);
             redraw = true;
-            projection_dirty = true;
+            system_dirty = true;
         }
 
         if let Some(display) = display.as_mut() {
@@ -288,68 +288,67 @@ pub fn run() -> anyhow::Result<()> {
                     supervisor.pointer_down(x, y)?;
                     let action = supervisor.tap(x, y)?;
                     match action.get("type").and_then(Value::as_str) {
-                        Some("navigate") => {
-                            if let Some(app) = action.get("app").and_then(Value::as_str) {
-                                supervisor.open(app)?;
-                                projection_dirty = true;
+                        Some("action") => {
+                            if let Some(name) = action.get("action").and_then(Value::as_str) {
+                                pending_ui_action = Some((
+                                    name.to_owned(),
+                                    action.get("args").cloned().unwrap_or(Value::Null),
+                                ));
                             }
                         }
-                        Some("submitPrompt") => {
-                            if let Some(prompt) = action.get("prompt").and_then(Value::as_str) {
-                                submit_prompt(
-                                    prompt.to_owned(),
-                                    &supervisor,
-                                    &mut messages,
-                                    &mut busy,
-                                    &mut agent_status,
-                                );
-                                projection_dirty = true;
-                            }
-                        }
-                        Some("invokeTask") => {
-                            if let Some(task) = action.get("task").and_then(Value::as_str) {
-                                pending_ui_task = Some(task.to_owned());
-                            }
-                        }
-                        Some("uninstallApp") => {
-                            if let Some(app_id) = action.get("app").and_then(Value::as_str) {
-                                if busy || supervisor.services_busy() {
-                                    uninstall_error = Some("APP SERVICES ARE BUSY".into());
-                                } else {
-                                    pending_uninstall = Some(app_id.to_owned());
-                                    uninstall_error = None;
-                                }
-                                projection_dirty = true;
-                            }
-                        }
-                        Some("installApp")
-                            if install_ui.as_ref().is_some_and(|ui| ui.state == "review") =>
-                        {
-                            if let Some(ui) = &mut install_ui {
-                                ui.state = "installing";
-                            }
-                            install_requested = true;
-                            projection_dirty = true;
-                        }
-                        Some("dismissInstall") => {
-                            if let Some(staged) = pending_install.take() {
-                                if let Some(path) = staged.release_dir.parent() {
-                                    let _ = std::fs::remove_dir_all(path);
-                                }
-                            }
-                            install_ui = None;
-                            install_slot.store(false, Ordering::Release);
-                            projection_dirty = true;
-                        }
-                        Some("settings") => {
+                        Some("command") => {
+                            let args = action.get("args").unwrap_or(&Value::Null);
                             match action.get("command").and_then(Value::as_str) {
-                                Some("scan") => match wifi.as_mut() {
+                                Some("apps.open") => {
+                                    if let Some(app) = args.get("app").and_then(Value::as_str) {
+                                        supervisor.open(app)?;
+                                    }
+                                }
+                                Some("agent.submit") => {
+                                    if let Some(prompt) = args.get("prompt").and_then(Value::as_str) {
+                                        submit_prompt(
+                                            prompt.to_owned(),
+                                            &supervisor,
+                                            &mut messages,
+                                            &mut busy,
+                                            &mut agent_status,
+                                        );
+                                    }
+                                }
+                                Some("apps.uninstall") => {
+                                    if let Some(app_id) = args.get("app").and_then(Value::as_str) {
+                                        if busy || supervisor.services_busy() {
+                                            uninstall_error = Some("APP SERVICES ARE BUSY".into());
+                                        } else {
+                                            pending_uninstall = Some(app_id.to_owned());
+                                            uninstall_error = None;
+                                        }
+                                    }
+                                }
+                                Some("apps.install")
+                                    if install_ui.as_ref().is_some_and(|ui| ui.state == "review") =>
+                                {
+                                    if let Some(ui) = &mut install_ui {
+                                        ui.state = "installing";
+                                    }
+                                    install_requested = true;
+                                }
+                                Some("apps.dismissInstall") => {
+                                    if let Some(staged) = pending_install.take() {
+                                        if let Some(path) = staged.release_dir.parent() {
+                                            let _ = std::fs::remove_dir_all(path);
+                                        }
+                                    }
+                                    install_ui = None;
+                                    install_slot.store(false, Ordering::Release);
+                                }
+                                Some("device.wifi.scan") => match wifi.as_mut() {
                                     Some(wifi) => {
                                         settings.wifi.scanning = true;
                                         settings.wifi.status = "SCANNING...".into();
                                         match wifi.scan() {
                                             Ok(networks) => {
-                                                settings = wifi.projection("");
+                                                settings = wifi.facts("");
                                                 settings.wifi.networks = networks;
                                             }
                                             Err(error) => {
@@ -363,10 +362,9 @@ pub fn run() -> anyhow::Result<()> {
                                         settings.wifi.status = "WI-FI DRIVER UNAVAILABLE".into()
                                     }
                                 },
-                                Some("connect") => {
-                                    let ssid =
-                                        action.get("ssid").and_then(Value::as_str).unwrap_or("");
-                                    let password = action
+                                Some("device.wifi.connect") => {
+                                    let ssid = args.get("ssid").and_then(Value::as_str).unwrap_or("");
+                                    let password = args
                                         .get("password")
                                         .and_then(Value::as_str)
                                         .unwrap_or("");
@@ -374,7 +372,7 @@ pub fn run() -> anyhow::Result<()> {
                                         Some(wifi) => {
                                             match wifi.begin_connect(ssid, password, true) {
                                                 Ok(()) => {
-                                                    settings = wifi.projection("CONNECTING...");
+                                                    settings = wifi.facts("CONNECTING...");
                                                     last_wifi_poll = Instant::now();
                                                 }
                                                 Err(error) => {
@@ -388,9 +386,9 @@ pub fn run() -> anyhow::Result<()> {
                                         }
                                     }
                                 }
-                                Some("forget") => match wifi.as_mut() {
+                                Some("device.wifi.forget") => match wifi.as_mut() {
                                     Some(wifi) => match wifi.forget() {
-                                        Ok(()) => settings = wifi.projection("NETWORK FORGOTTEN"),
+                                        Ok(()) => settings = wifi.facts("NETWORK FORGOTTEN"),
                                         Err(error) => {
                                             settings.wifi.status = format!("FORGET FAILED: {error}")
                                         }
@@ -399,13 +397,13 @@ pub fn run() -> anyhow::Result<()> {
                                         settings.wifi.status = "WI-FI DRIVER UNAVAILABLE".into()
                                     }
                                 },
-                                Some("restart") => unsafe {
+                                Some("device.restart") => unsafe {
                                     esp_idf_svc::sys::esp_restart();
                                 },
                                 _ => {}
                             }
                             settings.workspace_free_bytes = storage::workspace_free_bytes().ok();
-                            projection_dirty = true;
+                            system_dirty = true;
                         }
                         _ => {}
                     }
@@ -426,14 +424,14 @@ pub fn run() -> anyhow::Result<()> {
             if let Some(wifi) = wifi.as_mut() {
                 match wifi.poll_connect() {
                     Some(Ok(())) => {
-                        settings = wifi.projection("CONNECTED");
-                        projection_dirty = true;
+                        settings = wifi.facts("CONNECTED");
+                        system_dirty = true;
                         redraw = true;
                         log::info!("Wi-Fi association and DHCP completed");
                     }
                     Some(Err(error)) => {
-                        settings = wifi.projection(format!("CONNECT FAILED: {error}"));
-                        projection_dirty = true;
+                        settings = wifi.facts(format!("CONNECT FAILED: {error}"));
+                        system_dirty = true;
                         redraw = true;
                         log::warn!("Wi-Fi connection attempt failed: {error:#}");
                     }
@@ -446,13 +444,13 @@ pub fn run() -> anyhow::Result<()> {
                 last_wifi_connected = connected;
                 if let Some(wifi) = wifi.as_ref().filter(|wifi| !wifi.is_connecting()) {
                     let networks = core::mem::take(&mut settings.wifi.networks);
-                    settings = wifi.projection(if connected {
+                    settings = wifi.facts(if connected {
                         "CONNECTED"
                     } else {
                         "NOT CONNECTED"
                     });
                     settings.wifi.networks = networks;
-                    projection_dirty = true;
+                    system_dirty = true;
                     redraw = true;
                 }
                 log::info!(
@@ -488,10 +486,10 @@ pub fn run() -> anyhow::Result<()> {
                 let app_results = if busy {
                     Vec::new()
                 } else {
-                    supervisor.poll_due_tasks()
+                    supervisor.poll_due_actions()
                 };
-                for (task, result) in &app_results {
-                    log::info!("AppTask {task}: {}", result.text);
+                for (action, result) in &app_results {
+                    log::info!("App Action {action}: {}", result.text);
                 }
                 if !app_results.is_empty() {
                     redraw = true;
@@ -500,16 +498,16 @@ pub fn run() -> anyhow::Result<()> {
             last_tick = Instant::now();
         }
 
-        if last_projection_refresh.elapsed() >= Duration::from_secs(5) {
+        if last_system_refresh.elapsed() >= Duration::from_secs(5) {
             if supervisor.active_id() == pocket_pi_agentos::ROOT_APP_ID {
-                projection_dirty = true;
+                system_dirty = true;
                 redraw = true;
             }
-            last_projection_refresh = Instant::now();
+            last_system_refresh = Instant::now();
         }
 
-        if projection_dirty {
-            let projection = root_projection(
+        if system_dirty {
+            let facts = system_facts(
                 &messages,
                 agent_status,
                 provider,
@@ -521,8 +519,8 @@ pub fn run() -> anyhow::Result<()> {
                 pending_uninstall.as_deref(),
                 uninstall_error.as_deref(),
             );
-            supervisor.update_root(&projection)?;
-            projection_dirty = false;
+            supervisor.update_system(&facts)?;
+            system_dirty = false;
         }
         if supervisor.active_projection_is_stale() {
             // A background App commit is itself a redraw cause. The check is
@@ -576,7 +574,7 @@ pub fn run() -> anyhow::Result<()> {
                     }
                 }
                 redraw = true;
-                projection_dirty = true;
+                system_dirty = true;
             }
             last_runtime_pump = Instant::now();
         }
@@ -598,7 +596,7 @@ pub fn run() -> anyhow::Result<()> {
                     &mut agent_status,
                 );
                 redraw = true;
-                projection_dirty = true;
+                system_dirty = true;
             }
         }
 
@@ -609,7 +607,7 @@ pub fn run() -> anyhow::Result<()> {
             redraw = false;
         }
 
-        // The loading projection is rendered before activation enters QuickJS,
+        // The loading facts is rendered before activation enters QuickJS,
         // SQLite and flash. Touch and prompts remain locked by InstallScreen.
         if install_requested {
             install_requested = false;
@@ -618,8 +616,8 @@ pub fn run() -> anyhow::Result<()> {
                     .release_dir
                     .parent()
                     .map(std::path::Path::to_path_buf);
-                let result = with_psram_pthread_config(DATA_ACTION_STACK_BYTES, || {
-                    supervisor.activate_new_app(&staged.release_dir, staged.credentials)
+                let result = with_psram_pthread_config(ACTION_STACK_BYTES, || {
+                    supervisor.activate_app(&staged.release_dir, staged.credentials)
                 });
                 match &result {
                     Ok(descriptor) => {
@@ -643,7 +641,7 @@ pub fn run() -> anyhow::Result<()> {
                         }
                     }
                 }
-                projection_dirty = true;
+                system_dirty = true;
                 redraw = true;
             }
         }
@@ -656,19 +654,19 @@ pub fn run() -> anyhow::Result<()> {
                     uninstall_error = Some(format!("{error:#}"));
                 }
             }
-            projection_dirty = true;
+            system_dirty = true;
             redraw = true;
         }
 
-        // A UI-requested task runs only after its loading state has reached the
+        // A UI-requested Action runs only after its loading state has reached the
         // panel. This preserves immediate touch feedback even when HTTPS is slow.
         if install_ui.is_none() && pending_uninstall.is_none() && !busy {
-            if let Some(task) = pending_ui_task.take() {
+            if let Some((action, args)) = pending_ui_action.take() {
                 let started = Instant::now();
-                let result = supervisor.invoke_active_task(&task, &Value::Null);
+                let result = supervisor.invoke_active_action(&action, &args);
                 log::info!(
-                    "UI AppTask {} finished in {}ms: {}",
-                    task,
+                    "UI App Action {} finished in {}ms: {}",
+                    action,
                     started.elapsed().as_millis(),
                     result.text
                 );
@@ -679,7 +677,7 @@ pub fn run() -> anyhow::Result<()> {
 
         if last_heartbeat.elapsed() >= Duration::from_secs(5) {
             log::info!(
-                "heartbeat app_data_action={} agent={} app={}",
+                "heartbeat app_action={} agent={} app={}",
                 if supervisor.services_busy() {
                     "running"
                 } else {
@@ -860,7 +858,7 @@ fn with_psram_pthread_config<T>(
     stack_size: usize,
     action: impl FnOnce() -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
-    // Large persistent workers use PSRAM stacks. App Data Action passes this setting
+    // Large persistent workers use PSRAM stacks. App Action passes this setting
     // to its NET child; the platform default is restored after each spawn.
     let default = unsafe { esp_idf_svc::sys::esp_pthread_get_default_config() };
     let mut config = default;
@@ -908,12 +906,12 @@ fn submit_prompt(
     }
 }
 
-fn root_projection(
+fn system_facts(
     messages: &[Message],
     agent_status: &str,
     provider: &str,
     model: &str,
-    settings: &SettingsProjection,
+    settings: &SettingsFacts,
     tools: &CoreToolHost,
     catalog: &InstalledAppIndex,
     install: Option<&InstallUi>,

@@ -25,16 +25,16 @@ The authoritative detailed design is
 - `crates/pocket-pi-agentos` owns the in-memory `InstalledAppIndex`, runtime
   lifecycle, foreground selection, schedules, App Tool routing, and App-scoped
   FS/SQLite mounts. There is no separate persistent App Catalog service.
-- `tools/xtask` packages ordinary Apps without moving their product logic into
-  the AgentOS runtime or host adapters.
+- `tools/xtask` builds the firmware-embedded System App and packages ordinary
+  Apps without moving product logic into the AgentOS runtime or host adapters.
 - HTTP and UART are package ingress adapters. Both hand the complete `.pocketapp`
-  to the Installer, which alone validates, stores credentials, creates `current`
-  and activates runtime metadata.
+  to the Installer, which alone validates, stores credentials and activates
+  runtime metadata at the single `apps/<id>/release` path.
 - `crates/pocket-pi-embedded` provides the bounded JavaScript Agent Loop bridge.
   In AgentOS hosts, the loop is loaded from the Pi Agent System App release into
   the same PocketJS Guest as its Root View.
 - `apps/pi-agent` owns the Root View and Agent Loop release artifacts.
-- `apps/robinhood` and `apps/exa` own their Tools, Tasks, SQLite schemas, and
+- `apps/robinhood` and `apps/exa` own their Tools, Actions, SQLite schemas, and
   PocketJS Views.
 - `crates/pocket-pi-tools` owns portable native workspace, bounded shell, time,
   device, and Agent schedule Tools.
@@ -54,14 +54,14 @@ Opening Robinhood or Exa changes only the foreground View; it does not restart
 or replace the Agent. Model and native Tool transport complete asynchronously
 and return events to that persistent Guest.
 
-Ordinary View and Data Action Guests load on demand and use separate three-entry
+Ordinary View and Action Guests load on demand and use separate three-entry
 LRU caches. Only the foreground View ticks or renders. On ESP32-P4, App QuickJS
 heaps and large worker stacks allocate explicitly from PSRAM without changing
 the platform-wide `malloc()` policy.
 
 Uninstall is the reverse of ordinary App activation inside the same
-`AppSupervisor`: it removes the App's Tool routes, schedules, cached View/Data
-Action Guests, native credentials/session state and complete App data root. It
+`AppSupervisor`: it removes the App's Tool routes, schedules, cached View/Action
+Guests, native credentials/session state and complete App data root. It
 does not introduce a second lifecycle manager or affect the resident Pi Agent.
 
 Ordinary Apps receive capability-scoped data roots. Pi Agent alone owns the

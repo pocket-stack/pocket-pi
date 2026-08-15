@@ -25,8 +25,8 @@ host adapters; they do not belong in the UI or embedded Agent core.
 
 The ESP host exposes HTTP and UART ingress for ordinary App packages. Both
 adapters only receive a complete `.pocketapp` and hand it to the shared Installer
-in `pocket-pi-agentos`; neither writes App releases, credentials, `current`, or
-runtime state itself.
+in `pocket-pi-agentos`; neither writes App storage, credentials or runtime state
+itself.
 
 ```sh
 cargo xtask build esp32-p4

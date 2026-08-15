@@ -17,7 +17,7 @@ mod device_state;
 mod storage;
 mod transport;
 
-use device_state::{SettingsProjection, WifiNetworkProjection};
+use device_state::{SettingsFacts, WifiNetworkFacts};
 
 const BOARD_NAME: &str = "Waveshare ESP32-P4-WIFI6-Touch-LCD-5";
 const PANEL_WIDTH: u32 = 720;
@@ -106,7 +106,7 @@ impl PlatformTools for EspPlatform {
             "board":"esp32-p4",
             "piHarness":"pi-agent-core",
             "jsRuntime":"QuickJS via PocketJS host",
-            "memoryTelemetry":"boot projection only"
+            "memoryTelemetry":"boot facts only"
         })
     }
 
@@ -200,7 +200,7 @@ struct PendingWifiConnect {
 }
 
 impl WifiConnection {
-    fn scan(&mut self) -> anyhow::Result<Vec<WifiNetworkProjection>> {
+    fn scan(&mut self) -> anyhow::Result<Vec<WifiNetworkFacts>> {
         if !self.driver.is_started()? {
             self.driver.start()?;
         }
@@ -208,7 +208,7 @@ impl WifiConnection {
         let mut networks = access_points
             .into_iter()
             .filter(|access_point| !access_point.ssid.is_empty())
-            .map(|access_point| WifiNetworkProjection {
+            .map(|access_point| WifiNetworkFacts {
                 ssid: access_point.ssid.as_str().to_owned(),
                 rssi_dbm: access_point.signal_strength as i16,
                 secured: access_point.auth_method != Some(AuthMethod::None),
@@ -319,13 +319,13 @@ impl WifiConnection {
         Ok(())
     }
 
-    fn projection(&self, status: impl Into<String>) -> SettingsProjection {
-        let mut projection = SettingsProjection {
+    fn facts(&self, status: impl Into<String>) -> SettingsFacts {
+        let mut facts = SettingsFacts {
             firmware_version: env!("CARGO_PKG_VERSION").into(),
             workspace_free_bytes: storage::workspace_free_bytes().ok(),
             ..Default::default()
         };
-        projection.wifi.status = status.into();
+        facts.wifi.status = status.into();
         let mut access_point = unsafe { core::mem::zeroed::<esp_idf_svc::sys::wifi_ap_record_t>() };
         if unsafe { esp_idf_svc::sys::esp_wifi_sta_get_ap_info(&mut access_point) }
             == esp_idf_svc::sys::ESP_OK
@@ -335,16 +335,16 @@ impl WifiConnection {
                 .iter()
                 .position(|byte| *byte == 0)
                 .unwrap_or(access_point.ssid.len());
-            projection.wifi.connected_ssid =
+            facts.wifi.connected_ssid =
                 Some(String::from_utf8_lossy(&access_point.ssid[..end]).into_owned());
-            projection.wifi.rssi_dbm = Some(access_point.rssi as i16);
-            projection.wifi.ip_address = self
+            facts.wifi.rssi_dbm = Some(access_point.rssi as i16);
+            facts.wifi.ip_address = self
                 .sta_netif
                 .get_ip_info()
                 .ok()
                 .map(|info| info.ip.to_string());
         }
-        projection
+        facts
     }
 }
 

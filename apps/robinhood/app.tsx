@@ -1,11 +1,9 @@
 import { batch, createMemo, createSignal, For, Show } from "solid-js";
 import { Text, View } from "@pocketjs/framework/components";
 import { mount } from "@pocketjs/framework";
-import { Database } from "@pocketjs/framework/db";
 import { ActionButton, EmptyState, MetricCard, PocketHeader, ScrollButtons, SectionHeading, statusBadge, StatusBar } from "../_shared/ui";
 
 const DB_SCHEMA_VERSION = 5;
-const db = new Database("robinhood");
 
 type Screen = "dashboard" | "accounts" | "activity" | "positions";
 type Span = "day" | "week";
@@ -28,7 +26,6 @@ type Dashboard = {
 type ChartPoint = { x: number; y: number };
 type ChartSegment = { x: number; y: number; width: number; angle: number };
 type ChartProjection = { points: ChartPoint[]; segments: ChartSegment[]; labels: string[]; trend: { change: string; percent: string; positive: boolean } };
-type Cached<T> = { loadedRevision: number; value: T };
 type AccountRow = { account_number: string; label: string; suffix: string; status: string };
 type PortfolioRow = { account_number: string; cash: string | null; buying_power: string | null; day_pnl: string | null; week_pnl: string | null; observed_at: number };
 type PositionRow = { account_number: string; symbol: string; quantity: string | null; average_price: string | null; market_value: string | null };
@@ -61,63 +58,39 @@ const [activityScroll, setActivityScroll] = createSignal(0);
 const [positionScroll, setPositionScroll] = createSignal(0);
 const [status, setStatus] = createSignal("WAITING FOR ROBINHOOD");
 const [refreshing, setRefreshing] = createSignal(false);
-let currentRevision = 0;
-let accountsLoadedRevision = -1;
-let dashboardsLoadedRevision = -1;
-let refreshLoadedRevision = -1;
-const dashboardCache = new Map<string, Cached<Dashboard>>();
-const chartCache = new Map<string, Cached<ChartProjection>>();
+let schemaVersion = 0;
+let accountRows: AccountRow[] = [];
+let portfolioRows: PortfolioRow[] = [];
+let totalRows: Array<{ account_number: string; value: string; observed_at: number }> = [];
+let positionRows: PositionRow[] = [];
+let activityRows: ActivityRow[] = [];
+let latestRun: { status?: string; error?: string | null; completed_at?: number | null } | null = null;
+const dashboardCache = new Map<string, Dashboard>();
 function now(): number { return Math.floor(Date.now() / 1000); }
-function parse(value: string | null | undefined): any { try { return value ? JSON.parse(value) : null; } catch { return null; } }
 
-function loadAccounts(): Account[] {
-  const rows = db.query(
-    "SELECT account_number,label,suffix,status FROM accounts ORDER BY label,account_number LIMIT 16",
-  ).all() as unknown as AccountRow[];
-  return rows.map((row) => ({ number: row.account_number, label: row.label, suffix: row.suffix, status: row.status }));
-}
-
-function loadDashboardCache(loadedRevision: number, accountRows: Account[]): void {
-  if (dashboardsLoadedRevision === loadedRevision) return;
-  const portfolios = db.query(
-    "SELECT account_number,cash,buying_power,day_pnl,week_pnl,observed_at FROM portfolio_current LIMIT 16",
-  ).all() as unknown as PortfolioRow[];
-  const totals = db.query(`
-    SELECT value.account_number,value.value,value.observed_at
-    FROM total_value value
-    JOIN (
-      SELECT account_number,MAX(observed_at) AS observed_at
-      FROM total_value GROUP BY account_number
-    ) latest ON latest.account_number=value.account_number AND latest.observed_at=value.observed_at
-    LIMIT 16
-  `).all() as unknown as Array<{ account_number: string; value: string; observed_at: number }>;
-  const positions = db.query(
-    "SELECT account_number,symbol,quantity,average_price,market_value FROM positions ORDER BY account_number,CAST(market_value AS REAL) DESC,symbol LIMIT 1024",
-  ).all() as unknown as PositionRow[];
-  const activities = db.query(
-    "SELECT account_number,activity_id,occurred_at,symbol,side,quantity,price,amount,state,activity_type FROM activities ORDER BY account_number,occurred_at DESC,observed_at DESC LIMIT 1024",
-  ).all() as unknown as ActivityRow[];
-  const portfolioByAccount = new Map(portfolios.map((row) => [row.account_number, row]));
-  const totalByAccount = new Map(totals.map((row) => [row.account_number, row]));
+function rebuildDashboardCache(): void {
+  const accountValues = accountRows.map((row) => ({ number: row.account_number, label: row.label, suffix: row.suffix, status: row.status }));
+  const portfolioByAccount = new Map(portfolioRows.map((row) => [row.account_number, row]));
+  const totalByAccount = new Map(totalRows.map((row) => [row.account_number, row]));
   const positionsByAccount = new Map<string, PositionRow[]>();
   const activitiesByAccount = new Map<string, ActivityRow[]>();
-  for (const row of positions) {
+  for (const row of positionRows) {
     const rows = positionsByAccount.get(row.account_number) || [];
     if (rows.length < 64) rows.push(row);
     positionsByAccount.set(row.account_number, rows);
   }
-  for (const row of activities) {
+  for (const row of activityRows) {
     const rows = activitiesByAccount.get(row.account_number) || [];
     if (rows.length < 64) rows.push(row);
     activitiesByAccount.set(row.account_number, rows);
   }
   dashboardCache.clear();
-  for (const account of accountRows) {
+  for (const account of accountValues) {
     const portfolio = portfolioByAccount.get(account.number);
     const total = totalByAccount.get(account.number);
     const accountPositions = positionsByAccount.get(account.number) || [];
     const accountActivities = activitiesByAccount.get(account.number) || [];
-    dashboardCache.set(account.number, { loadedRevision, value: {
+    dashboardCache.set(account.number, {
       account,
       totalValue: total?.value ?? null,
       cash: portfolio?.cash ?? null,
@@ -136,9 +109,15 @@ function loadDashboardCache(loadedRevision: number, accountRows: Account[]): voi
       positionsAvailable: portfolio !== undefined,
       activityAvailable: portfolio !== undefined,
       observedAt: Math.max(portfolio?.observed_at ?? 0, total?.observed_at ?? 0) || null,
-    }});
+    });
   }
-  dashboardsLoadedRevision = loadedRevision;
+  setAccounts(accountValues);
+  let accountNumber = selectedAccount();
+  if (!accountValues.some((item) => item.number === accountNumber)) {
+    accountNumber = accountValues[0]?.number || "";
+    setSelectedAccount(accountNumber);
+  }
+  loadAccountProjection(accountNumber);
 }
 
 function number(value: string | null): number | null {
@@ -173,32 +152,7 @@ function money(value: string | null | undefined): string {
   return parsed < 0 ? "-" + formatted : formatted;
 }
 
-function loadChart(accountNumber: string, loadedRevision: number) {
-  const cacheKey = accountNumber + ":" + span();
-  const cached = chartCache.get(cacheKey);
-  if (cached?.loadedRevision === loadedRevision) {
-    setChartPoints(cached.value.points);
-    setChartSegments(cached.value.segments);
-    setChartLabels(cached.value.labels);
-    setChartTrend(cached.value.trend);
-    return;
-  }
-  const windowSeconds = span() === "day" ? 86400 : 7 * 86400;
-  const end = now();
-  const cutoff = end - windowSeconds;
-  const rows = db.query(`
-    WITH RECURSIVE buckets(bucket_index, bucket_time) AS (
-      SELECT 0, ?1
-      UNION ALL
-      SELECT bucket_index + 1, ?1 + CAST((?2 * (bucket_index + 1)) / 19 AS INTEGER)
-      FROM buckets WHERE bucket_index < 19
-    )
-    SELECT bucket_index, bucket_time,
-      (SELECT value FROM total_value
-       WHERE account_number = ?3 AND observed_at >= ?1 AND observed_at <= bucket_time
-       ORDER BY observed_at DESC LIMIT 1) AS total_value
-    FROM buckets ORDER BY bucket_index
-  `).all(cutoff, windowSeconds, accountNumber) as unknown as Array<{ bucket_index: number; bucket_time: number; total_value: string | null }>;
+function applyChart(rows: Array<{ bucket_index: number; bucket_time: number; total_value: string | null }>) {
   const buckets = rows.map((row) => ({ time: row.bucket_time, value: number(row.total_value) }));
   const bucketTimes = buckets.map((bucket) => bucket.time);
   const values = buckets.map((bucket) => bucket.value).filter((value): value is number => value !== null);
@@ -212,7 +166,6 @@ function loadChart(accountNumber: string, loadedRevision: number) {
     const pnl = span() === "day" ? dashboard().pnlDay : dashboard().pnlWeek;
     const value = number(pnl);
     const projection = { points: [], segments: [], labels, trend: { change: money(pnl), percent: "—", positive: value === null || value >= 0 } };
-    chartCache.set(cacheKey, { loadedRevision, value: projection });
     setChartPoints(projection.points);
     setChartSegments(projection.segments);
     setChartLabels(projection.labels);
@@ -234,25 +187,21 @@ function loadChart(accountNumber: string, loadedRevision: number) {
   });
   const delta = values[values.length - 1] - values[0];
   const trend = { change: money(String(delta)), percent: values[0] === 0 ? "—" : (delta * 100 / values[0]).toFixed(2) + "%", positive: delta >= 0 };
-  chartCache.set(cacheKey, { loadedRevision, value: { points, segments, labels, trend } });
   setChartPoints(points);
   setChartSegments(segments);
   setChartLabels(labels);
   setChartTrend(trend);
 }
 
-function loadRefreshProjection(loadedRevision: number): void {
-  if (refreshLoadedRevision === loadedRevision) return;
-  const latestRun = db.query("SELECT status,error,completed_at FROM refresh_runs ORDER BY id DESC LIMIT 1").get() as unknown as { status?: string; error?: string | null; completed_at?: number | null } | null;
+function loadRefreshProjection(): void {
   setRefreshing(false);
   if (latestRun?.status === "failed") setStatus("REFRESH FAILED · " + String(latestRun.error || "UNKNOWN ERROR").slice(0, 52));
   else if (latestRun?.status === "partial") setStatus("LIVE WITH PARTIAL DATA");
   else if (dashboard().observedAt) setStatus("LIVE · " + relativeTime(dashboard().observedAt as number));
   else setStatus("WAITING FOR ROBINHOOD");
-  refreshLoadedRevision = loadedRevision;
 }
 
-function loadAccountProjection(accountNumber: string, loadedRevision: number): void {
+function loadAccountProjection(accountNumber: string): void {
   if (!accountNumber) {
     setDashboard(EMPTY);
     setChartPoints([]);
@@ -261,10 +210,9 @@ function loadAccountProjection(accountNumber: string, loadedRevision: number): v
     return;
   }
   const cached = dashboardCache.get(accountNumber);
-  if (cached?.loadedRevision === loadedRevision) {
-    setDashboard(cached.value);
-    loadChart(accountNumber, loadedRevision);
-    if (cached.value.observedAt && !refreshing()) setStatus("LIVE · " + relativeTime(cached.value.observedAt));
+  if (cached) {
+    setDashboard(cached);
+    if (cached.observedAt && !refreshing()) setStatus("LIVE · " + relativeTime(cached.observedAt));
     return;
   }
   setDashboard(EMPTY);
@@ -272,49 +220,73 @@ function loadAccountProjection(accountNumber: string, loadedRevision: number): v
   setChartSegments([]);
 }
 
-function loadView(loadedRevision = currentRevision) {
-  // This is the only whole-App projection refresh. The host calls it once on
-  // initial activation and once for any number of commits coalesced at the
-  // foreground frame boundary. Normal frames never execute it.
-  try {
-    const schema = db.query("PRAGMA user_version").get() as unknown as { user_version?: number } | null;
-    if (Number(schema?.user_version ?? 0) !== DB_SCHEMA_VERSION) {
+PocketPi.projection.one("PRAGMA user_version", {}, (schema: { user_version?: number } | null) => {
+  schemaVersion = Number(schema?.user_version ?? 0);
+});
+PocketPi.projection.many(
+  "SELECT account_number,label,suffix,status FROM accounts ORDER BY label,account_number LIMIT 16",
+  {},
+  (rows: AccountRow[]) => { accountRows = rows; },
+);
+PocketPi.projection.many(
+  "SELECT account_number,cash,buying_power,day_pnl,week_pnl,observed_at FROM portfolio_current LIMIT 16",
+  {},
+  (rows: PortfolioRow[]) => { portfolioRows = rows; },
+);
+PocketPi.projection.many(
+  `SELECT value.account_number,value.value,value.observed_at
+   FROM total_value value
+   JOIN (SELECT account_number,MAX(observed_at) AS observed_at FROM total_value GROUP BY account_number) latest
+     ON latest.account_number=value.account_number AND latest.observed_at=value.observed_at
+   LIMIT 16`,
+  {},
+  (rows: Array<{ account_number: string; value: string; observed_at: number }>) => { totalRows = rows; },
+);
+PocketPi.projection.many(
+  "SELECT account_number,symbol,quantity,average_price,market_value FROM positions ORDER BY account_number,CAST(market_value AS REAL) DESC,symbol LIMIT 1024",
+  {},
+  (rows: PositionRow[]) => { positionRows = rows; },
+);
+PocketPi.projection.many(
+  "SELECT account_number,activity_id,occurred_at,symbol,side,quantity,price,amount,state,activity_type FROM activities ORDER BY account_number,occurred_at DESC,observed_at DESC LIMIT 1024",
+  {},
+  (rows: ActivityRow[]) => {
+    activityRows = rows;
+    if (schemaVersion === DB_SCHEMA_VERSION) rebuildDashboardCache();
+    else {
       setAccounts([]);
       setSelectedAccount("");
-      setDashboard(EMPTY);
-      setChartPoints([]);
-      setChartSegments([]);
-      setStatus("WAITING FOR ROBINHOOD");
-      return;
+      loadAccountProjection("");
     }
-    batch(() => {
-      currentRevision = Math.max(currentRevision, loadedRevision);
-      let nextAccounts = accounts();
-      if (accountsLoadedRevision !== currentRevision) {
-        nextAccounts = loadAccounts();
-        setAccounts(nextAccounts);
-        accountsLoadedRevision = currentRevision;
-      }
-      loadDashboardCache(currentRevision, nextAccounts);
-      let accountNumber = selectedAccount();
-      if (!nextAccounts.some((item) => item.number === accountNumber)) {
-        accountNumber = nextAccounts[0]?.number || "";
-        setSelectedAccount(accountNumber);
-      }
-      loadAccountProjection(accountNumber, currentRevision);
-      loadRefreshProjection(currentRevision);
-    });
-  } catch {
-    batch(() => {
-      setAccounts([]);
-      setSelectedAccount("");
-      setDashboard(EMPTY);
-      setChartPoints([]);
-      setChartSegments([]);
-      setStatus("WAITING FOR ROBINHOOD");
-    });
-  }
-}
+  },
+);
+PocketPi.projection.one(
+  "SELECT status,error,completed_at FROM refresh_runs ORDER BY id DESC LIMIT 1",
+  {},
+  (row: typeof latestRun) => {
+    latestRun = row;
+    setRefreshing(false);
+    loadRefreshProjection();
+  },
+);
+const chartProjection = PocketPi.projection.many(
+  `WITH RECURSIVE buckets(bucket_index, bucket_time) AS (
+     SELECT 0, $cutoff
+     UNION ALL
+     SELECT bucket_index + 1, $cutoff + CAST(($window * (bucket_index + 1)) / 19 AS INTEGER)
+     FROM buckets WHERE bucket_index < 19
+   )
+   SELECT bucket_index,bucket_time,
+     (SELECT value FROM total_value
+      WHERE account_number=$account AND observed_at >= $cutoff AND observed_at <= bucket_time
+      ORDER BY observed_at DESC LIMIT 1) AS total_value
+   FROM buckets ORDER BY bucket_index`,
+  () => {
+    const window = span() === "day" ? 86400 : 7 * 86400;
+    return { "$cutoff": now() - window, "$window": window, "$account": selectedAccount() };
+  },
+  applyChart,
+);
 
 function tick(): string {
   return "";
@@ -469,19 +441,10 @@ function Robinhood() {
   return <Show when={screen() === "dashboard"} fallback={<SubScreen />}><DashboardScreen /></Show>;
 }
 
-loadView();
 mount(() => <Robinhood />);
 
-(globalThis as any).PocketPiApp = {
+PocketPi.defineView({
   tick,
-  dataChanged(eventsLine: string) {
-    const events = parse(eventsLine);
-    const revision = Array.isArray(events)
-      ? events.reduce((latest: number, event: any) => Math.max(latest, Number(event?.revision ?? 0)), currentRevision)
-      : currentRevision;
-    loadView(revision);
-    return "";
-  },
   tap(x: number, y: number) {
     if (screen() !== "dashboard") {
       if (y < 112 && x < 220) { setScreen("dashboard"); return ""; }
@@ -505,22 +468,23 @@ mount(() => <Robinhood />);
             setSelectedAccount(account.number);
             setScreen("dashboard");
           });
-          loadAccountProjection(account.number, currentRevision);
+          loadAccountProjection(account.number);
+          chartProjection.refresh();
         }
       }
       return "";
     }
-    if (y < 112 && x < 100) return JSON.stringify({ type: "navigate", app: "pi-agent" });
+    if (y < 112 && x < 100) return PocketPi.navigate("pi-agent");
     if (y >= 112 && y < 176) { setScreen("accounts"); return ""; }
-    if (y >= 480 && y < 540) { batch(() => { setSpan(x < 136 ? "day" : "week"); loadChart(selectedAccount(), currentRevision); }); return ""; }
+    if (y >= 480 && y < 540) { batch(() => { setSpan(x < 136 ? "day" : "week"); chartProjection.refresh(); }); return ""; }
     if (y >= 666 && y < 866) { setScreen("activity"); return ""; }
     if (y >= 866 && y < 1050) { setScreen("positions"); return ""; }
     if (y >= 1176 && x >= 500) {
       if (refreshing()) return "";
       setRefreshing(true);
       setStatus("REFRESHING ROBINHOOD…");
-      return JSON.stringify({ type: "invokeTask", task: "refreshPortfolio" });
+      return PocketPi.action("refreshPortfolio");
     }
     return "";
   },
-};
+});

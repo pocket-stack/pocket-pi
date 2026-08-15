@@ -39,8 +39,8 @@ contracts while adding the device-level responsibilities Pocket Pi owns:
 - tools have explicit schemas and return structured results;
 - the Agent loop is separate from model transports and platform APIs;
 - workspace and schedules are durable device capabilities;
-- Apps combine Agent-facing Tools, local state, autonomous Tasks and a fixed
-  human-facing View;
+- Apps are Data + actor-neutral Actions + a fixed human-facing View; Agent
+  Tools, UI events and Schedules route to the same Actions;
 - the native host owns credentials, transport, hardware and lifecycle.
 
 The companion simulator runs the same AgentOS, PocketJS App bundles, UI, Tool
@@ -69,15 +69,17 @@ cargo xtask build esp32-p4-sim
 cargo xtask build esp32-p4
 ```
 
-Pi Agent is always included in firmware. Ordinary Apps are standalone packages:
+Firmware embeds the Pi Agent Bundle so a blank device can boot. Ordinary Apps
+use the installable container:
 
 ```sh
 cargo xtask build app exa path/to/exa-credentials.json
 ```
 
 Packages are written to `target/pocketapps/<id>.pocketapp`. The firmware image
-contains the resident Pi Agent, workspace, native tools, schedules and Root View,
-but no ordinary App. Apps without declared credentials omit the final argument.
+contains Pi Agent and native device mechanisms, but no ordinary App. Ordinary
+Apps can be installed without rebuilding or flashing Firmware. Apps without
+declared credentials omit the final argument.
 
 ### 1. Pocket Pi on ESP32-P4
 
@@ -138,9 +140,10 @@ python3 tools/uart-install.py "$DEVICE_PORT" \
 ```
 
 Both transports stop at the same review screen; installation starts only after
-confirmation on Pocket Pi. Every credential declared by the App must be present
-in the package. Installer removes those values from the package and stores them in
-native NVS; they are not exposed through the App filesystem or Agent workspace.
+confirmation on Pocket Pi. Installation fails if that App id is already present,
+and every install must carry each credential declared by the App. Installer
+removes initial values from the package and stores them in native
+NVS; they are not exposed through the App filesystem or Agent workspace.
 Neither HTTP nor UART writes App storage, credentials or runtime state directly.
 UART upload does not reset the board or change its model configuration.
 The UART CLIs leave DTR/RTS inactive before closing the port so the USB serial
@@ -148,7 +151,7 @@ bridge does not reset a running Pocket Pi.
 
 To remove an ordinary App, open **Apps**, tap **UNINSTALL APP**, then tap the
 `X` on that App's row. Uninstall removes the App release, SQLite/data files,
-schedules, credentials, native session state and cached View/Data Action
+schedules, credentials, native session state and cached View/Action
 Runtimes. It does not retain App data or provide rollback. The resident Pi Agent
 System App cannot be uninstalled.
 
@@ -241,7 +244,7 @@ includes:
 
 The embedded AgentOS ships Pi Agent as its resident System App. Robinhood and
 Exa use the same installable package as every ordinary App. Each ordinary App
-owns its Tool catalog, Data Action, SQLite projection and fixed PocketJS View;
+owns its Tool catalog, Actions, SQLite Data and fixed PocketJS View;
 hosts provide only scoped credentials, transport and hardware adapters.
 
 ## Repository map
@@ -270,9 +273,10 @@ and [docs/esp32-p4-port.md](docs/esp32-p4-port.md) for board-specific details.
 
 ## Current validation
 
-On **2026-08-14**, the workspace completed 35 Rust tests and 3 App text behavior
+On **2026-08-15**, the workspace completed 40 Rust tests and 3 App text behavior
 tests with no failures, passed workspace Clippy with warnings denied, and built
-the ESP32-P4 release firmware. A simulator LAN smoke uploaded the generated Exa
+the ESP32-P4 release firmware. No new physical-board test was run for this
+refactor. On 2026-08-14, a simulator LAN smoke uploaded the generated Exa
 package through `POST /install` and received HTTP 202; the core install test
 proves activation, Tool routing, SQLite ownership and restart recovery for a
 previously absent App. The uninstall lifecycle test proves complete App-owned
@@ -285,6 +289,8 @@ provisioning received `PPI-CONFIG-STORED`; a bridge-free reset logged
 `loaded wireless model configuration from NVS`, restored Wi-Fi/DHCP on
 the saved network, and reached an idle Pi Agent; the independent App uploader
 transferred Exa to the shared review screen without resetting the board.
+That 2026-08-14 hardware evidence predates the current Bundle contract and is
+not physical-board acceptance for this refactor.
 
 Phone upload, fresh provider calls and unattended memory pressure remain
 separate evidence tiers. Simulator and cross-build success do not substitute

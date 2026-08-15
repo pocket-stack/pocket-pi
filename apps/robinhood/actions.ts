@@ -4,20 +4,9 @@ import toolCatalog from "./tool-catalog.json";
 // result to the Agent. Only data consumed by the fixed foreground View is
 // normalized into SQLite; transient research/watchlist/options payloads never
 // become App state merely because a Tool was called.
-const nativeDb = (globalThis as any).db;
-const handle = nativeDb.open("robinhood");
-if (handle < 0) throw new Error("open robinhood.sqlite");
-
 const SCHEMA_VERSION = 5;
 
-function dbError(): string { return String(nativeDb.lastError(handle) || "SQLite operation failed"); }
-function exec(sql: string): void { if (nativeDb.exec(handle, sql) !== 0) throw new Error(dbError()); }
-function query(sql: string, args: any[] = []): any {
-  const result = JSON.parse(nativeDb.query(handle, sql, JSON.stringify(args)));
-  if (result.error) throw new Error(String(result.error));
-  return result;
-}
-function run(sql: string, args: any[] = []): any { return query(sql, args); }
+function run(sql: string, args: any[] = []): any[] { return PocketPi.data.query(sql, args); }
 function insertRows(sql: string, rows: any[][]): void {
   if (!rows.length) return;
   const values = rows.map((row) => "(" + row.map(() => "?").join(",") + ")").join(",");
@@ -26,9 +15,9 @@ function insertRows(sql: string, rows: any[][]): void {
   run(sql + " VALUES " + values, args);
 }
 
-const version = Number(query("PRAGMA user_version")?.rows?.[0]?.[0] ?? 0);
+const version = Number(run("PRAGMA user_version")[0]?.user_version ?? 0);
 if (version !== SCHEMA_VERSION) {
-  exec(`
+  PocketPi.data.exec(`
     CREATE TABLE IF NOT EXISTS accounts (
     account_number TEXT PRIMARY KEY,
     label TEXT NOT NULL,
@@ -226,44 +215,33 @@ function retryableOperation(name: string): boolean {
 }
 
 function callTool(operation: string, args: any): any {
-  const envelope = JSON.parse((globalThis as any).services.call(
+  return PocketPi.services.call(
     "mcp.client",
     "callTool",
-    JSON.stringify({
+    {
       connection: "robinhood",
       name: operation,
       arguments: args,
       retryable: retryableOperation(operation),
-    }),
-  ));
-  if (!envelope.ok) throw new Error(envelope.error || "Robinhood service failed");
-  return envelope.value;
+    },
+  );
 }
 
 function callTools(calls: Array<{ operation: string; args: any }>): any[] {
-  const envelope = JSON.parse((globalThis as any).services.call(
+  const value = PocketPi.services.call(
     "mcp.client",
     "callTools",
-    JSON.stringify({
+    {
       connection: "robinhood",
       calls: calls.map((call) => ({ name: call.operation, arguments: call.args })),
       retryable: calls.every((call) => retryableOperation(call.operation)),
-    }),
-  ));
-  if (!envelope.ok) throw new Error(envelope.error || "Robinhood batch service failed");
-  return Array.isArray(envelope.value?.results) ? envelope.value.results : [];
+    },
+  );
+  return Array.isArray(value?.results) ? value.results : [];
 }
 
 function transaction(action: () => void): void {
-  exec("BEGIN IMMEDIATE");
-  try {
-    action();
-    exec("COMMIT");
-  } catch (error) {
-    try { exec("ROLLBACK"); } catch {}
-    throw error;
-  }
-  (globalThis as any).app.commit();
+  PocketPi.data.transaction(action);
 }
 
 function saveAccounts(value: any, observedAt: number): void {
@@ -357,7 +335,7 @@ function saveRealizedPnl(value: any, args: any, observedAt: number): void {
   );
 }
 
-function saveProjection(update: DomainUpdate): boolean {
+function saveDomainUpdate(update: DomainUpdate): boolean {
   if (update.operation === "get_accounts") saveAccounts(update.value, update.observedAt);
   else if (update.operation === "get_portfolio") savePortfolio(update.value, update.args, update.observedAt);
   else if (update.operation === "get_equity_positions") savePositions(update.value, update.args, update.observedAt);
@@ -431,7 +409,7 @@ function refreshPortfolio(): any {
 
   const status = terminalError ? "failed" : errors.length ? "partial" : "succeeded";
   transaction(() => {
-    if (!terminalError) for (const update of updates) saveProjection(update);
+    if (!terminalError) for (const update of updates) saveDomainUpdate(update);
     run(
       `INSERT INTO refresh_runs(started_at,completed_at,status,operation_count,success_count,error)
        VALUES(?,?,?,?,?,?)`,
@@ -482,45 +460,19 @@ function invokeProviderTool(operation: string, args: any): any {
   const value = callTool(operation, args);
   const update = { operation, args, value, observedAt: now() };
   if (["get_accounts", "get_portfolio", "get_equity_positions", "get_equity_orders", "get_realized_pnl"].includes(operation)) {
-    transaction(() => saveProjection(update));
+    transaction(() => saveDomainUpdate(update));
   }
   if (operation === "place_equity_order" || operation === "cancel_equity_order") {
     // The order result directly affects the View's activity projection. Avoid
     // nesting a second MCP request in the same 128 KiB QuickJS call stack;
-    // portfolio and positions converge on the normal refresh task.
+    // portfolio and positions converge on the scheduled refresh Action.
     transaction(() => saveEquityAction(operation, value, args, update.observedAt));
   }
   return value;
 }
 
-function success(value: any): string {
-  // The Agent consumes Tool results through text. Keeping the same provider
-  // object in details would retain a second copy in QuickJS and again in the
-  // Rust/Agent message bridge, which is especially expensive for market-data
-  // and options responses.
-  return JSON.stringify({ text: JSON.stringify(value), isError: false });
-}
-
-(globalThis as any).PocketPiData = {
-  invokeTask(name: string) {
-    try {
-      if (name !== "refreshPortfolio") throw new Error("Unknown Robinhood Data Action: " + name);
-      const value = refreshPortfolio();
-      return success(value);
-    } catch (error) {
-      return JSON.stringify({ text: error instanceof Error ? error.message : String(error), isError: true });
-    }
-  },
-  invokeTool(name: string, argsLine: string) {
-    try {
-      const args = JSON.parse(argsLine);
-      const value = name === "robinhood.refresh_portfolio" ? refreshPortfolio()
-        : name === "robinhood.search_tools" ? searchTools(args)
-        : name === "robinhood.call" ? validatedProviderCall(args)
-        : (() => { throw new Error("Unknown Robinhood Tool: " + name); })();
-      return success(value);
-    } catch (error) {
-      return JSON.stringify({ text: error instanceof Error ? error.message : String(error), isError: true });
-    }
-  },
-};
+PocketPi.defineActions({
+  refreshPortfolio,
+  searchTools,
+  call: validatedProviderCall,
+});

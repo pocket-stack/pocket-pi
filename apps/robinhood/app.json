@@ -2,7 +2,6 @@
   "id": "robinhood",
   "description": "Portfolio, positions, and trading",
   "version": "1.1.0",
-  "dataVersion": 5,
   "nativeServices": {
     "mcp": [
       {
@@ -75,6 +74,7 @@
   "tools": [
     {
       "name": "robinhood.search_tools",
+      "action": "searchTools",
       "description": "Search Pocket Pi's checked-in Robinhood Trading MCP catalog. Use this before robinhood.call whenever the exact upstream Tool and arguments are not already present in the conversation. Returns the checked-in description, exact upstream JSON Schema, Pocket Pi persistence behavior, and whether the Tool is a real account or real-money action. This performs no Robinhood request and writes no SQLite data.",
       "parameters": {
         "type": "object",
@@ -112,6 +112,7 @@
     },
     {
       "name": "robinhood.call",
+      "action": "call",
       "description": "Invoke one upstream Robinhood Trading MCP Tool by its exact unnamespaced name. First use robinhood.search_tools and follow the returned JSON Schema and safety instructions. Pocket Pi validates arguments locally, native code enforces the checked-in allowlist, and the completed provider result is returned to the Agent. Never retry a real-money action with a new ref_id after an ambiguous transport result.",
       "parameters": {
         "type": "object",
@@ -135,6 +136,7 @@
     },
     {
       "name": "robinhood.refresh_portfolio",
+      "action": "refreshPortfolio",
       "description": "Refresh accounts, portfolio, equity positions, recent equity orders, and day/week realized P&L into robinhood.sqlite. This is a local Pocket Pi aggregate and does not place, modify, or cancel orders.",
       "parameters": {
         "type": "object",
@@ -143,14 +145,11 @@
       }
     }
   ],
-  "tasks": [
-    "refreshPortfolio"
-  ],
   "schedules": [
     {
       "id": "portfolio-refresh",
       "everyMinutes": 5,
-      "task": "refreshPortfolio",
+      "action": "refreshPortfolio",
       "args": {}
     }
   ]
