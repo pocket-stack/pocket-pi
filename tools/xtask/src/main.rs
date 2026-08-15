@@ -8,6 +8,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
 const POCKETJS_REVISION: &str = "e12cf12f82cc60b636368119d49a06eb9ed2a3d5";
+const SYSTEM_FRAMEWORK_API: u32 = 1;
 
 fn main() -> Result<()> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -119,15 +120,15 @@ fn build_app_with_pocketjs(root: &Path, pocketjs: &Path, app: &str) -> Result<()
         &format!("building AgentOS App {app}"),
     )?;
     minify_agentos_bundle(&app_root)?;
-    let data_entry = app_root.join("data-action.ts");
-    if data_entry.is_file() {
+    let actions_entry = app_root.join("actions.ts");
+    if actions_entry.is_file() {
         command(
             Command::new("bun")
-                .arg(root.join("tools/build-agentos-data.ts"))
-                .arg(&data_entry)
-                .arg(app_root.join("dist/data-action.js"))
+                .arg(root.join("tools/build-agentos-actions.ts"))
+                .arg(&actions_entry)
+                .arg(app_root.join("dist/actions.js"))
                 .arg(pocketjs),
-            &format!("building AgentOS data action {app}"),
+            &format!("building AgentOS Actions {app}"),
         )?;
     }
     Ok(())
@@ -135,8 +136,7 @@ fn build_app_with_pocketjs(root: &Path, pocketjs: &Path, app: &str) -> Result<()
 
 fn package_app(root: &Path, app: &str, credentials: Option<&Path>) -> Result<()> {
     let app_root = app_root(root, app)?;
-    let descriptor: Value =
-        serde_json::from_slice(&std::fs::read(app_root.join("agent-app.json"))?)?;
+    let descriptor: Value = serde_json::from_slice(&std::fs::read(app_root.join("app.json"))?)?;
     let manifest: Value = serde_json::from_slice(&std::fs::read(app_root.join("pocket.json"))?)?;
     let credentials_map = credentials.map_or_else(
         || Ok(BTreeMap::new()),
@@ -156,7 +156,7 @@ fn package_app(root: &Path, app: &str, credentials: Option<&Path>) -> Result<()>
     anyhow::ensure!(
         credentials_map.keys().cloned().collect::<BTreeSet<_>>()
             == descriptor_credential_ids(&descriptor),
-        "credentials.json ids do not match agent-app.json"
+        "credentials.json ids do not match app.json"
     );
     let output_dir = root.join("target/pocketapps");
     std::fs::create_dir_all(&output_dir)?;
@@ -164,16 +164,16 @@ fn package_app(root: &Path, app: &str, credentials: Option<&Path>) -> Result<()>
     let file = std::fs::File::create(&output)?;
     let mut archive = tar::Builder::new(file);
     for (source, name) in [
-        (app_root.join("agent-app.json"), "agent-app.json"),
+        (app_root.join("app.json"), "app.json"),
         (app_root.join("pocket.json"), "pocket.json"),
         (app_root.join("dist/app.js"), "app.js"),
         (app_root.join("dist/app.pak"), "app.pak"),
     ] {
         archive.append_path_with_name(source, name)?;
     }
-    let data_action = app_root.join("dist/data-action.js");
-    if data_action.is_file() {
-        archive.append_path_with_name(data_action, "data-action.js")?;
+    let actions = app_root.join("dist/actions.js");
+    if actions.is_file() {
+        archive.append_path_with_name(actions, "actions.js")?;
     }
     if let Some(credentials) = credentials {
         archive.append_path_with_name(credentials, "credentials.json")?;
@@ -181,6 +181,7 @@ fn package_app(root: &Path, app: &str, credentials: Option<&Path>) -> Result<()>
     let plan = serde_json::to_vec_pretty(&json!({
         "runtime":"pocket-pi-agentos",
         "pocketjsRevision":POCKETJS_REVISION,
+        "frameworkApi":SYSTEM_FRAMEWORK_API,
         "app":app,
         "modules":manifest.pointer("/engine/capabilities/requires").cloned().unwrap_or_else(|| json!([]))
     }))?;

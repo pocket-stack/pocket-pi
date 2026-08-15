@@ -179,7 +179,7 @@ impl AppServiceHost for SimAppServices {
         deadline: Instant,
     ) -> Result<Value, String> {
         if Instant::now() >= deadline {
-            return Err("App Data Action deadline expired".into());
+            return Err("App Action deadline expired".into());
         }
         let tool_name = args.get("name").and_then(Value::as_str).unwrap_or("");
         let tool_args = args.get("arguments").unwrap_or(&Value::Null);
@@ -275,10 +275,7 @@ impl AppServiceHost for SimAppServices {
         deadline: Instant,
     ) -> std::result::Result<TransportCompletion, NetFailure> {
         if Instant::now() >= deadline {
-            return Err(NetFailure::new(
-                "timeout",
-                "App Data Action deadline expired",
-            ));
+            return Err(NetFailure::new("timeout", "App Action deadline expired"));
         }
         if app_id != "exa" || request.method != "POST" {
             return Err(NetFailure::new(
@@ -339,8 +336,8 @@ struct Product {
     supervisor: AppSupervisor,
     last_schedule_poll: Instant,
     busy: bool,
-    projection_dirty: bool,
-    pending_ui_task: Option<String>,
+    system_dirty: bool,
+    pending_ui_action: Option<(String, Value)>,
     wifi_connected: Option<String>,
     wifi_networks: Vec<(&'static str, i32, bool)>,
     wifi_status: String,
@@ -397,8 +394,8 @@ impl Product {
             supervisor,
             last_schedule_poll: Instant::now(),
             busy: false,
-            projection_dirty: true,
-            pending_ui_task: None,
+            system_dirty: true,
+            pending_ui_action: None,
             wifi_connected: Some("macOS host network".into()),
             wifi_networks: Vec::new(),
             wifi_status: "SIMULATED NETWORK READY".into(),
@@ -431,89 +428,92 @@ impl Product {
             self.agent_status = "FAULTED";
             self.busy = false;
         }
-        self.projection_dirty = true;
+        self.system_dirty = true;
     }
 
     fn tap(&mut self, x: u16, y: u16) -> Result<()> {
         let action = self.supervisor.tap(x, y)?;
         match action.get("type").and_then(Value::as_str) {
-            Some("navigate") => {
-                if let Some(app) = action.get("app").and_then(Value::as_str) {
-                    self.supervisor.open(app)?;
-                    self.projection_dirty = true;
+            Some("action") => {
+                if let Some(name) = action.get("action").and_then(Value::as_str) {
+                    self.pending_ui_action = Some((
+                        name.to_owned(),
+                        action.get("args").cloned().unwrap_or(Value::Null),
+                    ));
                 }
             }
-            Some("submitPrompt") => {
-                if let Some(prompt) = action.get("prompt").and_then(Value::as_str) {
-                    self.send_prompt(prompt.to_owned());
-                }
-            }
-            Some("invokeTask") => {
-                if let Some(task) = action.get("task").and_then(Value::as_str) {
-                    self.pending_ui_task = Some(task.to_owned());
-                }
-            }
-            Some("uninstallApp") => {
-                if let Some(app_id) = action.get("app").and_then(Value::as_str) {
-                    if self.busy || self.supervisor.services_busy() {
-                        self.uninstall_error = Some("APP SERVICES ARE BUSY".into());
-                    } else {
-                        self.pending_uninstall = Some(app_id.to_owned());
-                        self.uninstall_error = None;
+            Some("command") => {
+                let args = action.get("args").unwrap_or(&Value::Null);
+                match action.get("command").and_then(Value::as_str) {
+                    Some("apps.open") => {
+                        if let Some(app) = args.get("app").and_then(Value::as_str) {
+                            self.supervisor.open(app)?;
+                        }
                     }
-                    self.projection_dirty = true;
-                }
-            }
-            Some("installApp")
-                if self
-                    .install_ui
-                    .as_ref()
-                    .is_some_and(|ui| ui.state == "review") =>
-            {
-                if let Some(ui) = &mut self.install_ui {
-                    ui.state = "installing";
-                }
-                self.install_requested = true;
-                self.projection_dirty = true;
-            }
-            Some("dismissInstall") => {
-                if let Some(staged) = self.pending_install.take() {
-                    if let Some(path) = staged.release_dir.parent() {
-                        let _ = std::fs::remove_dir_all(path);
+                    Some("agent.submit") => {
+                        if let Some(prompt) = args.get("prompt").and_then(Value::as_str) {
+                            self.send_prompt(prompt.to_owned());
+                        }
                     }
-                }
-                self.install_ui = None;
-                self.install_slot.store(false, Ordering::Release);
-                self.projection_dirty = true;
-            }
-            Some("settings") => match action.get("command").and_then(Value::as_str) {
-                Some("scan") => {
-                    self.wifi_networks = vec![
-                        ("PocketPi Lab", -42, true),
-                        ("Studio Guest", -61, false),
-                        ("ESP32 Testbench", -73, true),
-                    ];
-                    self.wifi_status = "3 NETWORKS FOUND".into();
-                    self.projection_dirty = true;
-                }
-                Some("connect") => {
-                    if let Some(ssid) = action.get("ssid").and_then(Value::as_str) {
-                        self.wifi_connected = Some(ssid.to_owned());
-                        self.wifi_status = format!("CONNECTED TO {ssid}");
-                        self.projection_dirty = true;
+                    Some("apps.uninstall") => {
+                        if let Some(app_id) = args.get("app").and_then(Value::as_str) {
+                            if self.busy || self.supervisor.services_busy() {
+                                self.uninstall_error = Some("APP SERVICES ARE BUSY".into());
+                            } else {
+                                self.pending_uninstall = Some(app_id.to_owned());
+                                self.uninstall_error = None;
+                            }
+                        }
                     }
+                    Some("apps.install")
+                        if self
+                            .install_ui
+                            .as_ref()
+                            .is_some_and(|ui| ui.state == "review") =>
+                    {
+                        if let Some(ui) = &mut self.install_ui {
+                            ui.state = "installing";
+                        }
+                        self.install_requested = true;
+                    }
+                    Some("apps.dismissInstall") => {
+                        if let Some(staged) = self.pending_install.take() {
+                            if let Some(path) = staged.release_dir.parent() {
+                                let _ = std::fs::remove_dir_all(path);
+                            }
+                        }
+                        self.install_ui = None;
+                        self.install_slot.store(false, Ordering::Release);
+                    }
+                    Some("device.wifi.scan") => {
+                        self.wifi_networks = vec![
+                            ("PocketPi Lab", -42, true),
+                            ("Studio Guest", -61, false),
+                            ("ESP32 Testbench", -73, true),
+                        ];
+                        self.wifi_status = "3 NETWORKS FOUND".into();
+                        self.system_dirty = true;
+                    }
+                    Some("device.wifi.connect") => {
+                        if let Some(ssid) = args.get("ssid").and_then(Value::as_str) {
+                            self.wifi_connected = Some(ssid.to_owned());
+                            self.wifi_status = format!("CONNECTED TO {ssid}");
+                            self.system_dirty = true;
+                        }
+                    }
+                    Some("device.wifi.forget") => {
+                        self.wifi_connected = None;
+                        self.wifi_status = "WI-FI CREDENTIALS FORGOTTEN".into();
+                        self.system_dirty = true;
+                    }
+                    Some("device.restart") => {
+                        self.wifi_status = "SIMULATED RESTART REQUESTED".into();
+                        self.system_dirty = true;
+                    }
+                    _ => {}
                 }
-                Some("forget") => {
-                    self.wifi_connected = None;
-                    self.wifi_status = "WI-FI CREDENTIALS FORGOTTEN".into();
-                    self.projection_dirty = true;
-                }
-                Some("restart") => {
-                    self.wifi_status = "SIMULATED RESTART REQUESTED".into();
-                    self.projection_dirty = true;
-                }
-                _ => {}
-            },
+                self.system_dirty = true;
+            }
             _ => {}
         }
         Ok(())
@@ -528,19 +528,19 @@ impl Product {
         self.supervisor.pointer_up()
     }
 
-    fn run_pending_ui_task(&mut self) {
-        let Some(task) = self.pending_ui_task.take() else {
+    fn run_pending_ui_action(&mut self) {
+        let Some((action, args)) = self.pending_ui_action.take() else {
             return;
         };
         let started = Instant::now();
-        let result = self.supervisor.invoke_active_task(&task, &Value::Null);
+        let result = self.supervisor.invoke_active_action(&action, &args);
         log::info!(
-            "UI AppTask {} finished in {}ms: {}",
-            task,
+            "UI App Action {} finished in {}ms: {}",
+            action,
             started.elapsed().as_millis(),
             result.text
         );
-        self.projection_dirty = true;
+        self.system_dirty = true;
     }
 
     fn run_pending_install(&mut self) {
@@ -554,7 +554,7 @@ impl Product {
         let cleanup = staged.release_dir.parent().map(Path::to_path_buf);
         let result = self
             .supervisor
-            .activate_new_app(&staged.release_dir, staged.credentials);
+            .activate_app(&staged.release_dir, staged.credentials);
         if let Some(path) = cleanup {
             let _ = std::fs::remove_dir_all(path);
         }
@@ -567,7 +567,7 @@ impl Product {
                 }
             }
         }
-        self.projection_dirty = true;
+        self.system_dirty = true;
     }
 
     fn run_pending_uninstall(&mut self) {
@@ -577,7 +577,7 @@ impl Product {
         if let Err(error) = self.supervisor.uninstall_app(&app_id) {
             self.uninstall_error = Some(format!("{error:#}"));
         }
-        self.projection_dirty = true;
+        self.system_dirty = true;
     }
 
     fn poll(&mut self) -> Result<()> {
@@ -594,29 +594,29 @@ impl Product {
                 });
                 self.pending_install = Some(staged);
                 self.supervisor.open(ROOT_APP_ID)?;
-                self.projection_dirty = true;
+                self.system_dirty = true;
             }
         }
         while let Ok(request) = self.app_rx.try_recv() {
             request.handle(&self.supervisor);
-            self.projection_dirty = true;
+            self.system_dirty = true;
         }
         if self.last_schedule_poll.elapsed() >= Duration::from_secs(1) {
             if self.install_ui.is_none() && self.pending_uninstall.is_none() && !self.busy {
                 if let Some(wake) = self.native_tools.claim_due() {
                     self.send_prompt(wake.prompt);
                 }
-                for (task, result) in self.supervisor.poll_due_tasks() {
-                    log::info!("AppTask {task}: {}", result.text);
+                for (action, result) in self.supervisor.poll_due_actions() {
+                    log::info!("App Action {action}: {}", result.text);
                 }
             }
             self.last_schedule_poll = Instant::now();
-            self.projection_dirty = true;
+            self.system_dirty = true;
         }
 
-        if self.projection_dirty {
-            self.supervisor.update_root(&self.root_projection())?;
-            self.projection_dirty = false;
+        if self.system_dirty {
+            self.supervisor.update_system(&self.system_facts())?;
+            self.system_dirty = false;
         }
         // frame() always advances the Pi Agent System App, even while another
         // App owns the visible View. Model/tool work itself remains off-thread.
@@ -640,12 +640,12 @@ impl Product {
                     self.busy = false;
                 }
             }
-            self.projection_dirty = true;
+            self.system_dirty = true;
         }
         Ok(())
     }
 
-    fn root_projection(&self) -> Value {
+    fn system_facts(&self) -> Value {
         let schedule = self.native_tools.schedule_projection();
         let schedule_next = match schedule.next_in_seconds {
             Some(seconds) => schedule.every_minutes.map_or_else(
@@ -821,7 +821,7 @@ fn headless(
     let mut product = Product::new(workspace, backend, &app)?;
     if let Some((x, y)) = root_tap {
         product.tap(x, y)?;
-        product.run_pending_ui_task();
+        product.run_pending_ui_action();
     }
     let wait_for_turn = prompt.is_some();
     if let Some(prompt) = prompt {
@@ -984,7 +984,7 @@ impl WindowApp {
         state.gpu.queue.submit([encoder.finish()]);
         state.window.pre_present_notify();
         frame.present();
-        state.product.run_pending_ui_task();
+        state.product.run_pending_ui_action();
         state.product.run_pending_install();
         state.product.run_pending_uninstall();
         state.window.request_redraw();
@@ -1091,6 +1091,10 @@ mod tests {
             let _ = (service, operation);
             Err("simulated Robinhood outage".into())
         }
+
+        fn store_credentials(&self, _credentials: &BTreeMap<String, String>) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     struct NoTools;
@@ -1134,7 +1138,7 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        panic!("timed out waiting for background App Data Action");
+        panic!("timed out waiting for background App Action");
     }
 
     fn try_query_app_database(
@@ -1169,40 +1173,50 @@ mod tests {
     }
 
     fn test_supervisor(workspace: &Path, services: Arc<dyn AppServiceHost>) -> AppSupervisor {
+        let catalog = InstalledAppIndex::load(workspace, system_app_bundle()).unwrap();
+        let mut supervisor = AppSupervisor::new(workspace, catalog, services).unwrap();
         for app_id in ["robinhood", "exa"] {
             let source = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../..")
                 .join("apps")
                 .join(app_id);
-            let release = workspace.join("apps").join(app_id).join("releases/r1");
-            std::fs::create_dir_all(&release).unwrap();
+            let staging = workspace.join(format!(".staged-{app_id}"));
+            std::fs::create_dir_all(&staging).unwrap();
             for (from, to) in [
-                ("agent-app.json", "agent-app.json"),
+                ("app.json", "app.json"),
                 ("pocket.json", "pocket.json"),
                 ("dist/app.js", "app.js"),
                 ("dist/app.pak", "app.pak"),
-                ("dist/data-action.js", "data-action.js"),
+                ("dist/actions.js", "actions.js"),
             ] {
-                std::fs::copy(source.join(from), release.join(to)).unwrap();
+                std::fs::copy(source.join(from), staging.join(to)).unwrap();
             }
             let manifest: Value =
                 serde_json::from_slice(&std::fs::read(source.join("pocket.json")).unwrap())
                     .unwrap();
             std::fs::write(
-                release.join("plan.json"),
+                staging.join("plan.json"),
                 serde_json::to_vec(&json!({
                     "runtime":"pocket-pi-agentos",
                     "pocketjsRevision":pocket_pi_agentos::POCKETJS_REVISION,
+                    "frameworkApi":pocket_pi_agentos::SYSTEM_FRAMEWORK_API,
                     "app":app_id,
                     "modules":manifest.pointer("/engine/capabilities/requires").unwrap()
                 }))
                 .unwrap(),
             )
             .unwrap();
-            std::fs::write(workspace.join("apps").join(app_id).join("current"), "r1").unwrap();
+            let credentials = match app_id {
+                "robinhood" => BTreeMap::from([(
+                    "robinhood.oauth-access-token".to_owned(),
+                    "test-secret".to_owned(),
+                )]),
+                "exa" => BTreeMap::from([("exa.api-key".to_owned(), "test-secret".to_owned())]),
+                _ => unreachable!(),
+            };
+            supervisor.activate_app(&staging, credentials).unwrap();
         }
-        let catalog = InstalledAppIndex::load(workspace, system_app_bundle()).unwrap();
-        AppSupervisor::new(workspace, catalog, services).unwrap()
+        supervisor
     }
 
     fn checked_in_package(app_id: &str, output: &Path) {
@@ -1215,11 +1229,11 @@ mod tests {
         let file = std::fs::File::create(output).unwrap();
         let mut archive = tar::Builder::new(file);
         for (from, to) in [
-            ("agent-app.json", "agent-app.json"),
+            ("app.json", "app.json"),
             ("pocket.json", "pocket.json"),
             ("dist/app.js", "app.js"),
             ("dist/app.pak", "app.pak"),
-            ("dist/data-action.js", "data-action.js"),
+            ("dist/actions.js", "actions.js"),
         ] {
             archive
                 .append_path_with_name(source.join(from), to)
@@ -1228,6 +1242,7 @@ mod tests {
         let plan = serde_json::to_vec(&json!({
             "runtime":"pocket-pi-agentos",
             "pocketjsRevision":pocket_pi_agentos::POCKETJS_REVISION,
+            "frameworkApi":pocket_pi_agentos::SYSTEM_FRAMEWORK_API,
             "app":app_id,
             "modules":manifest.pointer("/engine/capabilities/requires").unwrap()
         }))
@@ -1265,7 +1280,7 @@ mod tests {
             AppSupervisor::new(&workspace, index, Arc::new(SimAppServices)).unwrap();
         assert!(supervisor.catalog().descriptor("exa").is_none());
         supervisor
-            .activate_new_app(&staged.release_dir, staged.credentials)
+            .activate_app(&staged.release_dir, staged.credentials)
             .unwrap();
         assert!(supervisor.catalog().descriptor("exa").is_some());
         let result = route_tool(
@@ -1283,11 +1298,7 @@ mod tests {
             ),
             vec![json!(["ok", 2])]
         );
-        let active_release = std::fs::read_to_string(workspace.join("apps/exa/current")).unwrap();
-        assert_eq!(active_release, "1.1.0");
-        assert!(!workspace
-            .join("apps/exa/releases/1.1.0/credentials.json")
-            .exists());
+        assert!(!workspace.join("apps/exa/release/credentials.json").exists());
 
         drop(supervisor);
         let restored = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
@@ -1366,7 +1377,7 @@ mod tests {
         let mut supervisor = test_supervisor(temp.path(), Arc::new(FailingRobinhood));
         supervisor.open("robinhood").unwrap();
 
-        let failed = supervisor.invoke_active_task("refreshPortfolio", &Value::Null);
+        let failed = supervisor.invoke_active_action("refreshPortfolio", &Value::Null);
         assert!(!failed.is_error);
         wait_for(|| {
             try_query_app_database(

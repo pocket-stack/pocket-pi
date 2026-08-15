@@ -2,7 +2,7 @@ import { basename, dirname } from "node:path";
 
 const [entry, output, pocketjsRoot] = Bun.argv.slice(2);
 if (!entry || !output || !pocketjsRoot) {
-  throw new Error("usage: build-agentos-data.ts <entry> <output> <pocketjs-root>");
+  throw new Error("usage: build-agentos-actions.ts <entry> <output> <pocketjs-root>");
 }
 
 const compiler = await import(`${pocketjsRoot}/framework/compiler/jsx-plugin.ts`);

@@ -17,7 +17,7 @@ the Responses API's native `tool_search` wire protocol. Native Tool Search is
 currently limited to supported OpenAI models, while Pocket Pi also supports
 other model backends. If a backend gains native deferred loading, it can expose
 the same snapshot as dynamically loaded normal function definitions without
-changing the Robinhood Data Action.
+changing the Robinhood Action Bundle.
 
 References:
 
@@ -41,11 +41,11 @@ contract tests.
 
 This file and the catalog have different roles:
 
-- `tool-catalog.json` is executable source data. The Data Action build inlines it
-  into `dist/data-action.js`, where `searchTools()` and
+- `tool-catalog.json` is executable source data. The Action build inlines it
+  into `dist/actions.js`, where `searchTools()` and
   `validatedProviderCall()` use it at runtime. Rust contract tests also read the
   source snapshot directly to keep all 54 names aligned with
-  `agent-app.json.providerOperations`.
+  `app.json.providerOperations`.
 - `TOOLS.md` is human-facing maintenance documentation. It is not imported by
   the build or read by the device runtime.
 
@@ -62,7 +62,7 @@ Exact-name lookup is preferred when the Agent already knows the upstream name.
 The current upstream schemas use `type`, `properties`, `required`,
 `additionalProperties`, `items`, `minimum`, and `maximum`. Pocket Pi validates
 all of those keywords before crossing the native service boundary. The native
-allowlist is built from `agent-app.json.providerOperations`, so a Tool must be
+allowlist is built from `app.json.providerOperations`, so a Tool must be
 present in both the snapshot and the installed App descriptor.
 
 ## Minimal persistence policy
@@ -89,7 +89,7 @@ not call `app.commit()` and therefore cause no SQLite write or View invalidation
 
 Equity place/cancel deliberately does not start a nested MCP refresh after the
 provider action. It uses the returned order payload to update `activities` in
-one short transaction. This keeps the App Data Action within its bounded stack
+one short transaction. This keeps the App Action within its bounded stack
 and avoids extra network, CPU, SQLite, and revision work. Portfolio and
 positions converge on the next normal scheduled or explicit refresh.
 

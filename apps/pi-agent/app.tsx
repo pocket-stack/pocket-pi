@@ -17,7 +17,7 @@ const FILE_PAGE_LINES = 39;
 type Message = { role: string; text: string };
 type Network = { ssid: string; rssiDbm: number; secured: boolean };
 type InstalledApp = { id: string; title: string; description: string; scheduleEveryMinutes?: number | null };
-type InstallProjection = {
+type InstallFacts = {
   state: "review" | "installing" | "success" | "failed";
   name: string;
   version: string;
@@ -27,13 +27,13 @@ type InstallProjection = {
   schedules: number;
   error?: string;
 };
-type Projection = {
+type SystemFacts = {
   agent?: string;
   model?: string;
   messages?: Message[];
   schedule?: { name?: string | null; prompt?: string; next?: string; everyMinutes?: number | null };
   apps?: InstalledApp[];
-  install?: InstallProjection | null;
+  install?: InstallFacts | null;
   uninstallingApp?: string | null;
   uninstallError?: string | null;
   settings?: {
@@ -64,12 +64,12 @@ type Viewer = {
 };
 type Reader = { author: "YOU" | "PI"; lines: string[] };
 
-const [projection, setProjection] = createSignal<Projection>({
+const [facts, setFacts] = createSignal<SystemFacts>({
   agent: "STARTING",
   model: "CODEX / UART / MAC",
   messages: [{ role: "assistant", text: "BOOTING PI AGENT..." }],
 });
-const [installDetail, setInstallDetail] = createSignal<InstallProjection | null>(null);
+const [installDetail, setInstallDetail] = createSignal<InstallFacts | null>(null);
 const [uninstallMode, setUninstallMode] = createSignal(false);
 const [screen, setScreen] = createSignal<Screen>("chat");
 const [activeTab, setActiveTab] = createSignal<Tab>("chat");
@@ -146,7 +146,7 @@ function refreshFiles(path = filePath()) {
 
 function chatTurns(): Array<{ user: string; assistant: string }> {
   const out: Array<{ user: string; assistant: string }> = [];
-  for (const message of projection().messages ?? []) {
+  for (const message of facts().messages ?? []) {
     if (message.role === "user") {
       out.push({ user: message.text, assistant: "THINKING..." });
     } else if (out.length === 0) {
@@ -170,7 +170,7 @@ function Header(props: { title: string }) {
   return (
     <PocketHeader
       title={props.title}
-      accent={projection().agent === "FAULTED" ? "danger" : projection().agent === "THINKING" ? "busy" : "ready"}
+      accent={facts().agent === "FAULTED" ? "danger" : facts().agent === "THINKING" ? "busy" : "ready"}
     />
   );
 }
@@ -190,7 +190,7 @@ function BottomBar() {
 }
 
 function ChatScreen() {
-  const schedule = () => projection().schedule;
+  const schedule = () => facts().schedule;
   const schedulePreview = () => {
     const current = schedule();
     return wrapPreview(
@@ -278,10 +278,10 @@ function FilesScreen() {
 }
 
 function AppsScreen() {
-  const apps = () => projection().apps ?? [];
-  const uninstalling = () => projection().uninstallingApp;
-  const status = () => projection().uninstallError
-    ? "UNINSTALL FAILED  ·  " + projection().uninstallError
+  const apps = () => facts().apps ?? [];
+  const uninstalling = () => facts().uninstallingApp;
+  const status = () => facts().uninstallError
+    ? "UNINSTALL FAILED  ·  " + facts().uninstallError
     : uninstalling()
       ? "UNINSTALLING " + uninstalling()!.toUpperCase() + "..."
       : "APP DATA STAYS ISOLATED.  PI AGENT CAN USE EACH APP'S TOOLS.";
@@ -306,7 +306,7 @@ function AppsScreen() {
           )}</For>
         </Show>
         <View class="absolute left-[24] top-[820] w-[672] h-[112] px-6 bg-slate-100">
-          <StatusBar text={status()} tone={projection().uninstallError ? "danger" : "neutral"} />
+          <StatusBar text={status()} tone={facts().uninstallError ? "danger" : "neutral"} />
         </View>
         <View class="absolute left-[24] top-[948] w-[672] h-[80]">
           <ActionButton
@@ -322,7 +322,7 @@ function AppsScreen() {
 }
 
 function SettingsScreen() {
-  const settings = () => projection().settings ?? {};
+  const settings = () => facts().settings ?? {};
   const wifi = () => settings().wifi ?? {};
   const networks = () => (wifi().networks ?? []).slice(wifiOffset(), wifiOffset() + 5);
   const detail = () => wifi().ipAddress
@@ -359,7 +359,7 @@ function SettingsScreen() {
         </View>
         <View class="h-[160] px-5 pt-5 flex-col bg-white">
           <Text class="text-base text-slate-500">MODEL BACKEND</Text>
-          <Text class="pt-3 text-lg text-slate-900 font-bold">{projection().model ?? "UNKNOWN"}</Text>
+          <Text class="pt-3 text-lg text-slate-900 font-bold">{facts().model ?? "UNKNOWN"}</Text>
           <Text class="pt-3 text-base text-slate-600">{"FIRMWARE " + String(settings().firmwareVersion ?? "0.1.0") + "  ·  WORKSPACE FREE " + String(settings().workspaceFree ?? "--")}</Text>
         </View>
         <View class="h-[108] pt-7 flex-row gap-4">
@@ -517,7 +517,7 @@ function InstallScreen() {
 function Root() {
   return (
     <View class="flex-col w-full h-full bg-slate-50">
-      {projection().install ? <InstallScreen />
+      {facts().install ? <InstallScreen />
         : screen() === "chat" ? <ChatScreen />
         : screen() === "files" ? <FilesScreen />
         : screen() === "apps" ? <AppsScreen />
@@ -602,8 +602,8 @@ function handleKeyboardTap(x: number, y: number): string {
       setKeyboardMode("letters");
       setUppercase(false);
       setScreen(activeTab());
-      if (purpose.type === "wifi") return JSON.stringify({ type: "settings", command: "connect", ssid: purpose.ssid, password: value });
-      return JSON.stringify({ type: "submitPrompt", prompt: value });
+      if (purpose.type === "wifi") return PocketPi.command("device.wifi.connect", { ssid: purpose.ssid, password: value });
+      return PocketPi.command("agent.submit", { prompt: value });
     }
   }
   return "";
@@ -612,15 +612,14 @@ function handleKeyboardTap(x: number, y: number): string {
 mount(() => <Root />);
 queueMicrotask(() => refreshFiles(""));
 
-(globalThis as any).PocketPiApp = {
+PocketPi.defineView({
   tick() {
     return "";
   },
-  update(line: string) {
-    const next: Projection = JSON.parse(line);
+  update(next: SystemFacts) {
     batch(() => {
       if (next.install) setInstallDetail(next.install);
-      setProjection(next);
+      setFacts(next);
     });
     return "";
   },
@@ -633,14 +632,14 @@ queueMicrotask(() => refreshFiles(""));
     return "";
   },
   tap(x: number, y: number) {
-    const install = projection().install;
+    const install = facts().install;
     if (install) {
       if (install.state !== "installing" && y >= 1046 && y < 1214) {
-        return JSON.stringify({ type: install.state === "review" ? "installApp" : "dismissInstall" });
+        return PocketPi.command(install.state === "review" ? "apps.install" : "apps.dismissInstall");
       }
       return "";
     }
-    if (projection().uninstallingApp) return "";
+    if (facts().uninstallingApp) return "";
     if (screen() === "keyboard") return handleKeyboardTap(x, y);
     if (screen() === "viewer") {
       const current = viewer();
@@ -724,37 +723,37 @@ queueMicrotask(() => refreshFiles(""));
       return "";
     }
     if (screen() === "apps") {
-      const apps = projection().apps ?? [];
-      if (y >= 1060 && y < 1140 && (uninstallMode() || apps.length > 0) && !projection().uninstallingApp) {
+      const apps = facts().apps ?? [];
+      if (y >= 1060 && y < 1140 && (uninstallMode() || apps.length > 0) && !facts().uninstallingApp) {
         setUninstallMode(!uninstallMode());
         return "";
       }
       const app = apps[Math.floor((y - 162) / 166)];
-      if (y >= 162 && app && !projection().uninstallingApp) {
+      if (y >= 162 && app && !facts().uninstallingApp) {
         if (uninstallMode()) {
-          return x >= 604 && x < 696 ? JSON.stringify({ type: "uninstallApp", app: app.id }) : "";
+          return x >= 604 && x < 696 ? PocketPi.command("apps.uninstall", { app: app.id }) : "";
         }
-        return JSON.stringify({ type: "navigate", app: app.id });
+        return PocketPi.navigate(app.id);
       }
       return "";
     }
     if (screen() === "settings") {
-      const networks = projection().settings?.wifi?.networks ?? [];
-      if (x >= 480 && y >= 126 && y <= 218) return JSON.stringify({ type: "settings", command: "scan" });
+      const networks = facts().settings?.wifi?.networks ?? [];
+      if (x >= 480 && y >= 126 && y <= 218) return PocketPi.command("device.wifi.scan");
       if (x >= 620 && y >= 330 && y <= 462) setWifiOffset(Math.max(0, wifiOffset() - 4));
       else if (x >= 620 && y >= 650 && y <= 782) setWifiOffset(Math.min(Math.max(0, networks.length - 5), wifiOffset() + 4));
       else if (x < 610 && y >= 330 && y < 790) {
         const row = Math.floor((y - 330) / 92);
         const network = networks[wifiOffset() + row];
         if (network) {
-          if (!network.secured) return JSON.stringify({ type: "settings", command: "connect", ssid: network.ssid, password: "" });
+          if (!network.secured) return PocketPi.command("device.wifi.connect", { ssid: network.ssid, password: "" });
           setKeyboardPurpose({ type: "wifi", ssid: network.ssid });
           setInput("");
           setScreen("keyboard");
         }
-      } else if (x <= 340 && y >= 1010 && y <= 1090) return JSON.stringify({ type: "settings", command: "forget" });
-      else if (x >= 356 && y >= 1010 && y <= 1090) return JSON.stringify({ type: "settings", command: "restart" });
+      } else if (x <= 340 && y >= 1010 && y <= 1090) return PocketPi.command("device.wifi.forget");
+      else if (x >= 356 && y >= 1010 && y <= 1090) return PocketPi.command("device.restart");
     }
     return "";
   },
-};
+});

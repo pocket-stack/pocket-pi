@@ -489,7 +489,7 @@ fn remaining(deadline: Instant) -> Result<Duration, String> {
     deadline
         .checked_duration_since(Instant::now())
         .filter(|duration| !duration.is_zero())
-        .ok_or_else(|| "App Data Action deadline expired".to_owned())
+        .ok_or_else(|| "App Action deadline expired".to_owned())
 }
 
 fn yield_current_task() {

@@ -2,7 +2,6 @@
   "id": "exa",
   "description": "Web research and local search history",
   "version": "1.1.0",
-  "dataVersion": 5,
   "toolNamespace": "research",
   "nativeServices": {
     "http": [
@@ -23,6 +22,7 @@
   "tools": [
     {
       "name": "research.search",
+      "action": "search",
       "description": "Search the web through Exa and save a bounded, source-linked result set to local history. Pocket Pi defaults to auto so Exa can balance quality and speed; explicitly use deep or deep-reasoning for harder research, and fast or instant when latency matters. Use category and publication dates for targeted news, filings, company, or publication research. company and people categories cannot be combined with publication-date filters or excludeDomains.",
       "parameters": {
         "type": "object",
@@ -103,6 +103,7 @@
     },
     {
       "name": "research.fetch",
+      "action": "fetch",
       "description": "Fetch one known URL through Exa as bounded clean text with metadata and crawl status. Use after research.search when highlights are insufficient. Set maxAgeHours to 0 only when a fresh crawl is necessary because it is slower and costs more.",
       "parameters": {
         "type": "object",
@@ -131,6 +132,5 @@
       }
     }
   ],
-  "tasks": [],
   "schedules": []
 }

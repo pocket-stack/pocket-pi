@@ -1,12 +1,12 @@
 //! Pocket Pi's App runtime: bounded PocketJS Guest caches, app-owned FS/SQLite
-//! state, namespaced Agent tools and native AppTask wakes.
+//! state, namespaced Agent tools and native App Schedule wakes.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -23,8 +23,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 pub const ROOT_APP_ID: &str = "pi-agent";
-const BUILTIN_RELEASE: &str = "builtin-v1";
 pub const POCKETJS_REVISION: &str = "e12cf12f82cc60b636368119d49a06eb9ed2a3d5";
+pub const SYSTEM_FRAMEWORK_API: u32 = 1;
 const VIEWPORT: (f32, f32) = (720.0, 1280.0);
 pub const MAX_POCKETAPP_BYTES: usize = 2 * 1024 * 1024;
 const VIEW_RUNTIME_LIMIT: usize = 3;
@@ -104,7 +104,7 @@ fn new_app_guest() -> Result<Guest> {
 }
 
 // One end-to-end budget starts when the Agent routes an App Tool. Queueing,
-// Data Action execution and native transport all consume this same deadline.
+// Action execution and native transport all consume this same deadline.
 pub const APP_ACTION_TIMEOUT: Duration = Duration::from_secs(80);
 
 fn new_action_deadline() -> Instant {
@@ -112,7 +112,7 @@ fn new_action_deadline() -> Instant {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AppDescriptor {
     pub id: String,
     #[serde(skip)]
@@ -120,15 +120,11 @@ pub struct AppDescriptor {
     pub description: String,
     pub version: String,
     #[serde(default)]
-    pub data_version: u32,
-    #[serde(default)]
     pub tool_namespace: String,
     #[serde(default)]
     pub tools: Vec<Value>,
     #[serde(default)]
     pub provider_operations: Vec<String>,
-    #[serde(default)]
-    pub tasks: Vec<String>,
     #[serde(default)]
     pub schedules: Vec<AppSchedule>,
     #[serde(default)]
@@ -136,11 +132,11 @@ pub struct AppDescriptor {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AppSchedule {
     pub id: String,
     pub every_minutes: u64,
-    pub task: String,
+    pub action: String,
     #[serde(default)]
     pub args: Value,
 }
@@ -208,24 +204,19 @@ pub fn stage_pocketapp_bytes(bytes: &[u8], staging_dir: &Path) -> Result<StagedA
     std::fs::create_dir_all(staging_dir)?;
     let result = (|| -> Result<StagedApp> {
         let allowed = BTreeSet::from([
-            "agent-app.json",
+            "app.json",
             "pocket.json",
             "plan.json",
             "app.js",
             "app.pak",
-            "data-action.js",
+            "actions.js",
             "credentials.json",
         ]);
-        let required = BTreeSet::from([
-            "agent-app.json",
-            "pocket.json",
-            "plan.json",
-            "app.js",
-            "app.pak",
-        ])
-        .into_iter()
-        .map(str::to_owned)
-        .collect::<BTreeSet<_>>();
+        let required =
+            BTreeSet::from(["app.json", "pocket.json", "plan.json", "app.js", "app.pak"])
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<BTreeSet<_>>();
         let mut seen = BTreeSet::new();
         let mut credentials: BTreeMap<String, String> = BTreeMap::new();
         let mut total = 0usize;
@@ -315,11 +306,14 @@ pub fn stage_pocketapp_bytes(bytes: &[u8], staging_dir: &Path) -> Result<StagedA
             "App package is missing required files"
         );
         let descriptor_id: String =
-            serde_json::from_slice::<Value>(&std::fs::read(staging_dir.join("agent-app.json"))?)?
-                ["id"]
+            serde_json::from_slice::<Value>(&std::fs::read(staging_dir.join("app.json"))?)?["id"]
                 .as_str()
-                .ok_or_else(|| anyhow!("agent-app.json is missing id"))?
+                .ok_or_else(|| anyhow!("app.json is missing id"))?
                 .to_owned();
+        anyhow::ensure!(
+            descriptor_id != ROOT_APP_ID,
+            "the Pi Agent System App is built into Firmware"
+        );
         let app = load_release(staging_dir, &descriptor_id, false)?;
         validate_package_credentials(&app.descriptor, &credentials)?;
         Ok(StagedApp {
@@ -373,12 +367,16 @@ impl SystemAppBundle {
 
 pub const fn system_app_bundle() -> SystemAppBundle {
     SystemAppBundle::new(
-        include_str!("../../../apps/pi-agent/agent-app.json"),
+        include_str!("../../../apps/pi-agent/app.json"),
         include_str!("../../../apps/pi-agent/pocket.json"),
         include_str!("../../../apps/pi-agent/dist/app.js"),
         include_str!("../../../apps/pi-agent/dist/agent.js"),
         include_bytes!("../../../apps/pi-agent/dist/app.pak"),
     )
+}
+
+pub const fn system_framework() -> &'static str {
+    include_str!("../../../system/framework.js")
 }
 
 #[derive(Clone, Debug)]
@@ -396,15 +394,21 @@ pub struct InstalledAppIndex {
 #[derive(Debug)]
 struct InstalledApps {
     apps: BTreeMap<String, InstalledApp>,
-    tool_owner: BTreeMap<String, String>,
+    tool_routes: BTreeMap<String, ToolRoute>,
+}
+
+#[derive(Clone, Debug)]
+struct ToolRoute {
+    app_id: String,
+    action: String,
 }
 
 impl InstalledAppIndex {
     pub fn load(workspace: &Path, system: SystemAppBundle) -> Result<Self> {
-        seed_system_release(workspace, system)?;
-        let system_release = workspace.join("data/view/releases").join(BUILTIN_RELEASE);
+        seed_system_app(workspace, system)?;
+        seed_system_framework(workspace)?;
         let mut apps = BTreeMap::new();
-        let root = load_release(&system_release, ROOT_APP_ID, true)?;
+        let root = load_release(&workspace.join("system/app"), ROOT_APP_ID, true)?;
         apps.insert(ROOT_APP_ID.to_owned(), root);
 
         let apps_root = workspace.join("apps");
@@ -419,21 +423,11 @@ impl InstalledAppIndex {
                     .to_str()
                     .ok_or_else(|| anyhow!("installed App id is not UTF-8"))?
                     .to_owned();
-                let current_path = entry.path().join("current");
-                let release = match std::fs::read_to_string(&current_path) {
-                    Ok(value) => value.trim().to_owned(),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(error) => {
-                        return Err(error)
-                            .with_context(|| format!("read {}", current_path.display()))
-                    }
-                };
-                ensure_safe_component(&release, "release id")?;
-                let installed = load_release(
-                    &entry.path().join("releases").join(&release),
-                    &app_id,
-                    false,
-                )?;
+                let release = entry.path().join("release");
+                if !release.is_dir() {
+                    continue;
+                }
+                let installed = load_release(&release, &app_id, false)?;
                 anyhow::ensure!(
                     apps.insert(app_id.clone(), installed).is_none(),
                     "duplicate installed App id: {app_id}"
@@ -441,13 +435,13 @@ impl InstalledAppIndex {
             }
         }
 
-        let mut tool_owner = BTreeMap::new();
+        let mut tool_routes = BTreeMap::new();
         for app in apps.values() {
-            validate_app_tools(app, &tool_owner)?;
-            add_app_tools(app, &mut tool_owner);
+            validate_app_tools(app, &tool_routes)?;
+            add_app_tools(app, &mut tool_routes);
         }
         Ok(Self {
-            inner: Arc::new(RwLock::new(InstalledApps { apps, tool_owner })),
+            inner: Arc::new(RwLock::new(InstalledApps { apps, tool_routes })),
         })
     }
 
@@ -457,15 +451,15 @@ impl InstalledAppIndex {
             .expect("installed App index lock")
             .apps
             .values()
-            .flat_map(|app| app.descriptor.tools.clone())
+            .flat_map(|app| app.descriptor.tools.iter().map(public_tool_definition))
             .collect()
     }
 
-    fn app_for_tool(&self, name: &str) -> Option<String> {
+    fn route_for_tool(&self, name: &str) -> Option<ToolRoute> {
         self.inner
             .read()
             .expect("installed App index lock")
-            .tool_owner
+            .tool_routes
             .get(name)
             .cloned()
     }
@@ -579,7 +573,7 @@ impl InstalledAppIndex {
             "App {} is already installed",
             app.descriptor.id
         );
-        validate_app_tools(app, &index.tool_owner)?;
+        validate_app_tools(app, &index.tool_routes)?;
         let installed_credentials = index
             .apps
             .values()
@@ -595,19 +589,19 @@ impl InstalledAppIndex {
 
     fn insert_validated(&self, app: InstalledApp) {
         let mut index = self.inner.write().expect("installed App index lock");
-        add_app_tools(&app, &mut index.tool_owner);
+        add_app_tools(&app, &mut index.tool_routes);
         index.apps.insert(app.descriptor.id.clone(), app);
     }
 
     fn remove(&self, app_id: &str) -> Option<InstalledApp> {
         let mut index = self.inner.write().expect("installed App index lock");
         let app = index.apps.remove(app_id)?;
-        index.tool_owner.retain(|_, owner| owner != app_id);
+        index.tool_routes.retain(|_, route| route.app_id != app_id);
         Some(app)
     }
 }
 
-fn validate_app_tools(app: &InstalledApp, owners: &BTreeMap<String, String>) -> Result<()> {
+fn validate_app_tools(app: &InstalledApp, routes: &BTreeMap<String, ToolRoute>) -> Result<()> {
     for tool in &app.descriptor.tools {
         let name = tool
             .get("name")
@@ -618,19 +612,76 @@ fn validate_app_tools(app: &InstalledApp, owners: &BTreeMap<String, String>) -> 
             "App {} owns non-namespaced tool {name}",
             app.descriptor.id
         );
-        anyhow::ensure!(!owners.contains_key(name), "duplicate App tool: {name}");
+        let action = tool
+            .get("action")
+            .and_then(Value::as_str)
+            .filter(|action| !action.is_empty())
+            .ok_or_else(|| anyhow!("{name} tool is missing action"))?;
+        anyhow::ensure!(!routes.contains_key(name), "duplicate App tool: {name}");
+        anyhow::ensure!(
+            !action.contains('.'),
+            "App {} tool {name} has invalid Action {action}",
+            app.descriptor.id
+        );
     }
     Ok(())
 }
 
-fn add_app_tools(app: &InstalledApp, owners: &mut BTreeMap<String, String>) {
+fn add_app_tools(app: &InstalledApp, routes: &mut BTreeMap<String, ToolRoute>) {
     for tool in &app.descriptor.tools {
         let name = tool["name"]
             .as_str()
             .expect("validated App tool name")
             .to_owned();
-        owners.insert(name, app.descriptor.id.clone());
+        routes.insert(
+            name,
+            ToolRoute {
+                app_id: app.descriptor.id.clone(),
+                action: tool["action"]
+                    .as_str()
+                    .expect("validated App tool Action")
+                    .to_owned(),
+            },
+        );
     }
+}
+
+fn public_tool_definition(tool: &Value) -> Value {
+    let mut definition = tool.clone();
+    if let Some(object) = definition.as_object_mut() {
+        object.remove("action");
+    }
+    definition
+}
+
+fn declared_actions(descriptor: &AppDescriptor) -> BTreeSet<String> {
+    descriptor
+        .tools
+        .iter()
+        .filter_map(|tool| tool.get("action").and_then(Value::as_str))
+        .chain(
+            descriptor
+                .schedules
+                .iter()
+                .map(|schedule| schedule.action.as_str()),
+        )
+        .map(str::to_owned)
+        .collect()
+}
+
+fn validate_action_contract(descriptor: &AppDescriptor, runtime: &ActionRuntime) -> Result<()> {
+    let available = runtime.action_names()?;
+    let missing = declared_actions(descriptor)
+        .difference(&available)
+        .cloned()
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        missing.is_empty(),
+        "App {} is missing declared Actions: {}",
+        descriptor.id,
+        missing.join(", ")
+    );
+    Ok(())
 }
 
 fn descriptor_credential_ids(descriptor: &AppDescriptor) -> BTreeSet<String> {
@@ -657,19 +708,13 @@ fn validate_package_credentials(
     anyhow::ensure!(
         credentials.keys().cloned().collect::<BTreeSet<_>>()
             == descriptor_credential_ids(descriptor),
-        "credentials.json ids do not match agent-app.json"
+        "credentials.json ids do not match app.json"
     );
     Ok(())
 }
 
 fn load_release(release_dir: &Path, expected_id: &str, system: bool) -> Result<InstalledApp> {
-    for required in [
-        "agent-app.json",
-        "pocket.json",
-        "plan.json",
-        "app.js",
-        "app.pak",
-    ] {
+    for required in ["app.json", "pocket.json", "plan.json", "app.js", "app.pak"] {
         anyhow::ensure!(
             release_dir.join(required).is_file(),
             "App {expected_id} release is missing {required}"
@@ -685,10 +730,9 @@ fn load_release(release_dir: &Path, expected_id: &str, system: bool) -> Result<I
     );
 
     let mut descriptor: AppDescriptor = serde_json::from_slice(
-        &std::fs::read(release_dir.join("agent-app.json"))
-            .context("read installed agent-app.json")?,
+        &std::fs::read(release_dir.join("app.json")).context("read installed app.json")?,
     )
-    .context("parse installed agent-app.json")?;
+    .context("parse installed app.json")?;
     anyhow::ensure!(descriptor.id == expected_id, "installed App id mismatch");
     ensure_safe_component(&descriptor.id, "App id")?;
     let manifest: Value = serde_json::from_slice(
@@ -711,7 +755,7 @@ fn load_release(release_dir: &Path, expected_id: &str, system: bool) -> Result<I
         .to_owned();
     anyhow::ensure!(
         manifest.get("version").and_then(Value::as_str) == Some(descriptor.version.as_str()),
-        "App {} version differs between agent-app.json and pocket.json",
+        "App {} version differs between app.json and pocket.json",
         descriptor.id
     );
     if descriptor.tool_namespace.is_empty() {
@@ -731,17 +775,17 @@ fn load_release(release_dir: &Path, expected_id: &str, system: bool) -> Result<I
     );
     for schedule in &descriptor.schedules {
         anyhow::ensure!(
-            descriptor.tasks.iter().any(|task| task == &schedule.task),
-            "{}.{} schedule references missing task {}",
+            !schedule.action.is_empty() && !schedule.action.contains('.'),
+            "{}.{} schedule has invalid Action {}",
             descriptor.id,
             schedule.id,
-            schedule.task
+            schedule.action
         );
     }
     anyhow::ensure!(
-        (descriptor.tools.is_empty() && descriptor.tasks.is_empty())
-            || release_dir.join("data-action.js").is_file(),
-        "App {} tools and tasks require data-action.js",
+        (descriptor.tools.is_empty() && descriptor.schedules.is_empty())
+            || release_dir.join("actions.js").is_file(),
+        "App {} Actions require actions.js",
         descriptor.id
     );
     for capability in manifest
@@ -763,6 +807,8 @@ fn load_release(release_dir: &Path, expected_id: &str, system: bool) -> Result<I
     anyhow::ensure!(
         plan.get("runtime").and_then(Value::as_str) == Some("pocket-pi-agentos")
             && plan.get("pocketjsRevision").and_then(Value::as_str) == Some(POCKETJS_REVISION)
+            && plan.get("frameworkApi").and_then(Value::as_u64)
+                == Some(u64::from(SYSTEM_FRAMEWORK_API))
             && plan.get("app").and_then(Value::as_str) == Some(descriptor.id.as_str()),
         "App {} plan.json does not target this runtime",
         descriptor.id
@@ -792,7 +838,7 @@ fn ensure_safe_component(value: &str, label: &str) -> Result<()> {
 /// normalization, SQLite and View behavior.
 pub trait AppServiceHost: Send + Sync {
     /// Execute one policy-checked synchronous service call without outliving
-    /// the App Data Action's absolute deadline.
+    /// the App Action's absolute deadline.
     fn call(
         &self,
         app_id: &str,
@@ -803,7 +849,7 @@ pub trait AppServiceHost: Send + Sync {
     ) -> Result<Value, String>;
 
     /// Execute one policy-checked PocketJS HTTP request. This is called only
-    /// from the native NET worker, never from the QuickJS Data Action thread.
+    /// from the native NET worker, never from the QuickJS Action thread.
     fn http(
         &self,
         _app_id: &str,
@@ -841,46 +887,70 @@ pub trait AppServiceHost: Send + Sync {
     }
 }
 
-/// One SQLite module instance per App. View and background Data Action guests
+/// One SQLite module instance per App. View and background Action guests
 /// share this owner, so ESP32's `unix-none` VFS never has two independent
 /// connections racing on the same file. Network waits never hold this mutex;
 /// only bounded SQLite operations and transactions do.
 type SharedDb = Arc<Mutex<DbModule>>;
 type AppRevision = Arc<AtomicU32>;
 
-const DATA_ACTION_QUEUE: usize = 8;
+const ACTION_QUEUE: usize = 8;
 const NET_COMPLETION_QUEUE: usize = 2;
 const NET_WORKER_STACK_BYTES: usize = 96 * 1024;
-pub const DATA_ACTION_STACK_BYTES: usize = 128 * 1024;
+pub const ACTION_STACK_BYTES: usize = 192 * 1024;
 
 #[derive(Clone, Copy)]
-enum DataActionKind {
-    Task,
+enum ActionSource {
     Tool,
+    Ui,
+    Schedule,
 }
 
-struct DataActionRequest {
+impl ActionSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Tool => "tool",
+            Self::Ui => "ui",
+            Self::Schedule => "schedule",
+        }
+    }
+}
+
+struct ActionRequest {
     run_id: u64,
     app_id: String,
-    kind: DataActionKind,
-    name: String,
+    source: ActionSource,
+    action: String,
     args: Value,
     deadline: Instant,
-    response: Option<mpsc::Sender<ToolResult>>,
+    completion: ActionCompletion,
 }
 
-enum DataActionMessage {
-    Run(DataActionRequest),
+enum ActionCompletion {
+    None,
+    Response(mpsc::Sender<ToolResult>),
+    Schedule(String),
+}
+
+enum ActionMessage {
+    Run(ActionRequest),
     RemoveApp {
         app_id: String,
         done: mpsc::Sender<Result<()>>,
     },
 }
 
+struct ScheduleActionResult {
+    app_id: String,
+    schedule_id: String,
+    result: ToolResult,
+}
+
 #[derive(Clone)]
-struct DataActionConfig {
+struct ActionConfig {
     app_id: String,
     source_path: PathBuf,
+    framework: Arc<str>,
     database: SharedDb,
     revision: AppRevision,
     net: bool,
@@ -944,7 +1014,7 @@ impl AppNetTransport {
 impl HttpTransport for AppNetTransport {
     fn start(&mut self, mut request: HttpRequest) -> std::result::Result<(), NetFailure> {
         let deadline = self.action_deadline.get().ok_or_else(|| {
-            NetFailure::new("unavailable", "HTTP request has no active App Data Action")
+            NetFailure::new("unavailable", "HTTP request has no active App Action")
         })?;
         let remaining_ms = remaining_timeout_ms(deadline)?;
         request.timeout_ms = request.timeout_ms.min(remaining_ms);
@@ -974,11 +1044,11 @@ fn remaining_timeout_ms(deadline: Instant) -> std::result::Result<u32, NetFailur
     let remaining = deadline
         .checked_duration_since(Instant::now())
         .filter(|duration| !duration.is_zero())
-        .ok_or_else(|| NetFailure::new("timeout", "App Data Action deadline expired"))?;
+        .ok_or_else(|| NetFailure::new("timeout", "App Action deadline expired"))?;
     Ok(remaining.as_millis().clamp(1, u128::from(u32::MAX)) as u32)
 }
 
-struct DataActionRuntime {
+struct ActionRuntime {
     guest: Guest,
     net: Option<NetSurface<AppNetTransport>>,
     action_deadline: Rc<Cell<Option<Instant>>>,
@@ -986,10 +1056,10 @@ struct DataActionRuntime {
     _revision: AppRevision,
 }
 
-impl DataActionRuntime {
-    fn load(config: &DataActionConfig, services: Arc<dyn AppServiceHost>) -> Result<Self> {
-        let guest = new_app_guest().context("create App Data Action Guest")?;
-        mount_shared_db(&guest, config.database.clone())?;
+impl ActionRuntime {
+    fn load(config: &ActionConfig, services: Arc<dyn AppServiceHost>) -> Result<Self> {
+        let guest = new_app_guest().context("create App Action Guest")?;
+        mount_db(&guest, config.database.clone(), true)?;
         let action_deadline = Rc::new(Cell::new(None));
         mount_data_lifecycle(&guest, config.revision.clone(), action_deadline.clone())?;
         let net = if config.net {
@@ -1009,95 +1079,87 @@ impl DataActionRuntime {
             )?;
             None
         };
+        install_system_framework(&guest, &config.app_id, &config.framework)?;
         let source = std::fs::read_to_string(&config.source_path)
-            .with_context(|| format!("read {} Data Action", config.app_id))?;
-        guest.eval(&format!("{}-data-action", config.app_id), &source)?;
-        anyhow::ensure!(
-            guest.with(|ctx| ctx.globals().get::<_, Object>("PocketPiData").is_ok()),
-            "{} Data Action installed no PocketPiData",
-            config.app_id
-        );
-        Ok(Self {
+            .with_context(|| format!("read {} Action", config.app_id))?;
+        guest.eval(&format!("{}-actions", config.app_id), &source)?;
+        let runtime = Self {
             guest,
             net,
             action_deadline,
             _database: config.database.clone(),
             _revision: config.revision.clone(),
-        })
+        };
+        anyhow::ensure!(
+            !runtime.action_names()?.is_empty(),
+            "{} Action installed no Actions",
+            config.app_id
+        );
+        Ok(runtime)
     }
 
-    fn invoke(&self, request: &DataActionRequest) -> Result<ToolResult> {
+    fn action_names(&self) -> Result<BTreeSet<String>> {
+        let line: String = self.guest.with(|ctx| -> Result<String> {
+            let system: Object = ctx.globals().get("PocketPiSystem")?;
+            let names: Function = system.get("actionNames")?;
+            Ok(names.call::<_, String>(())?)
+        })?;
+        Ok(serde_json::from_str::<Vec<String>>(&line)?
+            .into_iter()
+            .collect())
+    }
+
+    fn invoke(&self, request: &ActionRequest) -> Result<ToolResult> {
         anyhow::ensure!(
             Instant::now() < request.deadline,
-            "{} timed out before its Data Action started",
-            request.name
+            "{} timed out before its Action started",
+            request.action
         );
         self.action_deadline.set(Some(request.deadline));
-        let result = if let Some(net) = &self.net {
-            self.invoke_net(request, net)
-        } else {
-            let method = match request.kind {
-                DataActionKind::Task => "invokeTask",
-                DataActionKind::Tool => "invokeTool",
-            };
-            let line: Result<String> = self.guest.with(|ctx| {
-                let data: Object = ctx
-                    .globals()
-                    .get("PocketPiData")
-                    .map_err(|error| anyhow!("PocketPiData missing: {error}"))?;
-                let function: Function = data
-                    .get(method)
-                    .map_err(|error| anyhow!("PocketPiData.{method} missing: {error}"))?;
-                function
-                    .call::<_, String>((request.name.clone(), request.args.to_string()))
-                    .catch(&ctx)
-                    .map_err(|error| anyhow!("PocketPiData.{method}: {error}"))
-            });
-            line.and_then(|line| parse_data_result(&line))
-        };
+        let result = self.invoke_action(request);
         self.action_deadline.set(None);
         result
     }
 
-    fn invoke_net(
-        &self,
-        request: &DataActionRequest,
-        net: &NetSurface<AppNetTransport>,
-    ) -> Result<ToolResult> {
-        let method = match request.kind {
-            DataActionKind::Task => "beginInvokeTask",
-            DataActionKind::Tool => "beginInvokeTool",
-        };
+    fn invoke_action(&self, request: &ActionRequest) -> Result<ToolResult> {
         self.guest.with(|ctx| -> Result<()> {
-            let data: Object = ctx.globals().get("PocketPiData")?;
-            let function: Function = data.get(method)?;
-            function.call::<_, ()>((request.name.clone(), request.args.to_string()))?;
+            let system: Object = ctx.globals().get("PocketPiSystem")?;
+            let begin: Function = system.get("beginAction")?;
+            begin.call::<_, ()>((json!({
+                "action": request.action,
+                "args": request.args,
+                "source": request.source.as_str(),
+            })
+            .to_string(),))?;
             Ok(())
         })?;
         loop {
-            net.begin_tick();
+            if let Some(net) = &self.net {
+                net.begin_tick();
+            }
             let line = self.guest.with(|ctx| -> Result<Option<String>> {
-                let data: Object = ctx.globals().get("PocketPiData")?;
-                let tick: Function = data.get("tick")?;
+                let system: Object = ctx.globals().get("PocketPiSystem")?;
+                let tick: Function = system.get("tickAction")?;
                 tick.call::<_, ()>(())?;
-                let poll: Function = data.get("pollResult")?;
+                let poll: Function = system.get("pollActionResult")?;
                 Ok(poll.call::<_, Option<String>>(())?)
             })?;
             self.guest.drain_jobs();
             if let Some(line) = line {
-                return parse_data_result(&line);
+                return parse_action_result(&line);
             }
             anyhow::ensure!(
                 Instant::now() < request.deadline,
-                "PocketPiData.{method} timed out"
+                "Action {} timed out",
+                request.action
             );
             yield_scheduler_tick();
         }
     }
 }
 
-fn parse_data_result(line: &str) -> Result<ToolResult> {
-    let value: Value = serde_json::from_str(line).context("parse Data Action result")?;
+fn parse_action_result(line: &str) -> Result<ToolResult> {
+    let value: Value = serde_json::from_str(line).context("parse Action result")?;
     Ok(ToolResult {
         text: value
             .get("text")
@@ -1113,16 +1175,18 @@ fn parse_data_result(line: &str) -> Result<ToolResult> {
     })
 }
 
-struct DataActionRunner {
-    tx: mpsc::SyncSender<DataActionMessage>,
-    configs: Arc<Mutex<BTreeMap<String, DataActionConfig>>>,
+struct ActionRunner {
+    tx: mpsc::SyncSender<ActionMessage>,
+    configs: Arc<Mutex<BTreeMap<String, ActionConfig>>>,
     next_run_id: AtomicU32,
-    busy: Arc<AtomicBool>,
+    pending: Arc<AtomicU32>,
+    schedule_results: mpsc::Receiver<ScheduleActionResult>,
 }
 
-impl DataActionRunner {
-    fn start(configs: Vec<DataActionConfig>, services: Arc<dyn AppServiceHost>) -> Result<Self> {
-        let (tx, rx) = mpsc::sync_channel::<DataActionMessage>(DATA_ACTION_QUEUE);
+impl ActionRunner {
+    fn start(configs: Vec<ActionConfig>, services: Arc<dyn AppServiceHost>) -> Result<Self> {
+        let (tx, rx) = mpsc::sync_channel::<ActionMessage>(ACTION_QUEUE);
+        let (schedule_tx, schedule_results) = mpsc::channel();
         let configs = Arc::new(Mutex::new(
             configs
                 .into_iter()
@@ -1130,28 +1194,26 @@ impl DataActionRunner {
                 .collect::<BTreeMap<_, _>>(),
         ));
         let worker_configs = configs.clone();
-        let busy = Arc::new(AtomicBool::new(false));
-        let worker_busy = busy.clone();
+        let pending = Arc::new(AtomicU32::new(0));
+        let worker_pending = pending.clone();
         std::thread::Builder::new()
-            .name("data-actions".to_owned())
-            .stack_size(DATA_ACTION_STACK_BYTES)
+            .name("app-actions".to_owned())
+            .stack_size(ACTION_STACK_BYTES)
             .spawn(move || {
-                let mut runtimes = Vec::<(String, DataActionRuntime)>::new();
+                let mut runtimes = Vec::<(String, ActionRuntime)>::new();
                 while let Ok(message) = rx.recv() {
-                    worker_busy.store(true, Ordering::Release);
                     let request = match message {
-                        DataActionMessage::Run(request) => request,
-                        DataActionMessage::RemoveApp { app_id, done } => {
+                        ActionMessage::Run(request) => request,
+                        ActionMessage::RemoveApp { app_id, done } => {
                             let result = worker_configs
                                 .lock()
-                                .map_err(|_| anyhow!("App Data Action config lock was poisoned"))
+                                .map_err(|_| anyhow!("App Action config lock was poisoned"))
                                 .map(|mut configs| {
                                     configs.remove(&app_id);
                                     runtimes
                                         .retain(|(runtime_app_id, _)| runtime_app_id != &app_id);
                                 });
                             let _ = done.send(result);
-                            worker_busy.store(false, Ordering::Release);
                             continue;
                         }
                     };
@@ -1162,15 +1224,11 @@ impl DataActionRunner {
                                 make_runtime_room(&mut runtimes, ACTION_RUNTIME_LIMIT, None);
                                 let config = worker_configs
                                     .lock()
-                                    .map_err(|_| {
-                                        anyhow!("App Data Action config lock was poisoned")
-                                    })?
+                                    .map_err(|_| anyhow!("App Action config lock was poisoned"))?
                                     .get(&request.app_id)
                                     .cloned()
-                                    .ok_or_else(|| {
-                                        anyhow!("{} has no Data Action", request.app_id)
-                                    })?;
-                                DataActionRuntime::load(&config, services.clone())?
+                                    .ok_or_else(|| anyhow!("{} has no Action", request.app_id))?;
+                                ActionRuntime::load(&config, services.clone())?
                             }
                         };
                         let result = runtime.invoke(&request);
@@ -1182,10 +1240,10 @@ impl DataActionRunner {
                     let result = match result {
                         Ok(result) if result.is_error => {
                             log::warn!(
-                                "App Data Action run={} {}.{} failed: {}",
+                                "App Action run={} {}.{} failed: {}",
                                 request.run_id,
                                 request.app_id,
-                                request.name,
+                                request.action,
                                 result.text
                             );
                             result
@@ -1193,65 +1251,82 @@ impl DataActionRunner {
                         Ok(result) => result,
                         Err(error) => {
                             log::error!(
-                                "App Data Action run={} {}.{} crashed: {error:#}",
+                                "App Action run={} {}.{} crashed: {error:#}",
                                 request.run_id,
                                 request.app_id,
-                                request.name
+                                request.action
                             );
-                            tool_error(format!("{}: {error:#}", request.name))
+                            tool_error(format!("{}: {error:#}", request.action))
                         }
                     };
-                    if let Some(response) = request.response {
-                        let _ = response.send(result);
+                    match request.completion {
+                        ActionCompletion::Schedule(schedule_id) => {
+                            let _ = schedule_tx.send(ScheduleActionResult {
+                                app_id: request.app_id.clone(),
+                                schedule_id,
+                                result,
+                            });
+                        }
+                        ActionCompletion::Response(response) => {
+                            let _ = response.send(result);
+                        }
+                        ActionCompletion::None => {}
                     }
-                    worker_busy.store(false, Ordering::Release);
+                    worker_pending.fetch_sub(1, Ordering::AcqRel);
                 }
             })
-            .context("start App Data Action runner")?;
+            .context("start App Action runner")?;
         Ok(Self {
             tx,
             configs,
             next_run_id: AtomicU32::new(1),
-            busy,
+            pending,
+            schedule_results,
         })
     }
 
     fn enqueue(
         &self,
         app_id: &str,
-        kind: DataActionKind,
-        name: &str,
+        source: ActionSource,
+        action: &str,
         args: Value,
         deadline: Instant,
-        response: Option<mpsc::Sender<ToolResult>>,
+        completion: ActionCompletion,
     ) -> Result<u64> {
         let run_id = u64::from(self.next_run_id.fetch_add(1, Ordering::Relaxed));
-        self.tx
-            .try_send(DataActionMessage::Run(DataActionRequest {
-                run_id,
-                app_id: app_id.to_owned(),
-                kind,
-                name: name.to_owned(),
-                args,
-                deadline,
-                response,
-            }))
-            .map_err(|error| anyhow!("queue App Data Action: {error}"))?;
+        self.pending.fetch_add(1, Ordering::AcqRel);
+        if let Err(error) = self.tx.try_send(ActionMessage::Run(ActionRequest {
+            run_id,
+            app_id: app_id.to_owned(),
+            source,
+            action: action.to_owned(),
+            args,
+            deadline,
+            completion,
+        })) {
+            self.pending.fetch_sub(1, Ordering::AcqRel);
+            return Err(anyhow!("queue App Action: {error}"));
+        }
         Ok(run_id)
     }
 
     fn busy(&self) -> bool {
-        self.busy.load(Ordering::Acquire)
+        self.pending.load(Ordering::Acquire) != 0
     }
 
-    fn register(&self, config: DataActionConfig) -> Result<()> {
+    fn drain_schedule_results(&self) -> Vec<ScheduleActionResult> {
+        self.schedule_results.try_iter().collect()
+    }
+
+    fn register(&self, config: ActionConfig) -> Result<()> {
         let mut configs = self
             .configs
             .lock()
-            .map_err(|_| anyhow!("App Data Action config lock was poisoned"))?;
+            .map_err(|_| anyhow!("App Action config lock was poisoned"))?;
         anyhow::ensure!(
             !configs.contains_key(&config.app_id),
-            "App {} Data Action is already registered",
+            "App {} Action is already registered",
             config.app_id
         );
         configs.insert(config.app_id.clone(), config);
@@ -1267,12 +1342,12 @@ impl DataActionRunner {
     fn remove_app(&self, app_id: &str) -> Result<()> {
         let (done, response) = mpsc::channel();
         self.tx
-            .send(DataActionMessage::RemoveApp {
+            .send(ActionMessage::RemoveApp {
                 app_id: app_id.to_owned(),
                 done,
             })
-            .context("stop App Data Action runtime")?;
-        response.recv().context("App Data Action runner stopped")?
+            .context("stop App Action runtime")?;
+        response.recv().context("App Action runner stopped")?
     }
 }
 
@@ -1292,6 +1367,7 @@ struct ViewRuntime {
 impl ViewRuntime {
     fn load(
         app: &InstalledApp,
+        framework: &str,
         fs_root: &Path,
         tmp_root: &Path,
         db: SharedDb,
@@ -1312,11 +1388,21 @@ impl ViewRuntime {
             2 * 1024 * 1024,
         )));
         pocket_fs::mount(&guest, fs.clone())?;
-        mount_shared_db(&guest, db.clone())?;
+        mount_db(&guest, db.clone(), false)?;
+        install_system_framework(&guest, &app.descriptor.id, framework)?;
 
         let source =
             std::fs::read_to_string(app.release_dir.join("app.js")).context("read App bundle")?;
         eval_bundle(&guest, &app.descriptor.id, &source)?;
+        anyhow::ensure!(
+            guest.with(|ctx| -> Result<bool> {
+                let system: Object = ctx.globals().get("PocketPiSystem")?;
+                let has_view: Function = system.get("hasView")?;
+                Ok(has_view.call::<_, bool>(())?)
+            })?,
+            "{} bundle installed no View",
+            app.descriptor.id
+        );
         anyhow::ensure!(
             guest.has_frame(),
             "{} bundle installed no frame()",
@@ -1345,8 +1431,8 @@ impl ViewRuntime {
     fn advance(&self, render_surface: bool) -> Result<()> {
         // A normal frame never queries SQLite. It only compares one in-memory
         // App revision and lets the View refresh a bounded projection when a
-        // committed Data Action made that revision stale.
-        self.call_method("tick", ()).map(|_: String| ())?;
+        // committed Action made that revision stale.
+        self.call_method("tickView", ()).map(|_: String| ())?;
         #[cfg(test)]
         self.ticks.set(self.ticks.get().saturating_add(1));
         if render_surface {
@@ -1357,10 +1443,7 @@ impl ViewRuntime {
                 // therefore coalesced into one bounded projection refresh.
                 // A commit racing this query remains visible as a newer
                 // revision and is picked up on the following frame.
-                self.call_method::<_, String>(
-                    "dataChanged",
-                    (json!([{"topic":"app","revision":current_revision}]).to_string(),),
-                )?;
+                self.call_method::<_, String>("dataChanged", ())?;
                 self.last_seen_revision.set(current_revision);
                 #[cfg(test)]
                 self.projection_refreshes
@@ -1375,7 +1458,7 @@ impl ViewRuntime {
     }
 
     fn update(&self, projection: &Value) -> Result<()> {
-        self.call_method("update", (projection.to_string(),))
+        self.call_method("updateView", (projection.to_string(),))
             .map(|_: String| ())
     }
 
@@ -1388,11 +1471,12 @@ impl ViewRuntime {
     }
 
     fn pointer_down(&self, x: u16, y: u16) -> Result<()> {
-        self.call_optional_method("pointerDown", (x as i32, y as i32))
+        self.call_method("pointerDown", (x as i32, y as i32))
+            .map(|_: String| ())
     }
 
     fn pointer_up(&self) -> Result<()> {
-        self.call_optional_method("pointerUp", ())
+        self.call_method("pointerUp", ()).map(|_: String| ())
     }
 
     fn with_ui<R>(&self, f: impl FnOnce(&mut pocketjs_core::Ui) -> R) -> R {
@@ -1407,35 +1491,15 @@ impl ViewRuntime {
         self.guest.with(|ctx| {
             let app: Object = ctx
                 .globals()
-                .get("PocketPiApp")
-                .map_err(|error| anyhow!("PocketPiApp missing: {error}"))?;
+                .get("PocketPiSystem")
+                .map_err(|error| anyhow!("PocketPiSystem missing: {error}"))?;
             let function: Function = app
                 .get(name)
-                .map_err(|error| anyhow!("PocketPiApp.{name} missing: {error}"))?;
+                .map_err(|error| anyhow!("PocketPiSystem.{name} missing: {error}"))?;
             function
                 .call::<_, R>(args)
                 .catch(&ctx)
-                .map_err(|error| anyhow!("PocketPiApp.{name}: {error}"))
-        })
-    }
-
-    fn call_optional_method<A>(&self, name: &str, args: A) -> Result<()>
-    where
-        A: for<'js> pocket_mod::qjs::function::IntoArgs<'js>,
-    {
-        self.guest.with(|ctx| {
-            let app: Object = ctx
-                .globals()
-                .get("PocketPiApp")
-                .map_err(|error| anyhow!("PocketPiApp missing: {error}"))?;
-            let Some(function) = app.get::<_, Function>(name).ok() else {
-                return Ok(());
-            };
-            function
-                .call::<_, String>(args)
-                .catch(&ctx)
-                .map_err(|error| anyhow!("PocketPiApp.{name}: {error}"))?;
-            Ok(())
+                .map_err(|error| anyhow!("PocketPiSystem.{name}: {error}"))
         })
     }
 }
@@ -1444,7 +1508,23 @@ fn eval_bundle(guest: &Guest, label: &str, source: &str) -> Result<()> {
     guest.eval(label, source)
 }
 
-fn mount_shared_db(guest: &Guest, db: SharedDb) -> Result<()> {
+fn install_system_framework(guest: &Guest, app_id: &str, source: &str) -> Result<()> {
+    guest.eval("pocket-pi-system-framework", source)?;
+    guest.with(|ctx| -> Result<()> {
+        let public: Object = ctx.globals().get("PocketPi")?;
+        let api: u32 = public.get("frameworkApi")?;
+        anyhow::ensure!(
+            api == SYSTEM_FRAMEWORK_API,
+            "Pocket Pi System Framework API mismatch"
+        );
+        let system: Object = ctx.globals().get("PocketPiSystem")?;
+        let configure: Function = system.get("configure")?;
+        configure.call::<_, ()>((app_id,))?;
+        Ok(())
+    })
+}
+
+fn mount_db(guest: &Guest, db: SharedDb, writable: bool) -> Result<()> {
     guest.mount("db", |ctx, ns| {
         let module = db.clone();
         ns.set(
@@ -1462,15 +1542,17 @@ fn mount_shared_db(guest: &Guest, db: SharedDb) -> Result<()> {
                 }
             })?,
         )?;
-        let module = db.clone();
-        ns.set(
-            "exec",
-            Function::new(ctx.clone(), move |handle: i32, sql: String| -> i32 {
-                let result = module.lock().map_or(1, |mut db| db.exec(handle, &sql));
-                yield_after_db_call();
-                result
-            })?,
-        )?;
+        if writable {
+            let module = db.clone();
+            ns.set(
+                "exec",
+                Function::new(ctx.clone(), move |handle: i32, sql: String| -> i32 {
+                    let result = module.lock().map_or(1, |mut db| db.exec(handle, &sql));
+                    yield_after_db_call();
+                    result
+                })?,
+            )?;
+        }
         let module = db.clone();
         ns.set(
             "query",
@@ -1479,7 +1561,19 @@ fn mount_shared_db(guest: &Guest, db: SharedDb) -> Result<()> {
                 move |handle: i32, sql: String, args: String| -> String {
                     let result = module.lock().map_or_else(
                         |_| json!({"error":"App database owner is unavailable"}).to_string(),
-                        |mut db| db.query(handle, &sql, &args),
+                        |mut db| {
+                            if writable {
+                                return db.query(handle, &sql, &args);
+                            }
+                            if db.exec(handle, "PRAGMA query_only=ON") != 0 {
+                                return json!({"error":db.last_error(handle)}).to_string();
+                            }
+                            let result = db.query(handle, &sql, &args);
+                            if db.exec(handle, "PRAGMA query_only=OFF") != 0 {
+                                return json!({"error":db.last_error(handle)}).to_string();
+                            }
+                            result
+                        },
                     );
                     yield_after_db_call();
                     result
@@ -1515,10 +1609,10 @@ fn mount_services(
                     let args = serde_json::from_str(&args_json).unwrap_or(Value::Null);
                     let result = action_deadline
                         .get()
-                        .ok_or_else(|| "App service call has no active Data Action".to_owned())
+                        .ok_or_else(|| "App service call has no active Action".to_owned())
                         .and_then(|deadline| {
                             if Instant::now() >= deadline {
-                                Err("App Data Action deadline expired".to_owned())
+                                Err("App Action deadline expired".to_owned())
                             } else {
                                 services.call(&app_id, &service, &operation, &args, deadline)
                             }
@@ -1591,7 +1685,8 @@ pub struct AppSupervisor {
     workspace: PathBuf,
     catalog: InstalledAppIndex,
     services: Arc<dyn AppServiceHost>,
-    action_runner: DataActionRunner,
+    framework: Arc<str>,
+    action_runner: ActionRunner,
     databases: BTreeMap<String, SharedDb>,
     revisions: BTreeMap<String, AppRevision>,
     /// The Pi Agent System App is booted once and remains resident for the
@@ -1612,28 +1707,31 @@ impl AppSupervisor {
         services: Arc<dyn AppServiceHost>,
     ) -> Result<Self> {
         let workspace = workspace.into();
+        let framework: Arc<str> = std::fs::read_to_string(workspace.join("system/framework.js"))
+            .context("read Pocket Pi System Framework")?
+            .into();
         let schedules = AppScheduleStore::load(&workspace, &catalog)?;
         let mut databases = BTreeMap::new();
         let mut revisions = BTreeMap::new();
         for descriptor in catalog.descriptors() {
             let (_, db_root, _) = data_paths(&workspace, &descriptor.id);
             std::fs::create_dir_all(&db_root)?;
-            reset_development_database(&workspace, &descriptor, &db_root)?;
             databases.insert(
                 descriptor.id.clone(),
                 Arc::new(Mutex::new(DbModule::new(DbStorage::Dir(db_root)))),
             );
             revisions.insert(descriptor.id.clone(), Arc::new(AtomicU32::new(0)));
         }
-        let data_configs = catalog
+        let action_configs = catalog
             .apps()
             .into_iter()
             .filter_map(|app| {
                 let descriptor = &app.descriptor;
-                let source_path = app.release_dir.join("data-action.js");
-                source_path.is_file().then(|| DataActionConfig {
+                let source_path = app.release_dir.join("actions.js");
+                source_path.is_file().then(|| ActionConfig {
                     app_id: descriptor.id.clone(),
                     source_path,
+                    framework: framework.clone(),
                     database: databases
                         .get(&descriptor.id)
                         .expect("database created for descriptor")
@@ -1652,14 +1750,22 @@ impl AppSupervisor {
                 })
             })
             .collect();
-        let action_runner = DataActionRunner::start(data_configs, services.clone())?;
+        let action_runner = ActionRunner::start(action_configs, services.clone())?;
         log::info!("loading Pi Agent System App");
-        let system = load_runtime(&workspace, &catalog, &databases, &revisions, ROOT_APP_ID)?;
+        let system = load_runtime(
+            &workspace,
+            &catalog,
+            &databases,
+            &revisions,
+            &framework,
+            ROOT_APP_ID,
+        )?;
         log::info!("Pi Agent System App loaded");
         Ok(Self {
             workspace,
             catalog,
             services,
+            framework,
             action_runner,
             databases,
             revisions,
@@ -1680,7 +1786,7 @@ impl AppSupervisor {
         self.services.busy() || self.action_runner.busy()
     }
 
-    pub fn activate_new_app(
+    pub fn activate_app(
         &mut self,
         staging_release: &Path,
         credentials: BTreeMap<String, String>,
@@ -1692,26 +1798,27 @@ impl AppSupervisor {
             "credentials.json must be removed before activation"
         );
         let descriptor: AppDescriptor = serde_json::from_slice(
-            &std::fs::read(staging_release.join("agent-app.json"))
-                .context("read staged agent-app.json")?,
+            &std::fs::read(staging_release.join("app.json")).context("read staged app.json")?,
         )
-        .context("parse staged agent-app.json")?;
+        .context("parse staged app.json")?;
         ensure_safe_component(&descriptor.id, "App id")?;
         anyhow::ensure!(
             descriptor.id != ROOT_APP_ID,
-            "cannot install the System App"
+            "the Pi Agent System App is built into Firmware"
         );
-        ensure_safe_component(&descriptor.version, "release id")?;
         let app_root = self.workspace.join("apps").join(&descriptor.id);
         anyhow::ensure!(
-            !app_root.exists(),
+            self.catalog.app(&descriptor.id).is_none(),
             "App {} is already installed",
             descriptor.id
         );
+        if app_root.exists() {
+            std::fs::remove_dir_all(&app_root)
+                .with_context(|| format!("clear incomplete App {}", descriptor.id))?;
+        }
 
         let credential_ids = credentials.keys().cloned().collect::<Vec<_>>();
-        let result =
-            self.activate_new_app_inner(staging_release, descriptor, credentials, &app_root);
+        let result = self.activate_new_app(staging_release, descriptor, credentials, &app_root);
         if result.is_err() {
             if let Some(app_id) = app_root.file_name().and_then(|value| value.to_str()) {
                 self.action_runner.unregister(app_id);
@@ -1722,7 +1829,7 @@ impl AppSupervisor {
         result
     }
 
-    fn activate_new_app_inner(
+    fn activate_new_app(
         &mut self,
         staging_release: &Path,
         descriptor: AppDescriptor,
@@ -1730,58 +1837,56 @@ impl AppSupervisor {
         app_root: &Path,
     ) -> Result<AppDescriptor> {
         let mut app = load_release(staging_release, &descriptor.id, false)?;
+        validate_package_credentials(&app.descriptor, &credentials)?;
         self.catalog.validate_insert(&app)?;
 
         let (fs_root, db_root, tmp_root) = data_paths(&self.workspace, &descriptor.id);
         std::fs::create_dir_all(&db_root)?;
         std::fs::create_dir_all(&tmp_root)?;
-        reset_development_database(&self.workspace, &app.descriptor, &db_root)?;
         let database = Arc::new(Mutex::new(DbModule::new(DbStorage::Dir(db_root))));
         let revision = Arc::new(AtomicU32::new(0));
-        make_runtime_room(
-            &mut self.runtimes,
-            VIEW_RUNTIME_LIMIT,
-            self.active_app.as_deref(),
-        );
-        let runtime = ViewRuntime::load(
-            &app,
-            &fs_root,
-            &tmp_root,
-            database.clone(),
-            revision.clone(),
-        )?;
         let net = app
             .manifest
             .pointer("/engine/capabilities/requires")
             .and_then(Value::as_array)
             .is_some_and(|capabilities| capabilities.iter().any(|value| value == "net.http"));
-        let staged_data = staging_release.join("data-action.js");
-        if staged_data.is_file() {
-            let candidate = DataActionConfig {
+        let staged_action = staging_release.join("actions.js");
+        if staged_action.is_file() {
+            let candidate = ActionConfig {
                 app_id: descriptor.id.clone(),
-                source_path: staged_data,
+                source_path: staged_action,
+                framework: self.framework.clone(),
                 database: database.clone(),
                 revision: revision.clone(),
                 net,
             };
-            DataActionRuntime::load(&candidate, self.services.clone())?;
+            let runtime = ActionRuntime::load(&candidate, self.services.clone())?;
+            validate_action_contract(&app.descriptor, &runtime)?;
         }
+        let runtime = ViewRuntime::load(
+            &app,
+            &self.framework,
+            &fs_root,
+            &tmp_root,
+            database.clone(),
+            revision.clone(),
+        )?;
 
         let schedules = new_schedules(&app.descriptor);
         let schedule_path = app_root.join("data/.system/schedules.json");
         atomic_write(&schedule_path, &serde_json::to_vec(&schedules)?)?;
 
-        let release_dir = app_root.join("releases").join(&descriptor.version);
-        std::fs::create_dir_all(release_dir.parent().expect("release parent"))?;
-        anyhow::ensure!(!release_dir.exists(), "App release already exists");
+        let release_dir = app_root.join("release");
+        anyhow::ensure!(!release_dir.exists(), "App is already installed");
         std::fs::rename(staging_release, &release_dir).context("move staged App release")?;
         app.release_dir = release_dir.clone();
 
-        let has_data_action = release_dir.join("data-action.js").is_file();
-        if has_data_action {
-            self.action_runner.register(DataActionConfig {
+        let has_action = release_dir.join("actions.js").is_file();
+        if has_action {
+            self.action_runner.register(ActionConfig {
                 app_id: descriptor.id.clone(),
-                source_path: release_dir.join("data-action.js"),
+                source_path: release_dir.join("actions.js"),
+                framework: self.framework.clone(),
                 database: database.clone(),
                 revision: revision.clone(),
                 net,
@@ -1790,25 +1895,22 @@ impl AppSupervisor {
         self.services
             .store_credentials(&credentials)
             .map_err(anyhow::Error::msg)?;
-        let prior_tools = self.agent_tools.as_ref().map(|tools| tools.definitions());
-        if let (Some(agent), Some(prior)) = (&self.agent, &prior_tools) {
-            let mut next = prior.clone();
-            next.extend(app.descriptor.tools.clone());
+        if let (Some(agent), Some(tools)) = (&self.agent, &self.agent_tools) {
+            let mut next = tools.definitions();
+            next.extend(app.descriptor.tools.iter().map(public_tool_definition));
             agent
                 .replace_tools(&self.system.guest, next)
                 .map_err(anyhow::Error::msg)?;
-        }
-        if let Err(error) = atomic_write(&app_root.join("current"), descriptor.version.as_bytes()) {
-            self.action_runner.unregister(&descriptor.id);
-            if let (Some(agent), Some(prior)) = (&self.agent, prior_tools) {
-                let _ = agent.replace_tools(&self.system.guest, prior);
-            }
-            return Err(error).context("activate App release");
         }
 
         self.catalog.insert_validated(app);
         self.databases.insert(descriptor.id.clone(), database);
         self.revisions.insert(descriptor.id.clone(), revision);
+        make_runtime_room(
+            &mut self.runtimes,
+            VIEW_RUNTIME_LIMIT,
+            self.active_app.as_deref(),
+        );
         self.runtimes.push((descriptor.id.clone(), runtime));
         self.schedules
             .register(descriptor.id.clone(), schedule_path, schedules);
@@ -1895,6 +1997,7 @@ impl AppSupervisor {
                     &self.catalog,
                     &self.databases,
                     &self.revisions,
+                    &self.framework,
                     app_id,
                 )?
             }
@@ -1919,7 +2022,7 @@ impl AppSupervisor {
             .app(ROOT_APP_ID)
             .expect("System App remains installed")
             .release_dir;
-        let agent_source = std::fs::read_to_string(release.join("agent.js"))
+        let source = std::fs::read_to_string(release.join("agent.js"))
             .context("read Pi Agent System App loop bundle")?;
         self.agent = Some(
             GuestAgent::mount_source(
@@ -1927,9 +2030,9 @@ impl AppSupervisor {
                 config_json,
                 backend,
                 tools.clone(),
-                &agent_source,
+                &source,
             )
-            .map_err(|error| anyhow!(error))?,
+            .map_err(anyhow::Error::msg)?,
         );
         self.agent_tools = Some(tools);
         Ok(())
@@ -1969,12 +2072,23 @@ impl AppSupervisor {
         Ok(events)
     }
 
-    pub fn update_root(&self, projection: &Value) -> Result<()> {
-        self.system.update(projection)
+    pub fn update_system(&self, facts: &Value) -> Result<()> {
+        self.system.update(facts)
     }
 
     pub fn tap(&self, x: u16, y: u16) -> Result<Value> {
-        self.active().tap(x, y)
+        let event = self.active().tap(x, y)?;
+        if event.get("type").and_then(Value::as_str) == Some("command") {
+            let command = event.get("command").and_then(Value::as_str).unwrap_or("");
+            if !view_command_allowed(self.active_id(), command) {
+                log::warn!(
+                    "App {} attempted privileged command {command}",
+                    self.active_id()
+                );
+                return Ok(Value::Null);
+            }
+        }
+        Ok(event)
     }
 
     pub fn pointer_down(&self, x: u16, y: u16) -> Result<()> {
@@ -2002,18 +2116,18 @@ impl AppSupervisor {
         deadline: Instant,
         response: mpsc::Sender<ToolResult>,
     ) {
-        let Some(app_id) = self.catalog.app_for_tool(name) else {
+        let Some(route) = self.catalog.route_for_tool(name) else {
             let _ = response.send(tool_error(format!("unknown App tool: {name}")));
             return;
         };
         let args = serde_json::from_str(args_json).unwrap_or(Value::Null);
         match self.action_runner.enqueue(
-            &app_id,
-            DataActionKind::Tool,
-            name,
+            &route.app_id,
+            ActionSource::Tool,
+            &route.action,
             args,
             deadline,
-            Some(response.clone()),
+            ActionCompletion::Response(response.clone()),
         ) {
             Ok(_) => {}
             Err(error) => {
@@ -2022,50 +2136,60 @@ impl AppSupervisor {
         }
     }
 
-    /// Runs a task requested by the currently visible App. The host calls this
+    /// Runs an Action requested by the currently visible App. The host calls this
     /// after presenting the App's immediate pressed/loading state so slow
     /// native services never hide touch feedback.
-    pub fn invoke_active_task(&mut self, name: &str, args: &Value) -> ToolResult {
+    pub fn invoke_active_action(&mut self, action: &str, args: &Value) -> ToolResult {
         let app_id = self.active_id().to_owned();
         match self.action_runner.enqueue(
             &app_id,
-            DataActionKind::Task,
-            name,
+            ActionSource::Ui,
+            action,
             args.clone(),
             new_action_deadline(),
-            None,
+            ActionCompletion::None,
         ) {
             Ok(run_id) => ToolResult {
-                text: format!("Queued {app_id}.{name} as App Data Action {run_id}"),
+                text: format!("Queued {app_id}.{action} as App Action {run_id}"),
                 details: json!({"status":"queued","runId":run_id,"app":app_id}),
                 is_error: false,
                 terminate: false,
             },
-            Err(error) => tool_error(format!("{app_id}.{name}: {error:#}")),
+            Err(error) => tool_error(format!("{app_id}.{action}: {error:#}")),
         }
     }
 
-    pub fn poll_due_tasks(&mut self) -> Vec<(String, ToolResult)> {
+    pub fn poll_due_actions(&mut self) -> Vec<(String, ToolResult)> {
         let mut results = Vec::new();
+        for completed in self.action_runner.drain_schedule_results() {
+            self.schedules.finish(
+                &completed.app_id,
+                &completed.schedule_id,
+                !completed.result.is_error,
+            );
+            results.push((completed.app_id, completed.result));
+        }
         while let Some(due) = self.schedules.claim_due() {
-            let label = format!("{}.{}", due.app_id, due.task);
+            let label = format!("{}.{}", due.app_id, due.action);
             let result = match self.action_runner.enqueue(
                 &due.app_id,
-                DataActionKind::Task,
-                &due.task,
+                ActionSource::Schedule,
+                &due.action,
                 due.args.clone(),
                 new_action_deadline(),
-                None,
+                ActionCompletion::Schedule(due.schedule_id.clone()),
             ) {
                 Ok(run_id) => ToolResult {
-                    text: format!("Queued {label} as App Data Action {run_id}"),
+                    text: format!("Queued {label} as App Action {run_id}"),
                     details: json!({"status":"queued","runId":run_id}),
                     is_error: false,
                     terminate: false,
                 },
                 Err(error) => tool_error(format!("{label}: {error:#}")),
             };
-            self.schedules.finish(&due, !result.is_error);
+            if result.is_error {
+                self.schedules.finish(&due.app_id, &due.schedule_id, false);
+            }
             results.push((label, result));
         }
         results
@@ -2086,11 +2210,16 @@ impl AppSupervisor {
     }
 }
 
+fn view_command_allowed(app_id: &str, command: &str) -> bool {
+    app_id == ROOT_APP_ID || command == "apps.open"
+}
+
 fn load_runtime(
     workspace: &Path,
     catalog: &InstalledAppIndex,
     databases: &BTreeMap<String, SharedDb>,
     revisions: &BTreeMap<String, AppRevision>,
+    framework: &str,
     app_id: &str,
 ) -> Result<ViewRuntime> {
     let app = catalog
@@ -2105,7 +2234,7 @@ fn load_runtime(
         .get(app_id)
         .cloned()
         .ok_or_else(|| anyhow!("App {app_id} has no revision owner"))?;
-    ViewRuntime::load(&app, &fs_root, &tmp_root, db, revision)
+    ViewRuntime::load(&app, framework, &fs_root, &tmp_root, db, revision)
         .with_context(|| format!("load App {app_id}"))
 }
 
@@ -2122,46 +2251,14 @@ fn data_paths(workspace: &Path, app_id: &str) -> (PathBuf, PathBuf, PathBuf) {
     }
 }
 
-fn reset_development_database(
-    workspace: &Path,
-    descriptor: &AppDescriptor,
-    db_root: &Path,
-) -> Result<()> {
-    if descriptor.data_version == 0 {
-        return Ok(());
-    }
-    let marker = workspace
-        .join("apps")
-        .join(&descriptor.id)
-        .join(".data-version");
-    let expected = descriptor.data_version.to_string();
-    if std::fs::read_to_string(&marker).is_ok_and(|value| value == expected) {
-        return Ok(());
-    }
-    let database = db_root.join(format!("{}.sqlite", descriptor.id));
-    for path in [
-        database.clone(),
-        database.with_extension("sqlite-wal"),
-        database.with_extension("sqlite-shm"),
-        database.with_extension("sqlite-journal"),
-    ] {
-        match std::fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error).with_context(|| format!("reset {}", path.display())),
-        }
-    }
-    atomic_write(&marker, expected.as_bytes())
-}
-
-fn seed_system_release(workspace: &Path, bundle: SystemAppBundle) -> Result<()> {
-    let release_dir = workspace.join("data/view/releases").join(BUILTIN_RELEASE);
+fn seed_system_app(workspace: &Path, bundle: SystemAppBundle) -> Result<()> {
+    let release_dir = workspace.join("system/app");
     std::fs::create_dir_all(&release_dir)?;
     atomic_write(&release_dir.join("app.js"), bundle.js.as_bytes())?;
     atomic_write(&release_dir.join("agent.js"), bundle.agent_js.as_bytes())?;
     atomic_write(&release_dir.join("app.pak"), bundle.pak)?;
     atomic_write(
-        &release_dir.join("agent-app.json"),
+        &release_dir.join("app.json"),
         bundle.descriptor_json.as_bytes(),
     )?;
     atomic_write(
@@ -2179,15 +2276,19 @@ fn seed_system_release(workspace: &Path, bundle: SystemAppBundle) -> Result<()> 
         &serde_json::to_vec_pretty(&json!({
             "runtime":"pocket-pi-agentos",
             "pocketjsRevision":POCKETJS_REVISION,
+            "frameworkApi":SYSTEM_FRAMEWORK_API,
             "app":ROOT_APP_ID,
             "modules":modules
         }))?,
     )?;
-    atomic_write(
-        &workspace.join("data/view/current"),
-        BUILTIN_RELEASE.as_bytes(),
-    )?;
     Ok(())
+}
+
+fn seed_system_framework(workspace: &Path) -> Result<()> {
+    atomic_write(
+        &workspace.join("system/framework.js"),
+        system_framework().as_bytes(),
+    )
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -2250,7 +2351,7 @@ impl ToolHost for RoutedToolHost {
     }
 
     fn execute(&self, call_id: &str, name: &str, args_json: &str) -> ToolResult {
-        if self.catalog.app_for_tool(name).is_none() {
+        if self.catalog.route_for_tool(name).is_none() {
             return self.native.execute(call_id, name, args_json);
         }
         let (response, response_rx) = mpsc::channel();
@@ -2274,7 +2375,7 @@ impl ToolHost for RoutedToolHost {
             match response_rx.try_recv() {
                 Ok(result) => return result,
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    return tool_error("App Data Action response channel closed");
+                    return tool_error("App Action response channel closed");
                 }
                 Err(mpsc::TryRecvError::Empty) => yield_scheduler_tick(),
             }
@@ -2301,19 +2402,18 @@ fn tool_error(text: impl Into<String>) -> ToolResult {
 struct StoredSchedule {
     app_id: String,
     schedule_id: String,
-    task: String,
+    action: String,
     args: Value,
     every_seconds: u64,
     next_run_at: u64,
     last_ok: Option<bool>,
 }
 
-struct DueTask {
+struct DueAction {
     app_id: String,
     schedule_id: String,
-    task: String,
+    action: String,
     args: Value,
-    scheduled_at: u64,
 }
 
 struct AppScheduleStore {
@@ -2323,7 +2423,7 @@ struct AppScheduleStore {
 
 impl AppScheduleStore {
     fn load(workspace: &Path, catalog: &InstalledAppIndex) -> Result<Self> {
-        // AppTask declarations travel with the App release, while their
+        // App Schedule declarations travel with the App release, while their
         // mutable scheduler cursor belongs to that App's private data root.
         let now = unix_seconds();
         let mut paths = BTreeMap::new();
@@ -2343,27 +2443,21 @@ impl AppScheduleStore {
                 .unwrap_or_default();
             paths.insert(app.id.clone(), path);
             for declaration in &app.schedules {
-                anyhow::ensure!(
-                    app.tasks.iter().any(|task| task == &declaration.task),
-                    "{}.{} schedule references missing task {}",
-                    app.id,
-                    declaration.id,
-                    declaration.task
-                );
                 let every_seconds = declaration.every_minutes.saturating_mul(60).max(60);
                 let existing = prior
                     .iter_mut()
                     .find(|item| item.app_id == app.id && item.schedule_id == declaration.id);
                 schedules.push(match existing {
                     Some(item)
-                        if item.task == declaration.task && item.every_seconds == every_seconds =>
+                        if item.action == declaration.action
+                            && item.every_seconds == every_seconds =>
                     {
                         item.clone()
                     }
                     _ => StoredSchedule {
                         app_id: app.id.clone(),
                         schedule_id: declaration.id.clone(),
-                        task: declaration.task.clone(),
+                        action: declaration.action.clone(),
                         args: declaration.args.clone(),
                         every_seconds,
                         next_run_at: now.saturating_add(every_seconds),
@@ -2377,21 +2471,19 @@ impl AppScheduleStore {
         Ok(store)
     }
 
-    fn claim_due(&mut self) -> Option<DueTask> {
+    fn claim_due(&mut self) -> Option<DueAction> {
         let now = unix_seconds();
         let item = self
             .schedules
             .iter_mut()
             .filter(|item| item.next_run_at <= now)
             .min_by_key(|item| item.next_run_at)?;
-        let scheduled_at = item.next_run_at;
         item.next_run_at = next_schedule_run(item.next_run_at, item.every_seconds, now);
-        let due = DueTask {
+        let due = DueAction {
             app_id: item.app_id.clone(),
             schedule_id: item.schedule_id.clone(),
-            task: item.task.clone(),
+            action: item.action.clone(),
             args: item.args.clone(),
-            scheduled_at,
         };
         let _ = self.persist();
         Some(due)
@@ -2407,20 +2499,16 @@ impl AppScheduleStore {
         self.schedules.retain(|schedule| schedule.app_id != app_id);
     }
 
-    fn finish(&mut self, due: &DueTask, ok: bool) {
-        if let Some(item) = self
+    fn finish(&mut self, app_id: &str, schedule_id: &str, ok: bool) {
+        let Some(item) = self
             .schedules
             .iter_mut()
-            .find(|item| item.app_id == due.app_id && item.schedule_id == due.schedule_id)
-        {
-            item.last_ok = Some(ok);
-        }
-        log::info!(
-            "AppTask {}.{} scheduled_at={} ok={ok}",
-            due.app_id,
-            due.task,
-            due.scheduled_at
-        );
+            .find(|item| item.app_id == app_id && item.schedule_id == schedule_id)
+        else {
+            return;
+        };
+        item.last_ok = Some(ok);
+        log::info!("App Schedule {app_id}.{schedule_id} ok={ok}");
         let _ = self.persist();
     }
 
@@ -2447,7 +2535,7 @@ fn new_schedules(descriptor: &AppDescriptor) -> Vec<StoredSchedule> {
             StoredSchedule {
                 app_id: descriptor.id.clone(),
                 schedule_id: declaration.id.clone(),
-                task: declaration.task.clone(),
+                action: declaration.action.clone(),
                 args: declaration.args.clone(),
                 every_seconds,
                 next_run_at: now.saturating_add(every_seconds),
@@ -2569,15 +2657,24 @@ mod tests {
         install_fixture(
             temp.path(),
             "search",
-            r#"{"id":"search","description":"Research","version":"1","toolNamespace":"research","tools":[{"name":"research.query","parameters":{"type":"object"}}],"tasks":[],"schedules":[]}"#,
+            r#"{"id":"search","description":"Research","version":"1","toolNamespace":"research","tools":[{"name":"research.query","action":"query","parameters":{"type":"object"}}],"schedules":[]}"#,
         );
         let catalog = InstalledAppIndex::load(temp.path(), system_app_bundle()).unwrap();
 
         assert_eq!(
-            catalog.app_for_tool("research.query"),
-            Some("search".into())
+            catalog
+                .route_for_tool("research.query")
+                .map(|route| (route.app_id, route.action)),
+            Some(("search".into(), "query".into()))
         );
         assert_eq!(catalog.descriptors().len(), 2);
+    }
+
+    #[test]
+    fn only_the_system_app_can_issue_privileged_device_commands() {
+        assert!(view_command_allowed("exa", "apps.open"));
+        assert!(!view_command_allowed("exa", "device.restart"));
+        assert!(view_command_allowed(ROOT_APP_ID, "device.restart"));
     }
 
     #[test]
@@ -2586,7 +2683,7 @@ mod tests {
         install_fixture(
             temp.path(),
             "search",
-            r#"{"id":"search","description":"Research","version":"1","tools":[{"name":"other.query","parameters":{"type":"object"}}],"tasks":[],"schedules":[]}"#,
+            r#"{"id":"search","description":"Research","version":"1","tools":[{"name":"other.query","action":"query","parameters":{"type":"object"}}],"schedules":[]}"#,
         );
         let error = InstalledAppIndex::load(temp.path(), system_app_bundle()).unwrap_err();
 
@@ -2599,7 +2696,7 @@ mod tests {
         install_fixture(
             temp.path(),
             "search",
-            r#"{"id":"search","description":"Research","version":"1","tools":[],"tasks":[],"schedules":[],"nativeServices":{"http":[{"method":"POST","urls":["https://example.com/search"],"allowedRequestHeaders":["content-type"],"credential":{"id":"search.api-key","header":"x-api-key"}}],"mcp":[]}}"#,
+            r#"{"id":"search","description":"Research","version":"1","tools":[],"schedules":[],"nativeServices":{"http":[{"method":"POST","urls":["https://example.com/search"],"allowedRequestHeaders":["content-type"],"credential":{"id":"search.api-key","header":"x-api-key"}}],"mcp":[]}}"#,
         );
         let catalog = InstalledAppIndex::load(temp.path(), system_app_bundle()).unwrap();
 
@@ -2622,11 +2719,9 @@ mod tests {
             title: "Search".into(),
             description: "Research".into(),
             version: "1".into(),
-            data_version: 0,
             tool_namespace: "search".into(),
             tools: Vec::new(),
             provider_operations: Vec::new(),
-            tasks: Vec::new(),
             schedules: Vec::new(),
             native_services: NativeServices {
                 http: vec![HttpServicePolicy {
@@ -2660,13 +2755,76 @@ mod tests {
     }
 
     #[test]
+    fn descriptor_rejects_removed_fields() {
+        let error = serde_json::from_str::<AppDescriptor>(
+            r#"{"id":"notes","description":"Notes","version":"1","tools":[],"tasks":[],"schedules":[]}"#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unknown field `tasks`"));
+    }
+
+    #[test]
+    fn projection_errors_propagate_to_the_view_runtime() {
+        let guest = new_app_guest().unwrap();
+        let database = Arc::new(Mutex::new(DbModule::new(DbStorage::Memory)));
+        mount_db(&guest, database, false).unwrap();
+        install_system_framework(&guest, "projection-test", system_framework()).unwrap();
+
+        let error = guest
+            .eval(
+                "projection-error",
+                r#"PocketPi.projection.one("SELECT 1 AS value", {}, () => { throw new Error("invalid projection"); });"#,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("invalid projection"));
+    }
+
+    #[test]
+    fn view_queries_cannot_write_sqlite() {
+        let guest = new_app_guest().unwrap();
+        let database = Arc::new(Mutex::new(DbModule::new(DbStorage::Memory)));
+        {
+            let mut database = database.lock().unwrap();
+            let handle = database.open("readonly-test");
+            assert_eq!(
+                database.exec(
+                    handle,
+                    "CREATE TABLE items(value INTEGER); INSERT INTO items VALUES(1)"
+                ),
+                0
+            );
+        }
+        mount_db(&guest, database.clone(), false).unwrap();
+        install_system_framework(&guest, "readonly-test", system_framework()).unwrap();
+
+        let error = guest
+            .eval("view-write", r#"PocketPi.data.query("DELETE FROM items");"#)
+            .unwrap_err();
+        assert!(error.to_string().contains("readonly"));
+
+        let remaining: Value = {
+            let mut database = database.lock().unwrap();
+            let handle = database.open("readonly-test");
+            serde_json::from_str(&database.query(
+                handle,
+                "SELECT COUNT(*) AS count FROM items",
+                "[]",
+            ))
+            .unwrap()
+        };
+        assert_eq!(remaining["rows"][0][0], 1);
+    }
+
+    #[test]
     fn app_tool_request_carries_the_single_80_second_deadline() {
         assert_eq!(APP_ACTION_TIMEOUT, Duration::from_secs(80));
         let temp = tempfile::tempdir().unwrap();
         install_fixture(
             temp.path(),
             "search",
-            r#"{"id":"search","description":"Research","version":"1","toolNamespace":"research","tools":[{"name":"research.query","parameters":{"type":"object"}}],"tasks":[],"schedules":[]}"#,
+            r#"{"id":"search","description":"Research","version":"1","toolNamespace":"research","tools":[{"name":"research.query","action":"query","parameters":{"type":"object"}}],"schedules":[]}"#,
         );
         let catalog = InstalledAppIndex::load(temp.path(), system_app_bundle()).unwrap();
         let (tools, requests) = RoutedToolHost::new(Arc::new(NoTools), catalog);
@@ -2695,49 +2853,63 @@ mod tests {
     }
 
     #[test]
-    fn data_version_resets_only_that_apps_database_once() {
+    fn schedule_completion_reports_the_action_result() {
         let temp = tempfile::tempdir().unwrap();
-        let db_root = temp.path().join("apps/notes/data");
-        std::fs::create_dir_all(&db_root).unwrap();
-        let database = db_root.join("notes.sqlite");
-        std::fs::write(&database, "old-schema").unwrap();
-        let mut descriptor = AppDescriptor {
-            id: "notes".into(),
-            title: "Notes".into(),
-            description: "Notes App".into(),
-            version: "1.0.0".into(),
-            data_version: 3,
-            tool_namespace: "notes".into(),
-            tools: Vec::new(),
-            provider_operations: Vec::new(),
-            tasks: Vec::new(),
-            schedules: Vec::new(),
-            native_services: NativeServices::default(),
-        };
+        let source = temp.path().join("actions.js");
+        std::fs::write(
+            &source,
+            r#"PocketPi.defineActions({ run() { const end = Date.now() + 50; while (Date.now() < end) {} throw new Error("scheduled failure"); } });"#,
+        )
+        .unwrap();
+        let runner = ActionRunner::start(
+            vec![ActionConfig {
+                app_id: "scheduled".into(),
+                source_path: source,
+                framework: Arc::from(system_framework()),
+                database: Arc::new(Mutex::new(DbModule::new(DbStorage::Memory))),
+                revision: Arc::new(AtomicU32::new(0)),
+                net: false,
+            }],
+            Arc::new(NoServices),
+        )
+        .unwrap();
 
-        reset_development_database(temp.path(), &descriptor, &db_root).unwrap();
-        assert!(!database.exists());
-        std::fs::write(&database, "current-schema").unwrap();
-        reset_development_database(temp.path(), &descriptor, &db_root).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&database).unwrap(),
-            "current-schema"
-        );
+        runner
+            .enqueue(
+                "scheduled",
+                ActionSource::Schedule,
+                "run",
+                Value::Null,
+                new_action_deadline(),
+                ActionCompletion::Schedule("tick".into()),
+            )
+            .unwrap();
+        assert!(runner.busy());
 
-        descriptor.data_version = 4;
-        reset_development_database(temp.path(), &descriptor, &db_root).unwrap();
-        assert!(!database.exists());
+        let completed = (0..500)
+            .find_map(|_| {
+                let result = runner.drain_schedule_results().into_iter().next();
+                if result.is_none() {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                result
+            })
+            .expect("scheduled Action result");
+        assert_eq!(completed.app_id, "scheduled");
+        assert_eq!(completed.schedule_id, "tick");
+        assert!(completed.result.is_error);
+        assert!(completed.result.text.contains("scheduled failure"));
     }
 
     #[test]
-    fn failed_candidate_never_creates_current() {
+    fn failed_install_leaves_no_app() {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("device");
         let staging = temp.path().join("staged-release");
         std::fs::create_dir_all(&staging).unwrap();
         std::fs::write(
-            staging.join("agent-app.json"),
-            r#"{"id":"broken","description":"Broken","version":"1","tools":[],"tasks":[],"schedules":[]}"#,
+            staging.join("app.json"),
+            r#"{"id":"broken","description":"Broken","version":"1","tools":[],"schedules":[]}"#,
         )
         .unwrap();
         std::fs::write(
@@ -2750,6 +2922,7 @@ mod tests {
             json!({
                 "runtime":"pocket-pi-agentos",
                 "pocketjsRevision":POCKETJS_REVISION,
+                "frameworkApi":SYSTEM_FRAMEWORK_API,
                 "app":"broken",
                 "modules":[]
             })
@@ -2761,11 +2934,9 @@ mod tests {
 
         let index = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
         let mut supervisor = AppSupervisor::new(&workspace, index, Arc::new(NoServices)).unwrap();
-        let error = supervisor
-            .activate_new_app(&staging, BTreeMap::new())
+        supervisor
+            .activate_app(&staging, BTreeMap::new())
             .unwrap_err();
-        assert!(error.to_string().contains("frame") || error.to_string().contains("PocketPiApp"));
-        assert!(!workspace.join("apps/broken/current").exists());
         assert!(!workspace.join("apps/broken").exists());
     }
 
@@ -2776,10 +2947,14 @@ mod tests {
         stage_checked_in_app(&staging, "exa");
         let catalog = InstalledAppIndex::load(temp.path(), system_app_bundle()).unwrap();
         let mut supervisor =
-            AppSupervisor::new(temp.path(), catalog, Arc::new(NoServices)).unwrap();
+            AppSupervisor::new(temp.path(), catalog, Arc::new(TrackingServices::default()))
+                .unwrap();
 
         let installed = supervisor
-            .activate_new_app(&staging, BTreeMap::new())
+            .activate_app(
+                &staging,
+                BTreeMap::from([("exa.api-key".to_owned(), "secret".to_owned())]),
+            )
             .unwrap();
 
         assert_eq!(installed.id, "exa");
@@ -2789,6 +2964,54 @@ mod tests {
 
         supervisor.open("exa").unwrap();
         assert_eq!(supervisor.active_id(), "exa");
+    }
+
+    #[test]
+    fn installing_an_existing_app_fails_without_changing_it() {
+        let temp = tempfile::tempdir().unwrap();
+        install_checked_in_app(temp.path(), "exa");
+        let catalog = InstalledAppIndex::load(temp.path(), system_app_bundle()).unwrap();
+        let mut supervisor =
+            AppSupervisor::new(temp.path(), catalog, Arc::new(NoServices)).unwrap();
+        let staging = temp.path().join("duplicate-exa");
+        stage_checked_in_app(&staging, "exa");
+
+        let error = supervisor
+            .activate_app(&staging, BTreeMap::new())
+            .unwrap_err();
+
+        assert!(error.to_string().contains("already installed"));
+        assert_eq!(
+            supervisor.catalog().descriptor("exa").unwrap().version,
+            "1.1.0"
+        );
+        assert!(temp.path().join("apps/exa/release").is_dir());
+    }
+
+    #[test]
+    fn installing_clears_an_incomplete_app_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("device");
+        let orphan = workspace.join("apps/exa/data/orphan.txt");
+        std::fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+        std::fs::write(&orphan, "incomplete").unwrap();
+
+        let staging = temp.path().join("staged-exa");
+        stage_checked_in_app(&staging, "exa");
+        let catalog = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
+        assert!(catalog.descriptor("exa").is_none());
+        let mut supervisor =
+            AppSupervisor::new(&workspace, catalog, Arc::new(TrackingServices::default())).unwrap();
+
+        supervisor
+            .activate_app(
+                &staging,
+                BTreeMap::from([("exa.api-key".to_owned(), "secret".to_owned())]),
+            )
+            .unwrap();
+
+        assert!(!orphan.exists());
+        assert!(workspace.join("apps/exa/release").is_dir());
     }
 
     #[test]
@@ -2816,7 +3039,7 @@ mod tests {
             "secret".to_owned(),
         )]);
         supervisor
-            .activate_new_app(&staging, credentials.clone())
+            .activate_app(&staging, credentials.clone())
             .unwrap();
         supervisor.open("robinhood").unwrap();
         std::fs::write(
@@ -2830,11 +3053,11 @@ mod tests {
             .action_runner
             .enqueue(
                 "robinhood",
-                DataActionKind::Task,
+                ActionSource::Ui,
                 "refreshPortfolio",
                 Value::Null,
                 new_action_deadline(),
-                Some(response),
+                ActionCompletion::Response(response),
             )
             .unwrap();
         let _ = result.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -2867,11 +3090,11 @@ mod tests {
             .action_runner
             .enqueue(
                 "robinhood",
-                DataActionKind::Task,
+                ActionSource::Ui,
                 "refreshPortfolio",
                 Value::Null,
                 new_action_deadline(),
-                Some(response),
+                ActionCompletion::Response(response),
             )
             .unwrap();
         assert!(
@@ -2911,7 +3134,7 @@ mod tests {
 
         let staging = temp.path().join("reinstall-robinhood");
         stage_checked_in_app(&staging, "robinhood");
-        supervisor.activate_new_app(&staging, credentials).unwrap();
+        supervisor.activate_app(&staging, credentials).unwrap();
         assert!(supervisor.catalog().descriptor("robinhood").is_some());
     }
 
@@ -3048,24 +3271,18 @@ mod tests {
     }
 
     #[test]
-    fn data_actions_keep_the_three_most_recent_runtimes() {
+    fn actions_keep_the_three_most_recent_runtimes() {
         let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("data-action.js");
+        let source = temp.path().join("actions.js");
         std::fs::write(
             &source,
             r#"
-const nativeDb = globalThis.db;
-const handle = nativeDb.open("cache");
-if (handle < 0) throw new Error("open cache.sqlite");
-if (nativeDb.exec(handle, `
+PocketPi.data.exec(`
   CREATE TABLE IF NOT EXISTS loads(value INTEGER NOT NULL);
   INSERT INTO loads(value) SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM loads);
   UPDATE loads SET value=value+1;
-`) !== 0) throw new Error(nativeDb.lastError(handle));
-globalThis.PocketPiData = {
-  invokeTask() { return JSON.stringify({text:"ok", isError:false}); },
-  invokeTool() { return JSON.stringify({text:"ok", isError:false}); },
-};
+`);
+PocketPi.defineActions({ run() { return "ok"; } });
 "#,
         )
         .unwrap();
@@ -3078,27 +3295,28 @@ globalThis.PocketPiData = {
                     temp.path().join(app_id),
                 ))));
                 databases.insert(app_id, database.clone());
-                DataActionConfig {
+                ActionConfig {
                     app_id: app_id.into(),
                     source_path: source.clone(),
+                    framework: Arc::from(include_str!("../../../system/framework.js")),
                     database,
                     revision: Arc::new(AtomicU32::new(0)),
                     net: false,
                 }
             })
             .collect();
-        let runner = DataActionRunner::start(configs, Arc::new(NoServices)).unwrap();
+        let runner = ActionRunner::start(configs, Arc::new(NoServices)).unwrap();
 
         for app_id in ["one", "two", "three", "one", "four", "two"] {
             let (response, rx) = mpsc::channel();
             runner
                 .enqueue(
                     app_id,
-                    DataActionKind::Task,
+                    ActionSource::Ui,
                     "run",
                     Value::Null,
                     new_action_deadline(),
-                    Some(response),
+                    ActionCompletion::Response(response),
                 )
                 .unwrap();
             assert!(!rx.recv_timeout(Duration::from_secs(2)).unwrap().is_error);
@@ -3106,7 +3324,7 @@ globalThis.PocketPiData = {
 
         let load_count = |app_id: &str| {
             let mut database = databases[app_id].lock().unwrap();
-            let handle = database.open("cache");
+            let handle = database.open(app_id);
             let value: Value =
                 serde_json::from_str(&database.query(handle, "SELECT value FROM loads", "[]"))
                     .unwrap();
@@ -3120,17 +3338,15 @@ globalThis.PocketPiData = {
 
     fn install_view_fixture(workspace: &Path, app_id: &str) {
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/exa");
-        let release = workspace.join("apps").join(app_id).join("releases/r1");
+        let release = workspace.join("apps").join(app_id).join("release");
         std::fs::create_dir_all(&release).unwrap();
         std::fs::write(
-            release.join("agent-app.json"),
+            release.join("app.json"),
             json!({
                 "id":app_id,
-                "title":app_id,
                 "description":"View cache fixture",
                 "version":"1",
                 "tools":[],
-                "tasks":[],
                 "schedules":[]
             })
             .to_string(),
@@ -3153,6 +3369,7 @@ globalThis.PocketPiData = {
             json!({
                 "runtime":"pocket-pi-agentos",
                 "pocketjsRevision":POCKETJS_REVISION,
+                "frameworkApi":SYSTEM_FRAMEWORK_API,
                 "app":app_id,
                 "modules":[]
             })
@@ -3161,13 +3378,24 @@ globalThis.PocketPiData = {
         .unwrap();
         std::fs::copy(source.join("dist/app.js"), release.join("app.js")).unwrap();
         std::fs::copy(source.join("dist/app.pak"), release.join("app.pak")).unwrap();
-        std::fs::write(workspace.join("apps").join(app_id).join("current"), "r1").unwrap();
+        let mut database = DbModule::new(DbStorage::Dir(
+            workspace.join("apps").join(app_id).join("data"),
+        ));
+        let handle = database.open(app_id);
+        assert!(handle > 0);
+        assert_eq!(
+            database.exec(
+                handle,
+                "CREATE TABLE searches(id INTEGER, query TEXT, searched_at INTEGER, status TEXT, result_count INTEGER, top_title TEXT, error TEXT); PRAGMA user_version=5;"
+            ),
+            0
+        );
     }
 
     fn install_fixture(workspace: &Path, app_id: &str, descriptor: &str) {
-        let release = workspace.join("apps").join(app_id).join("releases/r1");
+        let release = workspace.join("apps").join(app_id).join("release");
         std::fs::create_dir_all(&release).unwrap();
-        std::fs::write(release.join("agent-app.json"), descriptor).unwrap();
+        std::fs::write(release.join("app.json"), descriptor).unwrap();
         std::fs::write(
             release.join("pocket.json"),
             json!({
@@ -3185,6 +3413,7 @@ globalThis.PocketPiData = {
             json!({
                 "runtime":"pocket-pi-agentos",
                 "pocketjsRevision":POCKETJS_REVISION,
+                "frameworkApi":SYSTEM_FRAMEWORK_API,
                 "app":app_id,
                 "modules":[]
             })
@@ -3197,19 +3426,29 @@ globalThis.PocketPiData = {
         if descriptor["tools"]
             .as_array()
             .is_some_and(|tools| !tools.is_empty())
-            || descriptor["tasks"]
+            || descriptor["schedules"]
                 .as_array()
-                .is_some_and(|tasks| !tasks.is_empty())
+                .is_some_and(|schedules| !schedules.is_empty())
         {
-            std::fs::write(release.join("data-action.js"), "").unwrap();
+            std::fs::write(release.join("actions.js"), "").unwrap();
         }
-        std::fs::write(workspace.join("apps").join(app_id).join("current"), "r1").unwrap();
     }
 
     fn install_checked_in_app(workspace: &Path, app_id: &str) {
-        let release = workspace.join("apps").join(app_id).join("releases/r1");
-        stage_checked_in_app(&release, app_id);
-        std::fs::write(workspace.join("apps").join(app_id).join("current"), "r1").unwrap();
+        let staging = workspace.join(format!(".staged-{app_id}"));
+        stage_checked_in_app(&staging, app_id);
+        let catalog = InstalledAppIndex::load(workspace, system_app_bundle()).unwrap();
+        let mut supervisor =
+            AppSupervisor::new(workspace, catalog, Arc::new(TrackingServices::default())).unwrap();
+        let credentials = match app_id {
+            "exa" => BTreeMap::from([("exa.api-key".to_owned(), "test-secret".to_owned())]),
+            "robinhood" => BTreeMap::from([(
+                "robinhood.oauth-access-token".to_owned(),
+                "test-secret".to_owned(),
+            )]),
+            _ => BTreeMap::new(),
+        };
+        supervisor.activate_app(&staging, credentials).unwrap();
     }
 
     fn stage_checked_in_app(release: &Path, app_id: &str) {
@@ -3219,11 +3458,11 @@ globalThis.PocketPiData = {
             .join(app_id);
         std::fs::create_dir_all(release).unwrap();
         for (from, to) in [
-            ("agent-app.json", "agent-app.json"),
+            ("app.json", "app.json"),
             ("pocket.json", "pocket.json"),
             ("dist/app.js", "app.js"),
             ("dist/app.pak", "app.pak"),
-            ("dist/data-action.js", "data-action.js"),
+            ("dist/actions.js", "actions.js"),
         ] {
             std::fs::copy(source.join(from), release.join(to)).unwrap();
         }
@@ -3234,6 +3473,7 @@ globalThis.PocketPiData = {
             serde_json::to_vec(&json!({
                 "runtime":"pocket-pi-agentos",
                 "pocketjsRevision":POCKETJS_REVISION,
+                "frameworkApi":SYSTEM_FRAMEWORK_API,
                 "app":app_id,
                 "modules":manifest.pointer("/engine/capabilities/requires").unwrap()
             }))
