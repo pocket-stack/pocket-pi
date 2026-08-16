@@ -4,11 +4,10 @@ Pocket Pi is a device runtime, not an App running on a general-purpose OS. The
 first supported host is ESP32-P4; `hosts/esp32-p4-sim` is a development and
 product-contract simulator, not a second product.
 
-This document describes the current Bundle-first implementation. Apps are still
-compiled off-device into PocketJS Bundles. The device can install, validate and
-execute ordinary App Bundles without rebuilding or flashing Firmware. An App id
-can be installed only once; uninstall is required before reinstalling it. Raw
-source modules and on-device JSX transformation are later work.
+Ordinary Apps are installed and executed as raw JavaScript source. The device
+does not compile them, and changing an App does not rebuild or flash Firmware.
+An App id can be installed only once; uninstall is required before reinstalling
+it. The Pi Agent is the one firmware-embedded System Bundle.
 
 ## Core model
 
@@ -46,8 +45,8 @@ Hardware
         ├── resident Pi Agent System Guest
         │   ├── Agent loop                         bundled JavaScript
         │   └── Chat / Files / Apps / Settings    bundled PocketJS View
-        ├── ordinary View Guests                  LRU, maximum 3
-        └── ordinary Action Guests                LRU, maximum 3
+        ├── ordinary source View Guests           LRU, maximum 3
+        └── ordinary source Action Guests         LRU, maximum 3
 ```
 
 “PocketJS runtime” has two useful scopes:
@@ -59,7 +58,7 @@ Hardware
   instance, not to another copy of the PocketJS platform.
 
 The JS System Framework is evaluated inside every View and Action Guest before
-the App Bundle. It does not consume a seventh ordinary-App cache slot and does
+the App entrypoint. It does not consume a seventh ordinary-App cache slot and does
 not create another Guest.
 
 Maximum resident JS Guests are currently:
@@ -85,7 +84,7 @@ drops it.
 | AppSupervisor mechanisms | `crates/pocket-pi-agentos`, Rust | Firmware lifetime | Firmware build/flash |
 | System Framework v1 | `system/framework.js`, JavaScript | evaluated per Guest | Firmware build/flash |
 | Pi Agent System App | `apps/pi-agent`, TS/TSX -> embedded Bundles | resident | Firmware build/flash |
-| Ordinary App | `apps/<id>`, TS/TSX -> Bundles | LRU Guests | off-device Bundle build + install |
+| Ordinary App | `apps/<id>`, raw JavaScript + SQL | LRU Guests | package + install |
 | App Data | per-App SQLite + files | survives Guest eviction and restart | Action transaction |
 
 Firmware contains the Pi Agent System App so a blank device can boot. System App
@@ -106,13 +105,13 @@ installation and replacement are deliberately outside the current contract.
 
 The Framework is platform-owned, not part of the Pi Agent System App. Firmware
 currently provisions the one framework source at `system/framework.js`, and
-every Guest evaluates that source before its Bundle. This gives the SDK one
+every Guest evaluates that source before its App entrypoint. This gives the SDK one
 explicit owner without inventing an updater or coupling its lifecycle to App
 installation; independent Framework distribution is deferred.
 
 `PocketPiSystem` is the private native-facing ABI used to configure a Guest,
 start/tick/poll Actions, refresh Projection bindings and dispatch View input.
-Bundles declare `frameworkApi: 1` in `plan.json`; incompatible Bundles are
+Ordinary Apps declare `frameworkApi: 1` in `app.json`; incompatible Apps are
 rejected before activation.
 
 The framework is intentionally one file. There is no service registry, plugin
@@ -165,39 +164,36 @@ state. Those facts are not called Projection: UI/page policy remains in the JS
 System App, while native supplies only facts and executes narrow commands such
 as Wi-Fi connect, App install/uninstall and restart.
 
-## Bundle contract
+## Ordinary Source App contract
 
 An ordinary `.pocketapp` contains:
 
 ```text
 app.json
-pocket.json
-plan.json
-app.js
-app.pak
-actions.js           optional, required by declared Tools/Schedules
+schema.sql
+actions.js
+view.js
+assets/              optional JSON resources declared by app.json
 credentials.json     initial-install transport input, removed before activation
 ```
 
-`agent.js` belongs only to the firmware-embedded Pi Agent System App and is not
-accepted in a `.pocketapp`.
-
-`app.js` and `actions.js` are current ordinary App build artifacts. The Bundle
-is the v1 execution unit; installing one does not require
-Node, Bun, esbuild, Cargo, a Firmware rebuild or a flash on the device. Building
-those artifacts from TS/TSX still happens off-device with the pinned PocketJS
-revision.
+`schema.sql`, `actions.js` and `view.js` are the execution source, not build
+artifacts. `assets/` contains only manifest-declared JSON resources. Packaging
+does not require PocketJS, Bun or a compile step. `agent.js`, `pocket.json`,
+`plan.json`, `app.js` and `app.pak` belong only to the firmware-embedded Pi
+Agent System App and are rejected in an ordinary `.pocketapp`.
 
 ## Install and uninstall
 
 Before activation the Installer validates paths, size, manifest identity,
-capabilities, credential declarations, PocketJS revision and Framework API.
+capabilities, credential declarations, resources and Framework API.
 `AppSupervisor` rejects an already-installed App id, then:
 
-1. loads the Action Bundle against the new App's SQLite owner, initializes its
-   schema and verifies every Tool/Schedule Action name;
-2. loads the View against the same SQLite owner through a read-only surface;
-3. moves the staged Bundle to the single `apps/<id>/release` location;
+1. initializes `schema.sql`, loads `actions.js` against the App's SQLite owner
+   and verifies every Tool/Schedule Action name;
+2. evaluates the shared View SDK and `view.js` against the same SQLite owner
+   through a read-only surface;
+3. moves the staged source to the single `apps/<id>/release` location;
 4. registers credentials, Tools, Schedules and the two LRU configurations.
 
 Any failure removes the incomplete App. There are no release pointers, retained
@@ -219,21 +215,20 @@ Native retains only boundaries that JavaScript cannot safely own:
 - rendering of PocketJS draw output.
 
 Robinhood/Exa schema, provider mapping, Actions, Projection SQL and all product
-Views remain JavaScript Bundle code.
+Views remain App-owned source.
 
 ## Explicitly not implemented
 
-- a general on-device ES module loader for App source trees;
+- a general on-device ES module loader for multi-file App source trees;
 - on-device TypeScript, TSX or JSX transformation;
-- raw-JavaScript source activation without a Bundle;
 - independent update or API migration of the System Framework itself;
 - ordinary or System App replacement, upgrade, rollback or live migration;
 - a package dependency graph, plugin framework or second JavaScript runtime.
 
-The next source-loaded phase should proceed in this order: source module loading,
-Action modules, Projection declarations, a minimal pure-JS View construction API,
-then optional JSX transformation. Each step should be added only when the prior
-Bundle-first contract cannot satisfy an actual use case.
+The contract stays deliberately small: one Actions entrypoint, one View
+entrypoint, one schema and optional declared JSON resources. Modules, JSX or a
+larger component system should be added only when a concrete App cannot be
+expressed cleanly with this boundary.
 
 ## Evidence
 

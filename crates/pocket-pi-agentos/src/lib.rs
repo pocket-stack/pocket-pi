@@ -314,7 +314,7 @@ pub fn stage_pocketapp_bytes(bytes: &[u8], staging_dir: &Path) -> Result<StagedA
             descriptor_id != ROOT_APP_ID,
             "the Pi Agent System App is built into Firmware"
         );
-        let app = load_ordinary_release(staging_dir, &descriptor_id)?;
+        let app = load_source_release(staging_dir, &descriptor_id)?;
         validate_package_credentials(&app.descriptor, &credentials)?;
         Ok(StagedApp {
             descriptor: app.descriptor,
@@ -331,10 +331,6 @@ pub fn stage_pocketapp_bytes(bytes: &[u8], staging_dir: &Path) -> Result<StagedA
 fn package_file_path(name: &str) -> Result<PathBuf> {
     const ROOT_FILES: &[&str] = &[
         "app.json",
-        "pocket.json",
-        "plan.json",
-        "app.js",
-        "app.pak",
         "actions.js",
         "schema.sql",
         "view.js",
@@ -424,15 +420,7 @@ pub const fn system_view_pak() -> &'static [u8] {
 struct InstalledApp {
     descriptor: AppDescriptor,
     release_dir: PathBuf,
-    release: ReleaseKind,
     resources: Arc<str>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ReleaseKind {
-    SystemBundle,
-    OrdinaryBundle,
-    Source,
 }
 
 #[derive(Clone, Debug)]
@@ -476,7 +464,7 @@ impl InstalledAppIndex {
                 if !release.is_dir() {
                     continue;
                 }
-                let installed = load_ordinary_release(&release, &app_id)?;
+                let installed = load_source_release(&release, &app_id)?;
                 anyhow::ensure!(
                     apps.insert(app_id.clone(), installed).is_none(),
                     "duplicate installed App id: {app_id}"
@@ -763,47 +751,29 @@ fn validate_package_credentials(
 }
 
 fn load_system_release(release_dir: &Path) -> Result<InstalledApp> {
-    load_bundle_release(release_dir, ROOT_APP_ID, true)
-}
-
-fn load_ordinary_release(release_dir: &Path, expected_id: &str) -> Result<InstalledApp> {
-    let descriptor: Value = serde_json::from_slice(
-        &std::fs::read(release_dir.join("app.json")).context("read installed app.json")?,
-    )
-    .context("parse installed app.json")?;
-    if descriptor.get("format").and_then(Value::as_u64) == Some(1) {
-        load_source_release(release_dir, expected_id)
-    } else {
-        load_bundle_release(release_dir, expected_id, false)
-    }
-}
-
-fn load_bundle_release(
-    release_dir: &Path,
-    expected_id: &str,
-    system: bool,
-) -> Result<InstalledApp> {
-    validate_bundle_root(release_dir, system)?;
-    for required in ["app.json", "pocket.json", "plan.json", "app.js", "app.pak"] {
+    validate_system_release_root(release_dir)?;
+    for required in [
+        "app.json",
+        "pocket.json",
+        "plan.json",
+        "app.js",
+        "app.pak",
+        "agent.js",
+    ] {
         anyhow::ensure!(
             release_dir.join(required).is_file(),
-            "App {expected_id} release is missing {required}"
+            "System App release is missing {required}"
         );
     }
-    anyhow::ensure!(
-        release_dir.join("agent.js").is_file() == system,
-        if system {
-            "System App is missing agent.js"
-        } else {
-            "ordinary App may not contain agent.js"
-        }
-    );
 
     let mut descriptor: AppDescriptor = serde_json::from_slice(
         &std::fs::read(release_dir.join("app.json")).context("read installed app.json")?,
     )
     .context("parse installed app.json")?;
-    anyhow::ensure!(descriptor.id == expected_id, "installed App id mismatch");
+    anyhow::ensure!(
+        descriptor.id == ROOT_APP_ID,
+        "installed System App id mismatch"
+    );
     let manifest: Value = serde_json::from_slice(
         &std::fs::read(release_dir.join("pocket.json")).context("read installed pocket.json")?,
     )
@@ -836,12 +806,6 @@ fn load_bundle_release(
         descriptor.id
     );
     validate_descriptor(&mut descriptor)?;
-    anyhow::ensure!(
-        (descriptor.tools.is_empty() && descriptor.schedules.is_empty())
-            || release_dir.join("actions.js").is_file(),
-        "App {} Actions require actions.js",
-        descriptor.id
-    );
     let plan: Value = serde_json::from_slice(
         &std::fs::read(release_dir.join("plan.json")).context("read installed plan.json")?,
     )
@@ -858,18 +822,19 @@ fn load_bundle_release(
     Ok(InstalledApp {
         descriptor,
         release_dir: release_dir.to_owned(),
-        release: if system {
-            ReleaseKind::SystemBundle
-        } else {
-            ReleaseKind::OrdinaryBundle
-        },
         resources: Arc::from("{}"),
     })
 }
 
-fn validate_bundle_root(release_dir: &Path, system: bool) -> Result<()> {
-    let mut allowed = BTreeSet::from(["app.json", "pocket.json", "plan.json", "app.js", "app.pak"]);
-    allowed.insert(if system { "agent.js" } else { "actions.js" });
+fn validate_system_release_root(release_dir: &Path) -> Result<()> {
+    let allowed = BTreeSet::from([
+        "app.json",
+        "pocket.json",
+        "plan.json",
+        "app.js",
+        "app.pak",
+        "agent.js",
+    ]);
     for entry in std::fs::read_dir(release_dir)? {
         let entry = entry?;
         let name = entry
@@ -919,7 +884,6 @@ fn load_source_release(release_dir: &Path, expected_id: &str) -> Result<Installe
     Ok(InstalledApp {
         descriptor,
         release_dir: release_dir.to_owned(),
-        release: ReleaseKind::Source,
         resources: resources.into(),
     })
 }
@@ -1641,11 +1605,12 @@ impl ViewRuntime {
         std::fs::create_dir_all(fs_root)?;
         let guest = new_app_guest().context("create App View Guest")?;
         let surface = UiSurface::new(VIEWPORT);
-        if app.release == ReleaseKind::Source {
-            let pak = std::fs::read(&assets.view_pak).context("read Pocket Pi View resources")?;
+        let system = app.descriptor.id == ROOT_APP_ID;
+        if system {
+            let pak = std::fs::read(app.release_dir.join("app.pak")).context("read App pak")?;
             surface.feed_pak(&pak);
         } else {
-            let pak = std::fs::read(app.release_dir.join("app.pak")).context("read App pak")?;
+            let pak = std::fs::read(&assets.view_pak).context("read Pocket Pi View resources")?;
             surface.feed_pak(&pak);
         }
         surface.mount(&guest)?;
@@ -1666,11 +1631,11 @@ impl ViewRuntime {
             &app.resources,
         )?;
 
-        let entry = if app.release == ReleaseKind::Source {
+        let entry = if system {
+            "app.js"
+        } else {
             guest.eval("pocket-pi-view-sdk", &assets.view_sdk)?;
             "view.js"
-        } else {
-            "app.js"
         };
         let source = std::fs::read_to_string(app.release_dir.join(entry))
             .with_context(|| format!("read {} {entry}", app.descriptor.id))?;
@@ -1684,7 +1649,7 @@ impl ViewRuntime {
             "{} installed no View",
             app.descriptor.id
         );
-        let frame = app.release != ReleaseKind::Source;
+        let frame = system;
         anyhow::ensure!(
             !frame || guest.has_frame(),
             "{} installed no frame()",
@@ -2013,7 +1978,7 @@ impl AppSupervisor {
             let (_, db_root, _) = data_paths(&workspace, &descriptor.id);
             std::fs::create_dir_all(&db_root)?;
             let database = Arc::new(Mutex::new(DbModule::new(DbStorage::Dir(db_root))));
-            if app.release == ReleaseKind::Source {
+            if descriptor.id != ROOT_APP_ID {
                 prepare_source_database(&app, &database)?;
             }
             databases.insert(descriptor.id.clone(), database);
@@ -2029,7 +1994,7 @@ impl AppSupervisor {
                     app_id: descriptor.id.clone(),
                     source_path,
                     framework: assets.framework.clone(),
-                    net_sdk: (app.release == ReleaseKind::Source
+                    net_sdk: (descriptor.id != ROOT_APP_ID
                         && descriptor
                             .capabilities
                             .iter()
@@ -2137,7 +2102,7 @@ impl AppSupervisor {
         credentials: BTreeMap<String, String>,
         app_root: &Path,
     ) -> Result<AppDescriptor> {
-        let mut app = load_ordinary_release(staging_release, &descriptor.id)?;
+        let mut app = load_source_release(staging_release, &descriptor.id)?;
         validate_package_credentials(&app.descriptor, &credentials)?;
         self.catalog.validate_insert(&app)?;
 
@@ -2145,9 +2110,7 @@ impl AppSupervisor {
         std::fs::create_dir_all(&db_root)?;
         std::fs::create_dir_all(&tmp_root)?;
         let database = Arc::new(Mutex::new(DbModule::new(DbStorage::Dir(db_root))));
-        if app.release == ReleaseKind::Source {
-            prepare_source_database(&app, &database)?;
-        }
+        prepare_source_database(&app, &database)?;
         let revision = Arc::new(AtomicU32::new(0));
         let net = app
             .descriptor
@@ -2160,8 +2123,7 @@ impl AppSupervisor {
                 app_id: descriptor.id.clone(),
                 source_path: staged_action,
                 framework: self.assets.framework.clone(),
-                net_sdk: (app.release == ReleaseKind::Source && net)
-                    .then(|| self.assets.net_sdk.clone()),
+                net_sdk: net.then(|| self.assets.net_sdk.clone()),
                 resources: app.resources.clone(),
                 database: database.clone(),
                 revision: revision.clone(),
@@ -2194,8 +2156,7 @@ impl AppSupervisor {
                 app_id: descriptor.id.clone(),
                 source_path: release_dir.join("actions.js"),
                 framework: self.assets.framework.clone(),
-                net_sdk: (app.release == ReleaseKind::Source && net)
-                    .then(|| self.assets.net_sdk.clone()),
+                net_sdk: net.then(|| self.assets.net_sdk.clone()),
                 resources: app.resources.clone(),
                 database: database.clone(),
                 revision: revision.clone(),
@@ -3078,13 +3039,13 @@ mod tests {
     #[test]
     fn package_credentials_must_exactly_match_the_descriptor() {
         let descriptor = AppDescriptor {
-            format: 0,
-            framework_api: 0,
+            format: 1,
+            framework_api: 1,
             id: "search".into(),
             title: "Search".into(),
             description: "Research".into(),
             version: "1".into(),
-            schema_version: 0,
+            schema_version: 1,
             capabilities: Vec::new(),
             tool_namespace: "search".into(),
             tools: Vec::new(),
@@ -4028,43 +3989,34 @@ PocketPi.defineActions({ run() { return "ok"; } });
     fn install_fixture(workspace: &Path, app_id: &str, descriptor: &str) {
         let release = workspace.join("apps").join(app_id).join("release");
         std::fs::create_dir_all(&release).unwrap();
-        std::fs::write(release.join("app.json"), descriptor).unwrap();
+        let mut descriptor: Value = serde_json::from_str(descriptor).unwrap();
+        let descriptor = descriptor.as_object_mut().unwrap();
+        descriptor.insert("format".into(), json!(1));
+        descriptor.insert("frameworkApi".into(), json!(1));
+        descriptor.insert("title".into(), json!("Fixture"));
+        descriptor.insert("schemaVersion".into(), json!(1));
+        descriptor.insert("capabilities".into(), json!([]));
+        descriptor.insert("resources".into(), json!({}));
         std::fs::write(
-            release.join("pocket.json"),
-            json!({
-                "pocket":2,
-                "name":app_id,
-                "title":"Fixture",
-                "version":"1",
-                "engine":{"capabilities":{"requires":[]}}
-            })
-            .to_string(),
+            release.join("app.json"),
+            serde_json::to_vec(descriptor).unwrap(),
         )
         .unwrap();
         std::fs::write(
-            release.join("plan.json"),
-            json!({
-                "runtime":"pocket-pi-agentos",
-                "pocketjsRevision":POCKETJS_REVISION,
-                "frameworkApi":SYSTEM_FRAMEWORK_API,
-                "app":app_id,
-                "modules":[]
-            })
-            .to_string(),
+            release.join("schema.sql"),
+            "CREATE TABLE state(value INTEGER);",
         )
         .unwrap();
-        std::fs::write(release.join("app.js"), "").unwrap();
-        std::fs::write(release.join("app.pak"), []).unwrap();
-        let descriptor: Value = serde_json::from_str(descriptor).unwrap();
-        if descriptor["tools"]
-            .as_array()
-            .is_some_and(|tools| !tools.is_empty())
-            || descriptor["schedules"]
-                .as_array()
-                .is_some_and(|schedules| !schedules.is_empty())
-        {
-            std::fs::write(release.join("actions.js"), "").unwrap();
-        }
+        std::fs::write(
+            release.join("actions.js"),
+            "PocketPi.defineActions({ query() {} });",
+        )
+        .unwrap();
+        std::fs::write(
+            release.join("view.js"),
+            "View.mount(() => View.Text('FIXTURE'));",
+        )
+        .unwrap();
     }
 
     fn install_checked_in_app(workspace: &Path, app_id: &str) {
@@ -4090,34 +4042,20 @@ PocketPi.defineActions({ run() { return "ok"; } });
             .join("apps")
             .join(app_id);
         std::fs::create_dir_all(release).unwrap();
-        if source.join("schema.sql").is_file() {
-            for name in ["app.json", "schema.sql", "actions.js", "view.js"] {
-                std::fs::copy(source.join(name), release.join(name)).unwrap();
-            }
-            return;
+        for name in ["app.json", "schema.sql", "actions.js", "view.js"] {
+            std::fs::copy(source.join(name), release.join(name)).unwrap();
         }
-        for (from, to) in [
-            ("app.json", "app.json"),
-            ("pocket.json", "pocket.json"),
-            ("dist/app.js", "app.js"),
-            ("dist/app.pak", "app.pak"),
-            ("dist/actions.js", "actions.js"),
-        ] {
-            std::fs::copy(source.join(from), release.join(to)).unwrap();
+        let descriptor: Value =
+            serde_json::from_slice(&std::fs::read(source.join("app.json")).unwrap()).unwrap();
+        for resource in descriptor["resources"]
+            .as_object()
+            .into_iter()
+            .flat_map(|resources| resources.values())
+        {
+            let path = resource["path"].as_str().unwrap();
+            let destination = release.join(path);
+            std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            std::fs::copy(source.join(path), destination).unwrap();
         }
-        let manifest: Value =
-            serde_json::from_slice(&std::fs::read(source.join("pocket.json")).unwrap()).unwrap();
-        std::fs::write(
-            release.join("plan.json"),
-            serde_json::to_vec(&json!({
-                "runtime":"pocket-pi-agentos",
-                "pocketjsRevision":POCKETJS_REVISION,
-                "frameworkApi":SYSTEM_FRAMEWORK_API,
-                "app":app_id,
-                "modules":manifest.pointer("/engine/capabilities/requires").unwrap()
-            }))
-            .unwrap(),
-        )
-        .unwrap();
     }
 }

@@ -28,6 +28,9 @@ def close_port(fd: int) -> None:
         attributes[2] &= ~termios.HUPCL
         attributes[2] |= termios.CLOCAL
         termios.tcsetattr(fd, termios.TCSANOW, attributes)
+        # This board's WCH USB bridge drives reset through DTR/RTS. Every UART
+        # CLI must leave both inactive; never use espflash monitor while an App
+        # upload is waiting for on-device confirmation.
         lines = struct.pack("I", termios.TIOCM_DTR | termios.TIOCM_RTS)
         fcntl.ioctl(fd, termios.TIOCMBIC, lines)
     finally:

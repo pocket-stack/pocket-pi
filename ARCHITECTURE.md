@@ -13,8 +13,8 @@ development tool:
 | Reference hardware | `firmware/esp32-p4` | ESP32-P4 is the first fully supported Pocket Pi target |
 | Development simulator | `hosts/esp32-p4-sim` | Runs the ESP32-P4 product contracts on macOS; not a desktop product or hardware target |
 
-Both compositions use the same resident `pi-agent-core` System App and PocketJS
-App bundles. The simulator substitutes development adapters; only the physical
+Both compositions use the same resident `pi-agent-core` System App and ordinary
+App source. The simulator substitutes development adapters; only the physical
 composition proves hardware behavior.
 
 The authoritative detailed design is
@@ -42,8 +42,8 @@ The authoritative detailed design is
 - Hosts own hardware, transport, credentials, and rendering adapters.
 
 There is no legacy Rust product UI or general-purpose desktop runtime. The
-simulator and ESP32-P4 render the same
-PocketJS App bundles at a 720x1280 logical viewport. Rust firmware supplies the
+simulator and ESP32-P4 render the same PocketJS Views at a 720x1280 logical
+viewport. Rust firmware supplies the
 display/touch driver and renders the selected App's DrawList.
 
 ## Runtime lifecycle
@@ -70,7 +70,7 @@ top-level `/workspace` and cross-App Tool Registry.
 ## Repository map
 
 ```text
-apps/                       PocketJS System/ordinary App sources and bundles
+apps/                       Pi Agent System source and ordinary App source
 crates/pocket-pi-agentos/   App Supervisor and AgentOS contracts
 crates/pocket-pi-embedded/  embedded pi-agent-core bridge and host traits
 crates/pocket-pi-tools/     native workspace/shell/time/schedule Tools
@@ -89,7 +89,7 @@ tools/uart-model-bridge.py  optional development-only model bridge
 ```sh
 cargo xtask build pi-agent
 cargo xtask package app exa path/to/exa-credentials.json
-cargo xtask build app robinhood path/to/robinhood-credentials.json # transitional
+cargo xtask package app robinhood path/to/robinhood-credentials.json
 cargo xtask build esp32-p4
 cargo xtask build esp32-p4-sim
 cargo xtask run esp32-p4-sim

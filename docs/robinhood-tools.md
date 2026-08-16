@@ -17,7 +17,7 @@ the Responses API's native `tool_search` wire protocol. Native Tool Search is
 currently limited to supported OpenAI models, while Pocket Pi also supports
 other model backends. If a backend gains native deferred loading, it can expose
 the same snapshot as dynamically loaded normal function definitions without
-changing the Robinhood Action Bundle.
+changing the Robinhood Action source.
 
 References:
 
@@ -28,7 +28,8 @@ References:
 
 ## Catalog and schema source
 
-`tool-catalog.json` is the Robinhood App-owned runtime catalog captured from an
+`apps/robinhood/assets/tool-catalog.json` is the Robinhood App-owned runtime
+catalog captured from an
 authenticated MCP `initialize` and `tools/list` exchange with
 `https://agent.robinhood.com/mcp/trading`. It stores the upstream name,
 input schema, and one combined description containing upstream usage guidance
@@ -36,17 +37,17 @@ plus Pocket Pi safety and persistence behavior. Credentials are never written to
 release, SQLite, or Agent context. They may be transported inside the temporary
 `.pocketapp`; Installer strips them and stores them in native NVS before the App
 is activated. Updating this catalog is an explicit App
-maintenance change and must be reviewed together with the native allowlist and
-contract tests.
+maintenance change and must be reviewed together with the native allowlist.
 
 This file and the catalog have different roles:
 
-- `tool-catalog.json` is executable source data. The Action build inlines it
-  into `dist/actions.js`, where `searchTools()` and
-  `validatedProviderCall()` use it at runtime. Rust contract tests also read the
-  source snapshot directly to keep all 54 names aligned with
-  `app.json.providerOperations`.
-- `TOOLS.md` is human-facing maintenance documentation. It is not imported by
+- `assets/tool-catalog.json` is executable source data declared by `app.json`.
+  The runtime exposes its frozen JSON value through
+  `PocketPi.resources.get("toolCatalog")`; `searchTools()` and
+  `validatedProviderCall()` use it directly. Native enforcement separately uses
+  `app.json.providerOperations`, so catalog and allowlist changes are reviewed
+  together.
+- `docs/robinhood-tools.md` is human-facing maintenance documentation. It is not imported by
   the build or read by the device runtime.
 
 This catalog is not a global AgentOS requirement. Robinhood uses deferred

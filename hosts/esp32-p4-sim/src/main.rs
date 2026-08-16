@@ -1182,35 +1182,20 @@ mod tests {
                 .join(app_id);
             let staging = workspace.join(format!(".staged-{app_id}"));
             std::fs::create_dir_all(&staging).unwrap();
-            if source.join("schema.sql").is_file() {
-                for name in ["app.json", "schema.sql", "actions.js", "view.js"] {
-                    std::fs::copy(source.join(name), staging.join(name)).unwrap();
-                }
-            } else {
-                for (from, to) in [
-                    ("app.json", "app.json"),
-                    ("pocket.json", "pocket.json"),
-                    ("dist/app.js", "app.js"),
-                    ("dist/app.pak", "app.pak"),
-                    ("dist/actions.js", "actions.js"),
-                ] {
-                    std::fs::copy(source.join(from), staging.join(to)).unwrap();
-                }
-                let manifest: Value =
-                    serde_json::from_slice(&std::fs::read(source.join("pocket.json")).unwrap())
-                        .unwrap();
-                std::fs::write(
-                    staging.join("plan.json"),
-                    serde_json::to_vec(&json!({
-                        "runtime":"pocket-pi-agentos",
-                        "pocketjsRevision":pocket_pi_agentos::POCKETJS_REVISION,
-                        "frameworkApi":pocket_pi_agentos::SYSTEM_FRAMEWORK_API,
-                        "app":app_id,
-                        "modules":manifest.pointer("/engine/capabilities/requires").unwrap()
-                    }))
-                    .unwrap(),
-                )
-                .unwrap();
+            for name in ["app.json", "schema.sql", "actions.js", "view.js"] {
+                std::fs::copy(source.join(name), staging.join(name)).unwrap();
+            }
+            let descriptor: Value =
+                serde_json::from_slice(&std::fs::read(source.join("app.json")).unwrap()).unwrap();
+            for resource in descriptor["resources"]
+                .as_object()
+                .into_iter()
+                .flat_map(|resources| resources.values())
+            {
+                let path = resource["path"].as_str().unwrap();
+                let destination = staging.join(path);
+                std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+                std::fs::copy(source.join(path), destination).unwrap();
             }
             let credentials = match app_id {
                 "robinhood" => BTreeMap::from([(

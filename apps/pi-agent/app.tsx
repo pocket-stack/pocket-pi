@@ -2,8 +2,8 @@ import { batch, createSignal, For, Show } from "solid-js";
 import { Text, View } from "@pocketjs/framework/components";
 import { mount } from "@pocketjs/framework";
 import { readFileSync, readdirSync, type DirEntry } from "@pocketjs/framework/fs";
-import { ActionButton, PageIntro, PocketHeader, ScrollButtons, SectionHeading, StatusBar } from "../_shared/ui";
-import { wrapLines, wrapPreview, wrapTextPage, type WrappedTextPage } from "../_shared/text";
+import { wrapLines, wrapPreview, wrapTextPage, type WrappedTextPage } from "./text";
+import { ActionButton, PageIntro, PocketHeader, ScrollButtons, SectionHeading, StatusBar } from "./ui";
 
 const FONT_BODY = 3;
 const FONT_CHAT = 4;

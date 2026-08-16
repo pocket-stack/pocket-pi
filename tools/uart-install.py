@@ -56,6 +56,11 @@ def main() -> int:
                         print("Package transferred; device is validating it", flush=True)
                 elif line.startswith(UPLOADED):
                     print("Upload complete; confirm installation on Pocket Pi", flush=True)
+                    print(
+                        "Do not run espflash monitor before confirming; "
+                        "it can reset the board and discard this review",
+                        flush=True,
+                    )
                     return 0
                 elif line.startswith(ERROR):
                     print(f"Install failed: {line[len(ERROR):]}", flush=True)
