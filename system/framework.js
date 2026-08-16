@@ -5,6 +5,7 @@
   let actionResult;
   let actionRunning = false;
   let view = null;
+  let systemHooks = null;
   let database = -1;
   let resources = Object.freeze({});
   const bindings = [];
@@ -52,6 +53,15 @@
     if (view) fail("View already defined");
     if (!definition || typeof definition !== "object") fail("View must be an object");
     view = definition;
+  }
+
+  function defineSystem(definition) {
+    if (appId !== "pi-agent") fail("System hooks belong to the resident System App");
+    if (systemHooks) fail("System hooks already defined");
+    if (!definition || typeof definition.update !== "function" || typeof definition.telemetryVisible !== "function") {
+      fail("System hooks require update and telemetryVisible");
+    }
+    systemHooks = definition;
   }
 
   function event(value) {
@@ -132,6 +142,7 @@
     frameworkApi: 1,
     defineActions,
     defineView,
+    defineSystem,
     action: (action, args = {}) => ({ type: "action", action, args }),
     command: (command, args = {}) => ({ type: "command", command, args }),
     navigate: (app) => ({ type: "command", command: "apps.open", args: { app } }),
@@ -168,7 +179,7 @@
       return view !== null;
     },
     telemetryVisible() {
-      return view?.telemetryVisible?.() === true;
+      return systemHooks?.telemetryVisible() === true;
     },
     registerActionPump,
     beginAction(line) {
@@ -202,7 +213,7 @@
       return event(view?.dataChanged?.());
     },
     updateView(line) {
-      return event(view?.update?.(JSON.parse(line)));
+      return event(systemHooks?.update(JSON.parse(line)));
     },
     tap(x, y) {
       return event(view?.tap?.(x, y));

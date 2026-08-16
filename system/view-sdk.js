@@ -37,15 +37,35 @@
     danger: abgr("#ef4444"), dangerSoft: abgr("#fee2e2"), dangerOnDark: abgr("#fca5a5"),
   });
   const fontSlots = Object.freeze({
-    regular: Object.freeze({ body: 2, lg: 3 }),
+    regular: Object.freeze({ body: 2, lg: 3, xl: 4 }),
     bold: Object.freeze({ body: 9, lg: 10, xl: 11, title: 12 }),
   });
 
   let rootNode = null;
   let renderView = null;
   let dirty = false;
-  let pressHandlers = new Map();
+  let pressables = new Map();
   let parents = new Map();
+  let pressed = null;
+  let activeEffect = null;
+
+  function clearEffect(effect) {
+    for (const subscribers of effect.sources) subscribers.delete(effect);
+    effect.sources.clear();
+  }
+
+  function track(effect, read) {
+    clearEffect(effect);
+    const previous = activeEffect;
+    activeEffect = effect;
+    try {
+      return read();
+    } finally {
+      activeEffect = previous;
+    }
+  }
+
+  const rootEffect = { sources: new Set(), run() { dirty = true; } };
 
   function fail(message) {
     throw new Error(`Pocket Pi View SDK: ${message}`);
@@ -78,9 +98,10 @@
 
   function Text(props = {}) {
     if (typeof props === "string" || typeof props === "number") props = { text: String(props) };
+    const content = props.text ?? props.children ?? "";
     return element(NODE_TEXT, {
       ...props,
-      text: String(props.text ?? props.children ?? ""),
+      text: typeof content === "function" ? content : String(content),
       style: { color: "text", fontSize: "body", ...props.style },
     });
   }
@@ -92,12 +113,19 @@
 
   function state(initial) {
     let value = initial;
-    const get = () => value;
+    const subscribers = new Set();
+    const get = () => {
+      if (activeEffect) {
+        subscribers.add(activeEffect);
+        activeEffect.sources.add(subscribers);
+      }
+      return value;
+    };
     const set = (next) => {
       const resolved = typeof next === "function" ? next(value) : next;
       if (!Object.is(value, resolved)) {
         value = resolved;
-        dirty = true;
+        for (const effect of [...subscribers]) effect.run();
       }
       return value;
     };
@@ -176,6 +204,12 @@
     return style;
   }
 
+  function measureText(text, style = {}) {
+    if (typeof ui.measureText !== "function") fail("text measurement is unavailable");
+    const slot = nativeStyle(style)[PROP.fontSlot] ?? fontSlots.regular.body;
+    return ui.measureText(String(text), slot);
+  }
+
   function prepare(recipe) {
     if (!recipe || (recipe.type !== NODE_VIEW && recipe.type !== NODE_TEXT)) fail("render must return a View recipe");
     recipe.nativeStyle = nativeStyle(recipe.props.style);
@@ -187,22 +221,57 @@
     for (const prop in style) ui.setProp(node, Number(prop), style[prop]);
   }
 
-  function materialize(recipe, nextHandlers, nextParents, created) {
+  function bindText(node, source) {
+    if (node.textEffect) clearEffect(node.textEffect);
+    node.textSource = source;
+    const apply = (value) => {
+      const text = String(value ?? "");
+      if (node.text === text) return;
+      (node.text === null ? ui.setText : ui.replaceText ?? ui.setText)(node.id, text);
+      node.text = text;
+    };
+    if (typeof source !== "function") {
+      node.textEffect = null;
+      apply(source);
+      return;
+    }
+    const effect = { sources: new Set(), run() { apply(track(effect, source)); } };
+    node.textEffect = effect;
+    effect.run();
+  }
+
+  function dispose(node) {
+    if (node.textEffect) clearEffect(node.textEffect);
+    for (const child of node.children) dispose(child);
+  }
+
+  function destroy(node) {
+    dispose(node);
+    ui.destroyNode(node.id);
+  }
+
+  function materialize(recipe, nextPressables, nextParents, created) {
     const id = ui.createNode(recipe.type);
     if (id <= 0) fail("ui node allocation failed");
-    created.push(id);
     applyStyle(id, recipe.nativeStyle);
     const node = {
       id,
       type: recipe.type,
       style: recipe.nativeStyle,
-      text: recipe.type === NODE_TEXT ? recipe.props.text : "",
+      text: null,
+      textSource: null,
+      textEffect: null,
       children: [],
     };
-    if (recipe.type === NODE_TEXT) ui.setText(id, node.text);
-    if (recipe.props.onPress) nextHandlers.set(id, recipe.props.onPress);
+    created.push(node);
+    if (recipe.type === NODE_TEXT) bindText(node, recipe.props.text);
+    if (recipe.props.onPress) nextPressables.set(id, {
+      onPress: recipe.props.onPress,
+      background: recipe.nativeStyle[PROP.background],
+      opacity: recipe.nativeStyle[PROP.opacity] ?? 1,
+    });
     for (const child of recipe.children) {
-      const childNode = materialize(child, nextHandlers, nextParents, created);
+      const childNode = materialize(child, nextPressables, nextParents, created);
       node.children.push(childNode);
       nextParents.set(childNode.id, id);
       ui.insertBefore(id, childNode.id, 0);
@@ -217,11 +286,11 @@
     return false;
   }
 
-  function reconcile(parent, current, recipe, nextHandlers, nextParents, created) {
+  function reconcile(parent, current, recipe, nextPressables, nextParents, created) {
     if (current.type !== recipe.type || styleWasRemoved(current.style, recipe.nativeStyle)) {
-      const replacement = materialize(recipe, nextHandlers, nextParents, created);
+      const replacement = materialize(recipe, nextPressables, nextParents, created);
       ui.insertBefore(parent, replacement.id, current.id);
-      ui.destroyNode(current.id);
+      destroy(current);
       return replacement;
     }
 
@@ -229,10 +298,12 @@
       const value = recipe.nativeStyle[prop];
       if (!Object.is(current.style[prop], value)) ui.setProp(current.id, Number(prop), value);
     }
-    if (recipe.type === NODE_TEXT && current.text !== recipe.props.text) {
-      (ui.replaceText ?? ui.setText)(current.id, recipe.props.text);
-    }
-    if (recipe.props.onPress) nextHandlers.set(current.id, recipe.props.onPress);
+    if (recipe.type === NODE_TEXT && current.textSource !== recipe.props.text) bindText(current, recipe.props.text);
+    if (recipe.props.onPress) nextPressables.set(current.id, {
+      onPress: recipe.props.onPress,
+      background: recipe.nativeStyle[PROP.background],
+      opacity: recipe.nativeStyle[PROP.opacity] ?? 1,
+    });
 
     const nextChildren = [];
     const count = Math.max(current.children.length, recipe.children.length);
@@ -240,55 +311,99 @@
       const child = current.children[index];
       const childRecipe = recipe.children[index];
       if (child && childRecipe) {
-        const nextChild = reconcile(current.id, child, childRecipe, nextHandlers, nextParents, created);
+        const nextChild = reconcile(current.id, child, childRecipe, nextPressables, nextParents, created);
         nextChildren.push(nextChild);
         nextParents.set(nextChild.id, current.id);
       } else if (childRecipe) {
-        const nextChild = materialize(childRecipe, nextHandlers, nextParents, created);
+        const nextChild = materialize(childRecipe, nextPressables, nextParents, created);
         nextChildren.push(nextChild);
         nextParents.set(nextChild.id, current.id);
         ui.insertBefore(current.id, nextChild.id, 0);
       } else if (child) {
-        ui.destroyNode(child.id);
+        destroy(child);
       }
     }
     current.style = recipe.nativeStyle;
-    current.text = recipe.type === NODE_TEXT ? recipe.props.text : "";
     current.children = nextChildren;
     return current;
   }
 
   function renderIfDirty() {
     if (!dirty || !renderView) return;
-    const nextHandlers = new Map();
+    const nextPressables = new Map();
     const nextParents = new Map();
     const created = [];
     try {
-      const recipe = prepare(renderView());
-      if (rootNode) rootNode = reconcile(ROOT, rootNode, recipe, nextHandlers, nextParents, created);
+      const recipe = prepare(track(rootEffect, renderView));
+      if (rootNode) rootNode = reconcile(ROOT, rootNode, recipe, nextPressables, nextParents, created);
       else {
-        rootNode = materialize(recipe, nextHandlers, nextParents, created);
+        rootNode = materialize(recipe, nextPressables, nextParents, created);
         ui.insertBefore(ROOT, rootNode.id, 0);
       }
-      pressHandlers = nextHandlers;
+      pressables = nextPressables;
       parents = nextParents;
+      if (pressed) {
+        const current = pressables.get(pressed.id);
+        if (current) {
+          const next = pressedState(pressed.id, current);
+          if (pressed.prop !== next.prop) ui.setProp(pressed.id, pressed.prop, pressed.base);
+          ui.setProp(next.id, next.prop, next.value);
+          pressed = next;
+        } else {
+          pressed = null;
+        }
+      }
       dirty = false;
     } catch (error) {
-      for (let index = created.length - 1; index >= 0; index -= 1) ui.destroyNode(created[index]);
+      for (let index = created.length - 1; index >= 0; index -= 1) {
+        if (created[index].textEffect) clearEffect(created[index].textEffect);
+        ui.destroyNode(created[index].id);
+      }
       throw error;
     }
   }
 
-  function pressAt(x, y) {
+  function pressableAt(x, y) {
     const hitTest = ui.hitTestBounds ?? ui.hitTest;
     if (typeof hitTest !== "function") fail("ui hit testing is unavailable");
     let node = hitTest(x, y);
     while (node) {
-      const handler = pressHandlers.get(node);
-      if (handler) return handler() ?? "";
+      if (pressables.has(node)) return node;
       node = parents.get(node) ?? 0;
     }
+    return 0;
+  }
+
+  function darken(value) {
+    const channel = (shift) => Math.round(((value >>> shift) & 0xff) * 0.82) << shift;
+    return ((value & 0xff000000) | channel(0) | channel(8) | channel(16)) >>> 0;
+  }
+
+  function pressedState(id, pressable) {
+    return pressable.background === undefined
+      ? { id, prop: PROP.opacity, base: pressable.opacity, value: pressable.opacity * 0.65 }
+      : { id, prop: PROP.background, base: pressable.background, value: darken(pressable.background) };
+  }
+
+  function pointerDown(x, y) {
+    pointerUp();
+    const id = pressableAt(x, y);
+    if (!id) return "";
+    pressed = pressedState(id, pressables.get(id));
+    ui.setProp(pressed.id, pressed.prop, pressed.value);
     return "";
+  }
+
+  function pointerUp() {
+    if (!pressed) return "";
+    ui.setProp(pressed.id, pressed.prop, pressed.base);
+    pressed = null;
+    return "";
+  }
+
+  function pressAt(x, y) {
+    const id = pressableAt(x, y);
+    return id ? pressables.get(id).onPress() ?? "" : "";
   }
 
   function mount(render) {
@@ -299,8 +414,11 @@
     PocketPi.defineView({
       tick() { renderIfDirty(); return ""; },
       dataChanged() { renderIfDirty(); return ""; },
+      pointerDown,
+      pointerUp,
       tap(x, y) { return pressAt(x, y); },
     });
+    renderIfDirty();
   }
 
   const tone = (name) => ({
@@ -387,10 +505,44 @@
       Text({ text: props.direction === "up" ? "UP" : "DN", style: { color: "accent", fontWeight: "bold" } }) });
   }
 
+  const keyboardLayers = Object.freeze({
+    lower: Object.freeze(["qwertyuiop", "asdfghjkl", "zxcvbnm"]),
+    upper: Object.freeze(["QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"]),
+    symbols: Object.freeze(["1234567890", "-/:;()$&@", ".,?!'\"+"]),
+  });
+
+  function Keyboard(props = {}) {
+    if (!Object.hasOwn(keyboardLayers, props.layer)) fail(`unknown keyboard layer ${String(props.layer)}`);
+    if (typeof props.onKey !== "function") fail("Keyboard requires onKey");
+    const key = (label, value, style) => Pressable({
+      onPress: () => props.onKey(value),
+      style: { height: 120, align: "center", justify: "center", background: "surface", ...style },
+      children: Text({ text: label, style: { color: "heading", fontSize: "xl", fontWeight: "bold" } }),
+    });
+    const rows = keyboardLayers[props.layer].map((row, index) => Row({
+      style: { height: 140, gap: 8 },
+      children: [
+        ...[...row].map((character) => key(character, character, { grow: 1 })),
+        index === 2 ? key("DEL", "Backspace", { width: 104, background: "border" }) : null,
+      ],
+    }));
+    const mode = key(props.layer === "symbols" ? "ABC" : "123", "Mode", { width: 92, height: 156, background: "border" });
+    const space = key("SPACE", " ", { width: 300, height: 156, background: "border" });
+    const enter = key("ENTER", "Enter", { width: 112, height: 156, background: "success" });
+    const trailing = props.layer === "symbols"
+      ? [key(".", ".", { width: 68, height: 156, background: "border" }), key("?", "?", { width: 68, height: 156, background: "border" })]
+      : [key("SHIFT", "Shift", { width: 144, height: 156, background: "border" })];
+    return Column({ style: { width: "full", height: 596 }, children: [
+      ...rows,
+      Row({ style: { height: 176, gap: 8 }, children: [mode, space, ...trailing, enter] }),
+    ] });
+  }
+
   globalThis.View = Object.freeze({
     api: 1,
     colors,
     state,
+    measureText,
     mount,
     Box,
     Row,
@@ -408,5 +560,6 @@
     MetricCard,
     StatusBar,
     ScrollButton,
+    Keyboard,
   });
 })();

@@ -46,4 +46,4 @@ jobs:
         run: cargo test --workspace
 
       - name: App text behavior tests
-        run: bun test apps/pi-agent/text.test.ts
+        run: bun test apps/pi-agent/text.test.js

@@ -3,9 +3,10 @@
 状态：v0.3。Pi Design 是 Pocket Pi Apps 的全局视觉语言；各 App 不再各自维护一套
 Header、按钮、空状态或字号层级。
 
-Pi Agent 的 build-time TSX recipes 位于 `apps/pi-agent/ui.tsx`；普通 Source App
-使用 `system/view-sdk.js` 中的 `View.*` components。`apps/pi-agent/text.ts` 只服务
-Pi Agent 的动态文本。两层都不拥有网络、SQLite、navigation 或业务状态。
+Pi Agent 与普通 Source App 都使用 `system/view-sdk.js` 中的同一套 `View.*`
+components。Pi Agent 页面位于 `apps/pi-agent/view.js`，其动态文本分页 helper
+位于 `apps/pi-agent/text.js`。共享 View SDK 不拥有网络、SQLite、navigation 或
+业务状态。
 
 ## Foundations
 
@@ -25,22 +26,23 @@ body 16→18px；不会引入 runtime font loader 或第二套字体。
 
 | Component | 包含什么 | 不包含什么 | 当前使用者 |
 | --- | --- | --- | --- |
-| `PocketHeader` / `View.Header` | 112px shell header、back/status affordance、App title、两行 metadata | App data loading | Pi Agent / ordinary Apps |
-| `PageIntro` / `View.PageIntro` | eyebrow、page title、一行说明 | 页面 query、filter、scroll | Pi Agent / ordinary Apps |
-| `SectionHeading` / `View.SectionHeading` | section title、optional detail、optional `VIEW ALL` affordance | list data | Pi Agent / ordinary Apps |
-| `ActionButton` / `View.ActionButton` | primary/neutral/danger/disabled visual state | action execution、loading state machine | Pi Agent / ordinary Apps |
+| `View.Header` | 112px shell header、back/status affordance、App title、两行 metadata | App data loading | Pi Agent / ordinary Apps |
+| `View.PageIntro` | eyebrow、page title、一行说明 | 页面 query、filter、scroll | Pi Agent / ordinary Apps |
+| `View.SectionHeading` | section title、optional detail、optional `VIEW ALL` affordance | list data | Pi Agent / ordinary Apps |
+| `View.ActionButton` | primary/neutral/danger/disabled visual state | action execution、loading state machine | Pi Agent / ordinary Apps |
 | `View.Badge` | 短 label 的 status surface + text | 长状态文案、业务判断 | ordinary Apps |
 | `View.EmptyState` | optional icon、title、detail、regular/compact layout | empty 条件、retry action | ordinary Apps |
 | `View.MetricCard` | metric label、formatted value、optional tone | 数值计算、currency formatting | ordinary Apps |
-| `StatusBar` / `View.StatusBar` | 单行 runtime status、neutral/error tone | log history、progress model、retry | Pi Agent / ordinary Apps |
-| `ScrollButtons` / `View.ScrollButton` | UP/DN controls 的统一文字和视觉 | offset、pagination | Pi Agent / ordinary Apps |
+| `View.StatusBar` | 单行 runtime status、neutral/error tone | log history、progress model、retry | Pi Agent / ordinary Apps |
+| `View.ScrollButton` | UP/DN controls 的统一文字和视觉 | offset、pagination | Pi Agent / ordinary Apps |
+| `View.Keyboard` | letters/symbols layers、通用 key events、按压反馈 | 输入内容、发送、Wi-Fi 等业务语义 | Pi Agent / ordinary Apps |
 | `wrapLines` / `wrapPreview` / `wrapTextPage` | `measureText` 缓存、显式换行、preview ellipsis、按字符游标只物化可见文件页 | rich text、Markdown、scroll state | Pi Agent dynamic text / Files viewer |
 
 ## App-owned components
 
 这些组件仍含明确业务语义，不进入 Pi Design：
 
-- Pi Agent conversation turn、Bottom Navigation、keyboard、Files row、App row；
+- Pi Agent conversation turn、Bottom Navigation、Files row、App row；
 - Robinhood 20-point chart、time-range selector、account picker、activity row、
   position row、P&L projection；
 - Exa search-history query、result projection 和 retention state。
@@ -53,6 +55,7 @@ contract 上，才进入 Pi Design。
 
 1. 每次新增、删除或改变 component/token，都同步更新本 inventory 和 consumers。
 2. 共享 component 是纯展示函数：props in，native View/Text tree out。
-3. App 自己决定数据、loading/error 条件、tap hitbox、navigation 和 side effects。
-4. Pi Agent 继续编译为 firmware-embedded System Bundle；普通 App 直接发布
-   `view.js`，并在 runtime 中使用固定的 View SDK API。
+3. App 自己决定数据、loading/error 条件、navigation 和 side effects；共享 SDK
+   负责 node hit testing 和按压反馈。
+4. Pi Agent 与普通 App 都直接执行 `view.js` 并使用固定 View SDK API。Pi Agent
+   仍随 firmware 内置；它的 Agent loop `agent.js` 继续在构建时生成。

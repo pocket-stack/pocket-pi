@@ -69,7 +69,7 @@ cargo xtask build esp32-p4-sim
 cargo xtask build esp32-p4
 ```
 
-Firmware embeds the Pi Agent Bundle so a blank device can boot. Ordinary Apps
+Firmware embeds the Pi Agent source View and Agent loop so a blank device can boot. Ordinary Apps
 use the installable container:
 
 ```sh
@@ -306,7 +306,7 @@ for fresh physical-board acceptance.
 
 ```sh
 cargo test --workspace
-bun test apps/pi-agent/text.test.ts
+bun test apps/pi-agent/text.test.js
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 

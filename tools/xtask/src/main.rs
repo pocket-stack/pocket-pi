@@ -73,8 +73,7 @@ fn main() -> Result<()> {
 fn build_system_assets(root: &Path) -> Result<()> {
     build_embedded_guest(root)?;
     let pocketjs = pocketjs_checkout(root)?;
-    build_view_sdk(root, &pocketjs)?;
-    build_system_app(root, &pocketjs)
+    build_view_sdk(root, &pocketjs)
 }
 
 fn pocketjs_checkout(root: &Path) -> Result<PathBuf> {
@@ -120,20 +119,6 @@ fn build_view_sdk(root: &Path, pocketjs: &Path) -> Result<()> {
         )
     })?;
     Ok(())
-}
-
-fn build_system_app(root: &Path, pocketjs: &Path) -> Result<()> {
-    let app_root = app_root(root, "pi-agent")?;
-    command(
-        Command::new("bun")
-            .current_dir(pocketjs)
-            .arg("tools/build.ts")
-            .arg(app_root.join("app.tsx"))
-            .arg(format!("--outdir={}", app_root.join("dist").display()))
-            .arg("--framework=solid"),
-        "building Pi Agent System App",
-    )?;
-    minify_system_bundle(&app_root)
 }
 
 fn package_source_app(root: &Path, app: &str, credentials: Option<&Path>) -> Result<()> {
@@ -242,22 +227,6 @@ fn app_root(root: &Path, app: &str) -> Result<PathBuf> {
         path.display()
     );
     Ok(path)
-}
-
-fn minify_system_bundle(app_root: &Path) -> Result<()> {
-    let bundle = app_root.join("dist/app.js");
-    let minified = app_root.join("dist/app.min.js");
-    command(
-        Command::new("bun")
-            .arg("build")
-            .arg(&bundle)
-            .arg(format!("--outfile={}", minified.display()))
-            .arg("--minify"),
-        &format!("minifying {} for the device image", bundle.display()),
-    )?;
-    std::fs::rename(&minified, &bundle)
-        .with_context(|| format!("replace {} with minified bundle", bundle.display()))?;
-    Ok(())
 }
 
 fn build_embedded_guest(root: &Path) -> Result<()> {

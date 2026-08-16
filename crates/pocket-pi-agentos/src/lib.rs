@@ -366,26 +366,23 @@ fn tar_octal(field: &[u8]) -> Result<u64> {
 #[derive(Clone, Copy)]
 pub struct SystemAppBundle {
     pub descriptor_json: &'static str,
-    pub pocket_json: &'static str,
-    pub js: &'static str,
+    pub view_js: &'static str,
+    pub text_js: &'static str,
     pub agent_js: &'static str,
-    pub pak: &'static [u8],
 }
 
 impl SystemAppBundle {
     pub const fn new(
         descriptor_json: &'static str,
-        pocket_json: &'static str,
-        js: &'static str,
+        view_js: &'static str,
+        text_js: &'static str,
         agent_js: &'static str,
-        pak: &'static [u8],
     ) -> Self {
         Self {
             descriptor_json,
-            pocket_json,
-            js,
+            view_js,
+            text_js,
             agent_js,
-            pak,
         }
     }
 }
@@ -393,10 +390,9 @@ impl SystemAppBundle {
 pub const fn system_app_bundle() -> SystemAppBundle {
     SystemAppBundle::new(
         include_str!("../../../apps/pi-agent/app.json"),
-        include_str!("../../../apps/pi-agent/pocket.json"),
-        include_str!("../../../apps/pi-agent/dist/app.js"),
+        include_str!("../../../apps/pi-agent/view.js"),
+        include_str!("../../../apps/pi-agent/text.js"),
         include_str!("../../../apps/pi-agent/dist/agent.js"),
-        include_bytes!("../../../apps/pi-agent/dist/app.pak"),
     )
 }
 
@@ -752,14 +748,7 @@ fn validate_package_credentials(
 
 fn load_system_release(release_dir: &Path) -> Result<InstalledApp> {
     validate_system_release_root(release_dir)?;
-    for required in [
-        "app.json",
-        "pocket.json",
-        "plan.json",
-        "app.js",
-        "app.pak",
-        "agent.js",
-    ] {
+    for required in ["app.json", "plan.json", "view.js", "text.js", "agent.js"] {
         anyhow::ensure!(
             release_dir.join(required).is_file(),
             "System App release is missing {required}"
@@ -774,36 +763,11 @@ fn load_system_release(release_dir: &Path) -> Result<InstalledApp> {
         descriptor.id == ROOT_APP_ID,
         "installed System App id mismatch"
     );
-    let manifest: Value = serde_json::from_slice(
-        &std::fs::read(release_dir.join("pocket.json")).context("read installed pocket.json")?,
-    )
-    .context("parse installed pocket.json")?;
+    anyhow::ensure!(descriptor.format == 1, "System App requires format 1");
     anyhow::ensure!(
-        manifest.get("pocket").and_then(Value::as_u64) == Some(2),
-        "App requires pocket.json v2"
-    );
-    anyhow::ensure!(
-        manifest.get("name").and_then(Value::as_str) == Some(descriptor.id.as_str()),
-        "pocket.json name does not match App id"
-    );
-    descriptor.title = manifest
-        .get("title")
-        .and_then(Value::as_str)
-        .filter(|title| !title.is_empty())
-        .ok_or_else(|| anyhow!("App {} pocket.json is missing title", descriptor.id))?
-        .to_owned();
-    descriptor.capabilities = manifest
-        .pointer("/engine/capabilities/requires")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|value| value.as_str().map(str::to_owned))
-        .collect();
-    anyhow::ensure!(
-        manifest.get("version").and_then(Value::as_str) == Some(descriptor.version.as_str()),
-        "App {} version differs between app.json and pocket.json",
-        descriptor.id
+        descriptor.framework_api == SYSTEM_FRAMEWORK_API,
+        "System App requires unsupported Framework API {}",
+        descriptor.framework_api
     );
     validate_descriptor(&mut descriptor)?;
     let plan: Value = serde_json::from_slice(
@@ -827,14 +791,7 @@ fn load_system_release(release_dir: &Path) -> Result<InstalledApp> {
 }
 
 fn validate_system_release_root(release_dir: &Path) -> Result<()> {
-    let allowed = BTreeSet::from([
-        "app.json",
-        "pocket.json",
-        "plan.json",
-        "app.js",
-        "app.pak",
-        "agent.js",
-    ]);
+    let allowed = BTreeSet::from(["app.json", "plan.json", "view.js", "text.js", "agent.js"]);
     for entry in std::fs::read_dir(release_dir)? {
         let entry = entry?;
         let name = entry
@@ -1310,11 +1267,6 @@ impl ActionRuntime {
             _database: config.database.clone(),
             _revision: config.revision.clone(),
         };
-        anyhow::ensure!(
-            !runtime.action_names()?.is_empty(),
-            "{} Action installed no Actions",
-            config.app_id
-        );
         Ok(runtime)
     }
 
@@ -1582,7 +1534,6 @@ struct AppRuntimeAssets {
 struct ViewRuntime {
     guest: Guest,
     surface: UiSurface,
-    frame: bool,
     _fs: Rc<RefCell<FsModule>>,
     _db: SharedDb,
     revision: AppRevision,
@@ -1606,13 +1557,8 @@ impl ViewRuntime {
         let guest = new_app_guest().context("create App View Guest")?;
         let surface = UiSurface::new(VIEWPORT);
         let system = app.descriptor.id == ROOT_APP_ID;
-        if system {
-            let pak = std::fs::read(app.release_dir.join("app.pak")).context("read App pak")?;
-            surface.feed_pak(&pak);
-        } else {
-            let pak = std::fs::read(&assets.view_pak).context("read Pocket Pi View resources")?;
-            surface.feed_pak(&pak);
-        }
+        let pak = std::fs::read(&assets.view_pak).context("read Pocket Pi View resources")?;
+        surface.feed_pak(&pak);
         surface.mount(&guest)?;
 
         let fs = Rc::new(RefCell::new(FsModule::with_quota(
@@ -1630,16 +1576,15 @@ impl ViewRuntime {
             &assets.framework,
             &app.resources,
         )?;
-
-        let entry = if system {
-            "app.js"
-        } else {
-            guest.eval("pocket-pi-view-sdk", &assets.view_sdk)?;
-            "view.js"
-        };
-        let source = std::fs::read_to_string(app.release_dir.join(entry))
-            .with_context(|| format!("read {} {entry}", app.descriptor.id))?;
-        guest.eval(&format!("{}-{entry}", app.descriptor.id), &source)?;
+        guest.eval("pocket-pi-view-sdk", &assets.view_sdk)?;
+        if system {
+            let text = std::fs::read_to_string(app.release_dir.join("text.js"))
+                .context("read pi-agent text.js")?;
+            guest.eval("pi-agent-text.js", &text)?;
+        }
+        let source = std::fs::read_to_string(app.release_dir.join("view.js"))
+            .with_context(|| format!("read {} view.js", app.descriptor.id))?;
+        guest.eval(&format!("{}-view.js", app.descriptor.id), &source)?;
         anyhow::ensure!(
             guest.with(|ctx| -> Result<bool> {
                 let system: Object = ctx.globals().get("PocketPiSystem")?;
@@ -1649,18 +1594,10 @@ impl ViewRuntime {
             "{} installed no View",
             app.descriptor.id
         );
-        let frame = system;
-        anyhow::ensure!(
-            !frame || guest.has_frame(),
-            "{} installed no frame()",
-            app.descriptor.id
-        );
-
         let last_seen_revision = revision.load(Ordering::Acquire);
         Ok(Self {
             guest,
             surface,
-            frame,
             _fs: fs,
             _db: db,
             revision,
@@ -1699,9 +1636,6 @@ impl ViewRuntime {
             }
         }
         if render_surface {
-            if self.frame {
-                self.guest.frame(0)?;
-            }
             self.surface.tick();
         }
         Ok(())
@@ -2117,8 +2051,8 @@ impl AppSupervisor {
             .capabilities
             .iter()
             .any(|capability| capability == "net.http");
-        let staged_action = staging_release.join("actions.js");
-        if staged_action.is_file() {
+        let has_actions = {
+            let staged_action = staging_release.join("actions.js");
             let candidate = ActionConfig {
                 app_id: descriptor.id.clone(),
                 source_path: staged_action,
@@ -2131,7 +2065,8 @@ impl AppSupervisor {
             };
             let runtime = ActionRuntime::load(&candidate, self.services.clone())?;
             validate_action_contract(&app.descriptor, &runtime)?;
-        }
+            !runtime.action_names()?.is_empty()
+        };
         let runtime = ViewRuntime::load(
             &app,
             &self.assets,
@@ -2150,8 +2085,7 @@ impl AppSupervisor {
         std::fs::rename(staging_release, &release_dir).context("move staged App release")?;
         app.release_dir = release_dir.clone();
 
-        let has_action = release_dir.join("actions.js").is_file();
-        if has_action {
+        if has_actions {
             self.action_runner.register(ActionConfig {
                 app_id: descriptor.id.clone(),
                 source_path: release_dir.join("actions.js"),
@@ -2576,20 +2510,22 @@ fn prepare_source_database(app: &InstalledApp, database: &SharedDb) -> Result<()
 fn seed_system_app(workspace: &Path, bundle: SystemAppBundle) -> Result<()> {
     let release_dir = workspace.join("system/app");
     std::fs::create_dir_all(&release_dir)?;
-    atomic_write(&release_dir.join("app.js"), bundle.js.as_bytes())?;
+    for legacy in ["app.js", "app.pak", "pocket.json"] {
+        let path = release_dir.join(legacy);
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+    }
+    atomic_write(&release_dir.join("view.js"), bundle.view_js.as_bytes())?;
+    atomic_write(&release_dir.join("text.js"), bundle.text_js.as_bytes())?;
     atomic_write(&release_dir.join("agent.js"), bundle.agent_js.as_bytes())?;
-    atomic_write(&release_dir.join("app.pak"), bundle.pak)?;
     atomic_write(
         &release_dir.join("app.json"),
         bundle.descriptor_json.as_bytes(),
     )?;
-    atomic_write(
-        &release_dir.join("pocket.json"),
-        bundle.pocket_json.as_bytes(),
-    )?;
-    let manifest: Value = serde_json::from_str(bundle.pocket_json)?;
-    let modules = manifest
-        .pointer("/engine/capabilities/requires")
+    let descriptor: Value = serde_json::from_str(bundle.descriptor_json)?;
+    let modules = descriptor
+        .get("capabilities")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
@@ -2982,6 +2918,24 @@ mod tests {
         }
     }
 
+    fn view_call(guest: &Guest, method: &str) -> String {
+        guest
+            .with(|ctx| {
+                let system: Object = ctx.globals().get("PocketPiSystem")?;
+                system.get::<_, Function>(method)?.call::<_, String>(())
+            })
+            .unwrap()
+    }
+
+    fn view_call_at(guest: &Guest, method: &str, x: i32, y: i32) -> String {
+        guest
+            .with(|ctx| {
+                let system: Object = ctx.globals().get("PocketPiSystem")?;
+                system.get::<_, Function>(method)?.call::<_, String>((x, y))
+            })
+            .unwrap()
+    }
+
     #[test]
     fn catalog_uses_each_apps_declared_tool_namespace() {
         let temp = tempfile::tempdir().unwrap();
@@ -3118,7 +3072,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_view_state_reuses_nodes_and_sends_only_changed_props() {
+    fn raw_view_updates_only_bound_text_and_changed_props() {
         let guest = new_app_guest().unwrap();
         let surface = UiSurface::new(VIEWPORT);
         surface.feed_pak(system_view_pak());
@@ -3150,6 +3104,8 @@ mod tests {
                 "raw-view",
                 r#"
                   const active = View.state(false);
+                  const label = View.state("KEY");
+                  globalThis.__updateLabel = () => label.set("KEY!");
                   View.mount(() => View.Screen({
                     children: View.Pressable({
                       style: { width: 120, height: 60, background: active.get() ? "accent" : "surface" },
@@ -3157,19 +3113,14 @@ mod tests {
                         active.set(true);
                         return PocketPi.action("key", { active: active.get() });
                       },
-                      children: View.Text("KEY"),
+                      children: View.Text({ text: () => label.get() }),
                     }),
                   }));
                 "#,
             )
             .unwrap();
 
-        guest
-            .with(|ctx| {
-                let system: Object = ctx.globals().get("PocketPiSystem")?;
-                system.get::<_, Function>("tickView")?.call::<_, String>(())
-            })
-            .unwrap();
+        view_call(&guest, "tickView");
         let (before, node_before) = surface.with_ui(|ui| {
             ui.tick();
             (ui.draw().words.clone(), ui.hit_test_bounds(10.0, 10.0))
@@ -3177,15 +3128,26 @@ mod tests {
         guest
             .eval("clear-ui-ops", "globalThis.__uiOps.length = 0")
             .unwrap();
-        let event: Value = guest
-            .with(|ctx| {
-                let system: Object = ctx.globals().get("PocketPiSystem")?;
-                system
-                    .get::<_, Function>("tap")?
-                    .call::<_, String>((10, 10))
-            })
-            .map(|line| serde_json::from_str(&line).unwrap())
+        guest
+            .eval("update-label", "globalThis.__updateLabel()")
             .unwrap();
+        let text_operations = guest
+            .with(|ctx| {
+                ctx.globals()
+                    .get::<_, Function>("__takeUiOps")?
+                    .call::<_, String>(())
+            })
+            .map(|line| serde_json::from_str::<Vec<String>>(&line).unwrap())
+            .unwrap();
+        let (text_changed, text_node) = surface.with_ui(|ui| {
+            ui.tick();
+            (ui.draw().words.clone(), ui.hit_test_bounds(10.0, 10.0))
+        });
+        assert_eq!(text_operations, ["replaceText"]);
+        assert_ne!(before, text_changed);
+        assert_eq!(node_before, text_node);
+
+        let event: Value = serde_json::from_str(&view_call_at(&guest, "tap", 10, 10)).unwrap();
         assert_eq!(
             event,
             json!({"type":"action","action":"key","args":{"active":true}})
@@ -3194,12 +3156,7 @@ mod tests {
             .eval("clear-ui-ops", "globalThis.__uiOps.length = 0")
             .unwrap();
 
-        guest
-            .with(|ctx| {
-                let system: Object = ctx.globals().get("PocketPiSystem")?;
-                system.get::<_, Function>("tickView")?.call::<_, String>(())
-            })
-            .unwrap();
+        view_call(&guest, "tickView");
         let (after, node_after) = surface.with_ui(|ui| {
             ui.tick();
             (ui.draw().words.clone(), ui.hit_test_bounds(10.0, 10.0))
@@ -3212,9 +3169,62 @@ mod tests {
             })
             .map(|line| serde_json::from_str::<Vec<String>>(&line).unwrap())
             .unwrap();
-        assert_ne!(before, after);
+        assert_ne!(text_changed, after);
         assert_eq!(node_before, node_after);
         assert_eq!(operations, ["setProp"]);
+    }
+
+    #[test]
+    fn raw_keyboard_routes_keys_and_releases_pressed_feedback() {
+        let guest = new_app_guest().unwrap();
+        let surface = UiSurface::new(VIEWPORT);
+        surface.feed_pak(system_view_pak());
+        surface.mount(&guest).unwrap();
+        install_system_framework(&guest, "keyboard-test", system_framework(), "{}").unwrap();
+        guest.eval("pocket-pi-view-sdk", system_view_sdk()).unwrap();
+        guest
+            .eval(
+                "keyboard-view",
+                r#"
+                  View.mount(() => View.Keyboard({
+                    layer: "lower",
+                    onKey: (key) => PocketPi.action("key", { key }),
+                  }));
+                "#,
+            )
+            .unwrap();
+
+        view_call(&guest, "tickView");
+        let (before, node_before) = surface.with_ui(|ui| {
+            ui.tick();
+            (ui.draw().words.clone(), ui.hit_test_bounds(10.0, 10.0))
+        });
+
+        view_call_at(&guest, "pointerDown", 10, 10);
+        let pressed = surface.with_ui(|ui| {
+            ui.tick();
+            ui.draw().words.clone()
+        });
+        let event: Value = serde_json::from_str(&view_call_at(&guest, "tap", 10, 10)).unwrap();
+        assert_eq!(
+            event,
+            json!({"type":"action","action":"key","args":{"key":"q"}})
+        );
+
+        view_call(&guest, "pointerUp");
+        let (released, node_after) = surface.with_ui(|ui| {
+            ui.tick();
+            (ui.draw().words.clone(), ui.hit_test_bounds(10.0, 10.0))
+        });
+        assert_ne!(before, pressed);
+        assert_eq!(before, released);
+        assert_eq!(node_before, node_after);
+
+        let delete: Value = serde_json::from_str(&view_call_at(&guest, "tap", 650, 300)).unwrap();
+        assert_eq!(
+            delete,
+            json!({"type":"action","action":"key","args":{"key":"Backspace"}})
+        );
     }
 
     #[test]
@@ -3346,6 +3356,52 @@ mod tests {
         let catalog = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
         let restored = AppSupervisor::new(&workspace, catalog, Arc::new(NoServices)).unwrap();
         assert_eq!(source_rows(&restored), 4);
+    }
+
+    #[test]
+    fn view_only_source_app_installs_without_an_action_runtime() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("device");
+        let package = source_package(&[
+            (
+                "app.json",
+                br#"{
+                  "format":1,
+                  "frameworkApi":1,
+                  "id":"view-only",
+                  "title":"View Only",
+                  "description":"No Actions",
+                  "version":"1",
+                  "schemaVersion":1,
+                  "capabilities":["data.sqlite"],
+                  "tools":[],
+                  "schedules":[]
+                }"#,
+            ),
+            ("schema.sql", b"CREATE TABLE state(id INTEGER PRIMARY KEY);"),
+            ("actions.js", b"PocketPi.defineActions({});"),
+            (
+                "view.js",
+                b"View.mount(() => View.Text({ text: 'VIEW ONLY' }));",
+            ),
+        ]);
+        let staged = stage_pocketapp_bytes(&package, &temp.path().join("staged")).unwrap();
+        let catalog = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
+        let mut supervisor = AppSupervisor::new(&workspace, catalog, Arc::new(NoServices)).unwrap();
+
+        supervisor
+            .activate_app(&staged.release_dir, staged.credentials)
+            .unwrap();
+        supervisor.open("view-only").unwrap();
+        supervisor.frame_render(true).unwrap();
+
+        assert_eq!(supervisor.active_id(), "view-only");
+        assert!(!supervisor
+            .action_runner
+            .configs
+            .lock()
+            .unwrap()
+            .contains_key("view-only"));
     }
 
     #[test]

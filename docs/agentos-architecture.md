@@ -44,7 +44,7 @@ Hardware
         ├── Pocket Pi System Framework            raw JavaScript
         ├── resident Pi Agent System Guest
         │   ├── Agent loop                         bundled JavaScript
-        │   └── Chat / Files / Apps / Settings    bundled PocketJS View
+        │   └── Chat / Files / Apps / Settings    raw View JavaScript
         ├── ordinary source View Guests           LRU, maximum 3
         └── ordinary source Action Guests         LRU, maximum 3
 ```
@@ -83,7 +83,7 @@ drops it.
 | PocketJS platform | pinned PocketJS crates + QuickJS, Rust/C | Firmware lifetime | Firmware build/flash |
 | AppSupervisor mechanisms | `crates/pocket-pi-agentos`, Rust | Firmware lifetime | Firmware build/flash |
 | System Framework v1 | `system/framework.js`, JavaScript | evaluated per Guest | Firmware build/flash |
-| Pi Agent System App | `apps/pi-agent`, TS/TSX -> embedded Bundles | resident | Firmware build/flash |
+| Pi Agent System App | `apps/pi-agent`, raw View JavaScript + bundled Agent loop | resident | Firmware build/flash |
 | Ordinary App | `apps/<id>`, raw JavaScript + SQL | LRU Guests | package + install |
 | App Data | per-App SQLite + files | survives Guest eviction and restart | Action transaction |
 
@@ -96,6 +96,7 @@ installation and replacement are deliberately outside the current contract.
 
 - `PocketPi.defineActions({...})`
 - `PocketPi.defineView({...})`
+- `PocketPi.defineSystem({...})` for the resident System App's native facts
 - `PocketPi.action(name, args)` for UI Action events
 - `PocketPi.command(name, args)` and `PocketPi.navigate(app)` for narrow native
   mechanisms
@@ -179,9 +180,11 @@ credentials.json     initial-install transport input, removed before activation
 
 `schema.sql`, `actions.js` and `view.js` are the execution source, not build
 artifacts. `assets/` contains only manifest-declared JSON resources. Packaging
-does not require PocketJS, Bun or a compile step. `agent.js`, `pocket.json`,
-`plan.json`, `app.js` and `app.pak` belong only to the firmware-embedded Pi
-Agent System App and are rejected in an ordinary `.pocketapp`.
+does not require PocketJS, Bun or a compile step. The firmware-embedded System
+App uses the same shared View SDK with `app.json`, `view.js` and its local
+`text.js`; only its resident Agent loop remains a built `agent.js`. The native
+seed adds `plan.json`. These System files are not accepted in an ordinary
+`.pocketapp`.
 
 ## Install and uninstall
 
