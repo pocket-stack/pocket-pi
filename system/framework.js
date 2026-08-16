@@ -1,7 +1,7 @@
 (() => {
   let appId = "";
   let actions = null;
-  let actionPump = null;
+  const actionPumps = [];
   let actionResult;
   let actionRunning = false;
   let view = null;
@@ -40,8 +40,12 @@
       if (!name || typeof action !== "function") fail(`invalid Action: ${name}`);
     }
     actions = Object.freeze({ ...definitions });
-    actionPump = options?.pump ?? null;
-    if (actionPump !== null && typeof actionPump !== "function") fail("Action pump must be a function");
+    if (options?.pump !== undefined) registerActionPump(options.pump);
+  }
+
+  function registerActionPump(pump) {
+    if (typeof pump !== "function") fail("Action pump must be a function");
+    actionPumps.push(pump);
   }
 
   function defineView(definition) {
@@ -163,6 +167,7 @@
     hasView() {
       return view !== null;
     },
+    registerActionPump,
     beginAction(line) {
       if (!actions) fail("Actions not defined");
       if (actionRunning) fail("Action already running");
@@ -179,7 +184,7 @@
       }
     },
     tickAction() {
-      if (actionPump) actionPump();
+      for (const pump of actionPumps) pump();
     },
     pollActionResult() {
       const value = actionResult;

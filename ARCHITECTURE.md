@@ -88,7 +88,8 @@ tools/uart-model-bridge.py  optional development-only model bridge
 
 ```sh
 cargo xtask build pi-agent
-cargo xtask build app <id> [credentials.json]
+cargo xtask package app exa path/to/exa-credentials.json
+cargo xtask build app robinhood path/to/robinhood-credentials.json # transitional
 cargo xtask build esp32-p4
 cargo xtask build esp32-p4-sim
 cargo xtask run esp32-p4-sim

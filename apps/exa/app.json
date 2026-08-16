@@ -1,7 +1,13 @@
 {
+  "format": 1,
+  "frameworkApi": 1,
   "id": "exa",
+  "title": "Exa Research",
   "description": "Web research and local search history",
   "version": "1.1.0",
+  "schemaVersion": 5,
+  "capabilities": ["data.sqlite", "net.http"],
+  "resources": {},
   "toolNamespace": "research",
   "nativeServices": {
     "http": [

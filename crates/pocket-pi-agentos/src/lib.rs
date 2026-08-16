@@ -412,6 +412,10 @@ pub const fn system_view_sdk() -> &'static str {
     include_str!("../../../system/view-sdk.js")
 }
 
+pub const fn system_net_sdk() -> &'static str {
+    include_str!("../../../system/net-sdk.js")
+}
+
 pub const fn system_view_pak() -> &'static [u8] {
     include_bytes!("../../../system/view-sdk.pak")
 }
@@ -1198,6 +1202,7 @@ struct ActionConfig {
     app_id: String,
     source_path: PathBuf,
     framework: Arc<str>,
+    net_sdk: Option<Arc<str>>,
     resources: Arc<str>,
     database: SharedDb,
     revision: AppRevision,
@@ -1328,6 +1333,9 @@ impl ActionRuntime {
             None
         };
         install_system_framework(&guest, &config.app_id, &config.framework, &config.resources)?;
+        if let Some(net_sdk) = &config.net_sdk {
+            guest.eval("pocket-pi-net-sdk", net_sdk)?;
+        }
         let source = std::fs::read_to_string(&config.source_path)
             .with_context(|| format!("read {} Action", config.app_id))?;
         guest.eval(&format!("{}-actions", config.app_id), &source)?;
@@ -1602,6 +1610,7 @@ impl ActionRunner {
 #[derive(Clone)]
 struct AppRuntimeAssets {
     framework: Arc<str>,
+    net_sdk: Arc<str>,
     view_sdk: Arc<str>,
     view_pak: PathBuf,
 }
@@ -1988,6 +1997,9 @@ impl AppSupervisor {
             framework: std::fs::read_to_string(workspace.join("system/framework.js"))
                 .context("read Pocket Pi System Framework")?
                 .into(),
+            net_sdk: std::fs::read_to_string(workspace.join("system/net-sdk.js"))
+                .context("read Pocket Pi NET SDK")?
+                .into(),
             view_sdk: std::fs::read_to_string(workspace.join("system/view-sdk.js"))
                 .context("read Pocket Pi View SDK")?
                 .into(),
@@ -2017,6 +2029,12 @@ impl AppSupervisor {
                     app_id: descriptor.id.clone(),
                     source_path,
                     framework: assets.framework.clone(),
+                    net_sdk: (app.release == ReleaseKind::Source
+                        && descriptor
+                            .capabilities
+                            .iter()
+                            .any(|capability| capability == "net.http"))
+                    .then(|| assets.net_sdk.clone()),
                     resources: app.resources.clone(),
                     database: databases
                         .get(&descriptor.id)
@@ -2142,6 +2160,8 @@ impl AppSupervisor {
                 app_id: descriptor.id.clone(),
                 source_path: staged_action,
                 framework: self.assets.framework.clone(),
+                net_sdk: (app.release == ReleaseKind::Source && net)
+                    .then(|| self.assets.net_sdk.clone()),
                 resources: app.resources.clone(),
                 database: database.clone(),
                 revision: revision.clone(),
@@ -2174,6 +2194,8 @@ impl AppSupervisor {
                 app_id: descriptor.id.clone(),
                 source_path: release_dir.join("actions.js"),
                 framework: self.assets.framework.clone(),
+                net_sdk: (app.release == ReleaseKind::Source && net)
+                    .then(|| self.assets.net_sdk.clone()),
                 resources: app.resources.clone(),
                 database: database.clone(),
                 revision: revision.clone(),
@@ -2620,6 +2642,10 @@ fn seed_system_runtime(workspace: &Path) -> Result<()> {
     atomic_write(
         &workspace.join("system/framework.js"),
         system_framework().as_bytes(),
+    )?;
+    atomic_write(
+        &workspace.join("system/net-sdk.js"),
+        system_net_sdk().as_bytes(),
     )?;
     atomic_write(
         &workspace.join("system/view-sdk.js"),
@@ -3425,6 +3451,7 @@ mod tests {
                 app_id: "scheduled".into(),
                 source_path: source,
                 framework: Arc::from(system_framework()),
+                net_sdk: None,
                 resources: Arc::from("{}"),
                 database: Arc::new(Mutex::new(DbModule::new(DbStorage::Memory))),
                 revision: Arc::new(AtomicU32::new(0)),
@@ -3851,6 +3878,7 @@ PocketPi.defineActions({ run() { return "ok"; } });
                     app_id: app_id.into(),
                     source_path: source.clone(),
                     framework: Arc::from(include_str!("../../../system/framework.js")),
+                    net_sdk: None,
                     resources: Arc::from("{}"),
                     database,
                     revision: Arc::new(AtomicU32::new(0)),
@@ -4062,6 +4090,12 @@ PocketPi.defineActions({ run() { return "ok"; } });
             .join("apps")
             .join(app_id);
         std::fs::create_dir_all(release).unwrap();
+        if source.join("schema.sql").is_file() {
+            for name in ["app.json", "schema.sql", "actions.js", "view.js"] {
+                std::fs::copy(source.join(name), release.join(name)).unwrap();
+            }
+            return;
+        }
         for (from, to) in [
             ("app.json", "app.json"),
             ("pocket.json", "pocket.json"),

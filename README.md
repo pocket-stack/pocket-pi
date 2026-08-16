@@ -73,7 +73,7 @@ Firmware embeds the Pi Agent Bundle so a blank device can boot. Ordinary Apps
 use the installable container:
 
 ```sh
-cargo xtask build app exa path/to/exa-credentials.json
+cargo xtask package app exa path/to/exa-credentials.json
 ```
 
 Packages are written to `target/pocketapps/<id>.pocketapp`. The firmware image

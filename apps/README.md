@@ -15,14 +15,19 @@ POCKETJS_ROOT=/path/to/pocketjs cargo xtask build pi-agent
 
 This updates the generated bundles embedded by the Firmware build.
 
-Build any ordinary App as a standalone install artifact:
+Package the source-loaded Exa App directly, without PocketJS, Bun or a compile
+step:
 
 ```sh
-POCKETJS_ROOT=/path/to/pocketjs cargo xtask build app <id> [credentials.json]
+cargo xtask package app exa path/to/exa-credentials.json
 ```
 
 The result is `target/pocketapps/<id>.pocketapp`. HTTP and UART are only transport
 ingress. Installation is create-only: an existing App id must be uninstalled
 before it can be installed again.
-The build refuses a PocketJS checkout other than the revision pinned by Pocket
-Pi so App artifacts cannot drift from the runtime modules linked into firmware.
+
+Robinhood remains on the transitional Bundle path until its source migration:
+
+```sh
+POCKETJS_ROOT=/path/to/pocketjs cargo xtask build app robinhood path/to/robinhood-credentials.json
+```
