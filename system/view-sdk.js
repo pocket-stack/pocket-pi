@@ -41,7 +41,7 @@
     bold: Object.freeze({ body: 9, lg: 10, xl: 11, title: 12 }),
   });
 
-  let rootNode = 0;
+  let rootNode = null;
   let renderView = null;
   let dirty = false;
   let pressHandlers = new Map();
@@ -137,57 +137,125 @@
     fail(`invalid ${kind} ${String(value)}`);
   }
 
-  function edges(node, start, value) {
-    ui.setProp(node, start, value);
-    ui.setProp(node, start + 1, value);
-    ui.setProp(node, start + 2, value);
-    ui.setProp(node, start + 3, value);
+  function edges(style, start, value) {
+    style[start] = value;
+    style[start + 1] = value;
+    style[start + 2] = value;
+    style[start + 3] = value;
   }
 
-  function applyStyle(node, style) {
+  function nativeStyle(value) {
+    const style = {};
     let fontSize;
     let bold = false;
-    for (const [name, value] of Object.entries(style ?? {})) {
-      if (value === undefined || value === null) continue;
-      if (name === "padding") edges(node, PROP.paddingTop, value);
-      else if (name === "paddingX") { ui.setProp(node, PROP.paddingLeft, value); ui.setProp(node, PROP.paddingRight, value); }
-      else if (name === "paddingY") { ui.setProp(node, PROP.paddingTop, value); ui.setProp(node, PROP.paddingBottom, value); }
-      else if (name === "margin") edges(node, PROP.marginTop, value);
-      else if (name === "marginX") { ui.setProp(node, PROP.marginLeft, value); ui.setProp(node, PROP.marginRight, value); }
-      else if (name === "marginY") { ui.setProp(node, PROP.marginTop, value); ui.setProp(node, PROP.marginBottom, value); }
-      else if (name === "width" || name === "height" || name === "minWidth" || name === "minHeight" || name === "maxWidth" || name === "maxHeight") ui.setProp(node, PROP[name], dimension(value));
-      else if (name === "background" || name === "color" || name === "borderColor") ui.setProp(node, PROP[name], color(value));
-      else if (["direction", "justify", "align", "position", "display", "overflow", "textAlign"].includes(name)) ui.setProp(node, PROP[name], enumValue(name, value));
-      else if (name === "wrap" || name === "hitPass") ui.setProp(node, PROP[name], value ? 1 : 0);
-      else if (name === "fontSize") fontSize = value;
+    for (const [name, item] of Object.entries(value ?? {})) {
+      if (item === undefined || item === null) continue;
+      if (name === "padding") edges(style, PROP.paddingTop, item);
+      else if (name === "paddingX") { style[PROP.paddingLeft] = item; style[PROP.paddingRight] = item; }
+      else if (name === "paddingY") { style[PROP.paddingTop] = item; style[PROP.paddingBottom] = item; }
+      else if (name === "margin") edges(style, PROP.marginTop, item);
+      else if (name === "marginX") { style[PROP.marginLeft] = item; style[PROP.marginRight] = item; }
+      else if (name === "marginY") { style[PROP.marginTop] = item; style[PROP.marginBottom] = item; }
+      else if (name === "width" || name === "height" || name === "minWidth" || name === "minHeight" || name === "maxWidth" || name === "maxHeight") style[PROP[name]] = dimension(item);
+      else if (name === "background" || name === "color" || name === "borderColor") style[PROP[name]] = color(item);
+      else if (["direction", "justify", "align", "position", "display", "overflow", "textAlign"].includes(name)) style[PROP[name]] = enumValue(name, item);
+      else if (name === "wrap" || name === "hitPass") style[PROP[name]] = item ? 1 : 0;
+      else if (name === "fontSize") fontSize = item;
       else if (name === "fontWeight") {
-        if (value !== "regular" && value !== "bold") fail(`unknown font weight ${String(value)}`);
-        bold = value === "bold";
+        if (item !== "regular" && item !== "bold") fail(`unknown font weight ${String(item)}`);
+        bold = item === "bold";
       }
-      else if (Object.hasOwn(PROP, name)) ui.setProp(node, PROP[name], value);
+      else if (Object.hasOwn(PROP, name)) style[PROP[name]] = item;
       else fail(`unsupported style ${name}`);
     }
     if (fontSize !== undefined || bold) {
       const slot = fontSlots[bold ? "bold" : "regular"][fontSize ?? "body"];
       if (slot === undefined) fail(`unknown font size ${String(fontSize)}`);
-      ui.setProp(node, PROP.fontSlot, slot);
+      style[PROP.fontSlot] = slot;
     }
+    return style;
+  }
+
+  function prepare(recipe) {
+    if (!recipe || (recipe.type !== NODE_VIEW && recipe.type !== NODE_TEXT)) fail("render must return a View recipe");
+    recipe.nativeStyle = nativeStyle(recipe.props.style);
+    for (const child of recipe.children) prepare(child);
+    return recipe;
+  }
+
+  function applyStyle(node, style) {
+    for (const prop in style) ui.setProp(node, Number(prop), style[prop]);
   }
 
   function materialize(recipe, nextHandlers, nextParents, created) {
-    if (!recipe || (recipe.type !== NODE_VIEW && recipe.type !== NODE_TEXT)) fail("render must return a View recipe");
     const id = ui.createNode(recipe.type);
     if (id <= 0) fail("ui node allocation failed");
     created.push(id);
-    applyStyle(id, recipe.props.style);
-    if (recipe.type === NODE_TEXT) ui.setText(id, recipe.props.text);
+    applyStyle(id, recipe.nativeStyle);
+    const node = {
+      id,
+      type: recipe.type,
+      style: recipe.nativeStyle,
+      text: recipe.type === NODE_TEXT ? recipe.props.text : "",
+      children: [],
+    };
+    if (recipe.type === NODE_TEXT) ui.setText(id, node.text);
     if (recipe.props.onPress) nextHandlers.set(id, recipe.props.onPress);
     for (const child of recipe.children) {
-      const childId = materialize(child, nextHandlers, nextParents, created);
-      nextParents.set(childId, id);
-      ui.insertBefore(id, childId, 0);
+      const childNode = materialize(child, nextHandlers, nextParents, created);
+      node.children.push(childNode);
+      nextParents.set(childNode.id, id);
+      ui.insertBefore(id, childNode.id, 0);
     }
-    return id;
+    return node;
+  }
+
+  function styleWasRemoved(before, next) {
+    for (const prop in before) {
+      if (!Object.hasOwn(next, prop)) return true;
+    }
+    return false;
+  }
+
+  function reconcile(parent, current, recipe, nextHandlers, nextParents, created) {
+    if (current.type !== recipe.type || styleWasRemoved(current.style, recipe.nativeStyle)) {
+      const replacement = materialize(recipe, nextHandlers, nextParents, created);
+      ui.insertBefore(parent, replacement.id, current.id);
+      ui.destroyNode(current.id);
+      return replacement;
+    }
+
+    for (const prop in recipe.nativeStyle) {
+      const value = recipe.nativeStyle[prop];
+      if (!Object.is(current.style[prop], value)) ui.setProp(current.id, Number(prop), value);
+    }
+    if (recipe.type === NODE_TEXT && current.text !== recipe.props.text) {
+      (ui.replaceText ?? ui.setText)(current.id, recipe.props.text);
+    }
+    if (recipe.props.onPress) nextHandlers.set(current.id, recipe.props.onPress);
+
+    const nextChildren = [];
+    const count = Math.max(current.children.length, recipe.children.length);
+    for (let index = 0; index < count; index += 1) {
+      const child = current.children[index];
+      const childRecipe = recipe.children[index];
+      if (child && childRecipe) {
+        const nextChild = reconcile(current.id, child, childRecipe, nextHandlers, nextParents, created);
+        nextChildren.push(nextChild);
+        nextParents.set(nextChild.id, current.id);
+      } else if (childRecipe) {
+        const nextChild = materialize(childRecipe, nextHandlers, nextParents, created);
+        nextChildren.push(nextChild);
+        nextParents.set(nextChild.id, current.id);
+        ui.insertBefore(current.id, nextChild.id, 0);
+      } else if (child) {
+        ui.destroyNode(child.id);
+      }
+    }
+    current.style = recipe.nativeStyle;
+    current.text = recipe.type === NODE_TEXT ? recipe.props.text : "";
+    current.children = nextChildren;
+    return current;
   }
 
   function renderIfDirty() {
@@ -196,10 +264,12 @@
     const nextParents = new Map();
     const created = [];
     try {
-      const nextRoot = materialize(renderView(), nextHandlers, nextParents, created);
-      ui.insertBefore(ROOT, nextRoot, 0);
-      if (rootNode) ui.destroyNode(rootNode);
-      rootNode = nextRoot;
+      const recipe = prepare(renderView());
+      if (rootNode) rootNode = reconcile(ROOT, rootNode, recipe, nextHandlers, nextParents, created);
+      else {
+        rootNode = materialize(recipe, nextHandlers, nextParents, created);
+        ui.insertBefore(ROOT, rootNode.id, 0);
+      }
       pressHandlers = nextHandlers;
       parents = nextParents;
       dirty = false;

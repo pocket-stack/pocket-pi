@@ -3118,28 +3118,46 @@ mod tests {
     }
 
     #[test]
-    fn raw_view_state_renders_and_routes_semantic_actions() {
+    fn raw_view_state_reuses_nodes_and_sends_only_changed_props() {
         let guest = new_app_guest().unwrap();
         let surface = UiSurface::new(VIEWPORT);
         surface.feed_pak(system_view_pak());
         surface.mount(&guest).unwrap();
         install_system_framework(&guest, "raw-view-test", system_framework(), "{}").unwrap();
+        guest
+            .eval(
+                "track-ui-ops",
+                r#"
+                  const nativeUi = globalThis.ui;
+                  globalThis.__uiOps = [];
+                  globalThis.ui = new Proxy(nativeUi, {
+                    get(target, name) {
+                      const value = target[name];
+                      if (typeof value !== "function") return value;
+                      return (...args) => {
+                        globalThis.__uiOps.push(String(name));
+                        return Reflect.apply(value, target, args);
+                      };
+                    },
+                  });
+                  globalThis.__takeUiOps = () => JSON.stringify(globalThis.__uiOps.splice(0));
+                "#,
+            )
+            .unwrap();
         guest.eval("pocket-pi-view-sdk", system_view_sdk()).unwrap();
         guest
             .eval(
                 "raw-view",
                 r#"
-                  const label = View.state("READY");
+                  const active = View.state(false);
                   View.mount(() => View.Screen({
-                    children: View.Box({
-                      style: { width: 120, height: 60 },
-                      children: View.ActionButton({
-                        label: label.get(),
-                        onPress: () => {
-                          label.set("DONE");
-                          return PocketPi.action("refresh", { label: label.get() });
-                        },
-                      }),
+                    children: View.Pressable({
+                      style: { width: 120, height: 60, background: active.get() ? "accent" : "surface" },
+                      onPress: () => {
+                        active.set(true);
+                        return PocketPi.action("key", { active: active.get() });
+                      },
+                      children: View.Text("KEY"),
                     }),
                   }));
                 "#,
@@ -3152,10 +3170,13 @@ mod tests {
                 system.get::<_, Function>("tickView")?.call::<_, String>(())
             })
             .unwrap();
-        let before = surface.with_ui(|ui| {
+        let (before, node_before) = surface.with_ui(|ui| {
             ui.tick();
-            ui.draw().words.clone()
+            (ui.draw().words.clone(), ui.hit_test_bounds(10.0, 10.0))
         });
+        guest
+            .eval("clear-ui-ops", "globalThis.__uiOps.length = 0")
+            .unwrap();
         let event: Value = guest
             .with(|ctx| {
                 let system: Object = ctx.globals().get("PocketPiSystem")?;
@@ -3167,8 +3188,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             event,
-            json!({"type":"action","action":"refresh","args":{"label":"DONE"}})
+            json!({"type":"action","action":"key","args":{"active":true}})
         );
+        guest
+            .eval("clear-ui-ops", "globalThis.__uiOps.length = 0")
+            .unwrap();
 
         guest
             .with(|ctx| {
@@ -3176,11 +3200,21 @@ mod tests {
                 system.get::<_, Function>("tickView")?.call::<_, String>(())
             })
             .unwrap();
-        let after = surface.with_ui(|ui| {
+        let (after, node_after) = surface.with_ui(|ui| {
             ui.tick();
-            ui.draw().words.clone()
+            (ui.draw().words.clone(), ui.hit_test_bounds(10.0, 10.0))
         });
+        let operations = guest
+            .with(|ctx| {
+                ctx.globals()
+                    .get::<_, Function>("__takeUiOps")?
+                    .call::<_, String>(())
+            })
+            .map(|line| serde_json::from_str::<Vec<String>>(&line).unwrap())
+            .unwrap();
         assert_ne!(before, after);
+        assert_eq!(node_before, node_after);
+        assert_eq!(operations, ["setProp"]);
     }
 
     #[test]
