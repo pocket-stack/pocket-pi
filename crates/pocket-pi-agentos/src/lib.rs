@@ -379,6 +379,14 @@ pub const fn system_framework() -> &'static str {
     include_str!("../../../system/framework.js")
 }
 
+pub const fn system_view_sdk() -> &'static str {
+    include_str!("../../../system/view-sdk.js")
+}
+
+pub const fn system_view_pak() -> &'static [u8] {
+    include_bytes!("../../../system/view-sdk.pak")
+}
+
 #[derive(Clone, Debug)]
 struct InstalledApp {
     descriptor: AppDescriptor,
@@ -406,7 +414,7 @@ struct ToolRoute {
 impl InstalledAppIndex {
     pub fn load(workspace: &Path, system: SystemAppBundle) -> Result<Self> {
         seed_system_app(workspace, system)?;
-        seed_system_framework(workspace)?;
+        seed_system_runtime(workspace)?;
         let mut apps = BTreeMap::new();
         let root = load_release(&workspace.join("system/app"), ROOT_APP_ID, true)?;
         apps.insert(ROOT_APP_ID.to_owned(), root);
@@ -2284,11 +2292,16 @@ fn seed_system_app(workspace: &Path, bundle: SystemAppBundle) -> Result<()> {
     Ok(())
 }
 
-fn seed_system_framework(workspace: &Path) -> Result<()> {
+fn seed_system_runtime(workspace: &Path) -> Result<()> {
     atomic_write(
         &workspace.join("system/framework.js"),
         system_framework().as_bytes(),
-    )
+    )?;
+    atomic_write(
+        &workspace.join("system/view-sdk.js"),
+        system_view_sdk().as_bytes(),
+    )?;
+    atomic_write(&workspace.join("system/view-sdk.pak"), system_view_pak())
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -2779,6 +2792,138 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("invalid projection"));
+    }
+
+    #[test]
+    fn raw_view_state_renders_and_routes_semantic_actions() {
+        let guest = new_app_guest().unwrap();
+        let surface = UiSurface::new(VIEWPORT);
+        surface.feed_pak(system_view_pak());
+        surface.mount(&guest).unwrap();
+        install_system_framework(&guest, "raw-view-test", system_framework()).unwrap();
+        guest.eval("pocket-pi-view-sdk", system_view_sdk()).unwrap();
+        guest
+            .eval(
+                "raw-view",
+                r#"
+                  const label = View.state("READY");
+                  View.mount(() => View.Screen({
+                    children: View.Box({
+                      style: { width: 120, height: 60 },
+                      children: View.ActionButton({
+                        label: label.get(),
+                        onPress: () => {
+                          label.set("DONE");
+                          return PocketPi.action("refresh", { label: label.get() });
+                        },
+                      }),
+                    }),
+                  }));
+                "#,
+            )
+            .unwrap();
+
+        guest
+            .with(|ctx| {
+                let system: Object = ctx.globals().get("PocketPiSystem")?;
+                system.get::<_, Function>("tickView")?.call::<_, String>(())
+            })
+            .unwrap();
+        let before = surface.with_ui(|ui| {
+            ui.tick();
+            ui.draw().words.clone()
+        });
+        let event: Value = guest
+            .with(|ctx| {
+                let system: Object = ctx.globals().get("PocketPiSystem")?;
+                system
+                    .get::<_, Function>("tap")?
+                    .call::<_, String>((10, 10))
+            })
+            .map(|line| serde_json::from_str(&line).unwrap())
+            .unwrap();
+        assert_eq!(
+            event,
+            json!({"type":"action","action":"refresh","args":{"label":"DONE"}})
+        );
+
+        guest
+            .with(|ctx| {
+                let system: Object = ctx.globals().get("PocketPiSystem")?;
+                system.get::<_, Function>("tickView")?.call::<_, String>(())
+            })
+            .unwrap();
+        let after = surface.with_ui(|ui| {
+            ui.tick();
+            ui.draw().words.clone()
+        });
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn projection_refresh_renders_the_new_sqlite_state() {
+        let guest = new_app_guest().unwrap();
+        let surface = UiSurface::new(VIEWPORT);
+        surface.feed_pak(system_view_pak());
+        surface.mount(&guest).unwrap();
+        let database = Arc::new(Mutex::new(DbModule::new(DbStorage::Memory)));
+        {
+            let mut database = database.lock().unwrap();
+            let handle = database.open("raw-projection-test");
+            assert_eq!(
+                database.exec(
+                    handle,
+                    "CREATE TABLE state(value INTEGER); INSERT INTO state VALUES(1)"
+                ),
+                0
+            );
+        }
+        mount_db(&guest, database.clone(), false).unwrap();
+        install_system_framework(&guest, "raw-projection-test", system_framework()).unwrap();
+        guest.eval("pocket-pi-view-sdk", system_view_sdk()).unwrap();
+        guest
+            .eval(
+                "raw-projection-view",
+                r#"
+                  const model = View.state(0);
+                  PocketPi.projection.one(
+                    "SELECT value FROM state LIMIT 1",
+                    {},
+                    (row) => model.set(row.value),
+                  );
+                  View.mount(() => View.Text({ text: `VALUE ${model.get()}` }));
+                "#,
+            )
+            .unwrap();
+
+        guest
+            .with(|ctx| {
+                let system: Object = ctx.globals().get("PocketPiSystem")?;
+                system.get::<_, Function>("tickView")?.call::<_, String>(())
+            })
+            .unwrap();
+        let before = surface.with_ui(|ui| {
+            ui.tick();
+            ui.draw().words.clone()
+        });
+        {
+            let mut database = database.lock().unwrap();
+            let handle = database.open("raw-projection-test");
+            assert_eq!(database.exec(handle, "UPDATE state SET value=2"), 0);
+        }
+        guest
+            .with(|ctx| {
+                let system: Object = ctx.globals().get("PocketPiSystem")?;
+                system
+                    .get::<_, Function>("dataChanged")?
+                    .call::<_, String>(())
+            })
+            .unwrap();
+        let after = surface.with_ui(|ui| {
+            ui.tick();
+            ui.draw().words.clone()
+        });
+        assert_ne!(before, after);
     }
 
     #[test]

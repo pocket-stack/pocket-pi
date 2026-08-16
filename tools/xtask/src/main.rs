@@ -19,9 +19,10 @@ fn main() -> Result<()> {
     let target = args.next();
     let rest = args.collect::<Vec<_>>();
     match (command_name.as_deref(), target.as_deref()) {
-        (Some("build"), Some("pi-agent")) => {
-            build_embedded_guest(&root)?;
-            build_pi_agent(&root)
+        (Some("build"), Some("pi-agent")) => build_system_assets(&root),
+        (Some("build"), Some("view-sdk")) => {
+            let pocketjs = pocketjs_checkout(&root)?;
+            build_view_sdk(&root, &pocketjs)
         }
         (Some("build"), Some("app")) => {
             let app = rest.first().context("build app requires an App id")?;
@@ -33,8 +34,7 @@ fn main() -> Result<()> {
             package_app(&root, app, rest.get(1).map(PathBuf::from).as_deref())
         }
         (Some("build"), Some("esp32-p4")) => {
-            build_embedded_guest(&root)?;
-            build_pi_agent(&root)?;
+            build_system_assets(&root)?;
             command(
                 Command::new("rustup")
                     .current_dir(root.join("firmware/esp32-p4"))
@@ -49,18 +49,15 @@ fn main() -> Result<()> {
             )
         }
         (Some("build"), Some("esp32-p4-sim")) => {
-            build_embedded_guest(&root)?;
-            build_pi_agent(&root)?;
+            build_system_assets(&root)?;
             cargo(&root, ["build", "-p", "pocket-pi-esp32-p4-sim"])
         }
         (Some("run"), Some("esp32-p4-sim")) => {
-            build_embedded_guest(&root)?;
-            build_pi_agent(&root)?;
+            build_system_assets(&root)?;
             cargo_with_args(&root, ["run", "-p", "pocket-pi-esp32-p4-sim", "--"], &rest)
         }
         (Some("snapshot"), Some("esp32-p4-sim")) => {
-            build_embedded_guest(&root)?;
-            build_pi_agent(&root)?;
+            build_system_assets(&root)?;
             let output = root.join("artifacts/screenshots/esp32-p4-sim.png");
             std::fs::create_dir_all(output.parent().unwrap())?;
             cargo_with_args(
@@ -71,15 +68,17 @@ fn main() -> Result<()> {
         }
         _ => {
             eprintln!(
-                "usage:\n  cargo xtask build pi-agent|esp32-p4|esp32-p4-sim\n  cargo xtask build app <id> [credentials.json]\n  cargo xtask run esp32-p4-sim [args]\n  cargo xtask snapshot esp32-p4-sim"
+                "usage:\n  cargo xtask build pi-agent|view-sdk|esp32-p4|esp32-p4-sim\n  cargo xtask build app <id> [credentials.json]\n  cargo xtask run esp32-p4-sim [args]\n  cargo xtask snapshot esp32-p4-sim"
             );
             bail!("unknown xtask command")
         }
     }
 }
 
-fn build_pi_agent(root: &Path) -> Result<()> {
+fn build_system_assets(root: &Path) -> Result<()> {
+    build_embedded_guest(root)?;
     let pocketjs = pocketjs_checkout(root)?;
+    build_view_sdk(root, &pocketjs)?;
     build_app_with_pocketjs(root, &pocketjs, "pi-agent")
 }
 
@@ -106,6 +105,31 @@ fn pocketjs_checkout(root: &Path) -> Result<PathBuf> {
 fn build_app(root: &Path, app: &str) -> Result<()> {
     let pocketjs = pocketjs_checkout(root)?;
     build_app_with_pocketjs(root, &pocketjs, app)
+}
+
+fn build_view_sdk(root: &Path, pocketjs: &Path) -> Result<()> {
+    let output = root.join("target/view-sdk");
+    std::fs::create_dir_all(&output)?;
+    command(
+        Command::new("bun")
+            .current_dir(pocketjs)
+            .arg("tools/build.ts")
+            .arg(root.join("system/view-sdk-pack.ts"))
+            .arg(format!("--outdir={}", output.display()))
+            .arg("--framework=solid")
+            .arg("--no-config"),
+        "building Pocket Pi View SDK resources",
+    )?;
+    let source = output.join("view-sdk-pack.pak");
+    let destination = root.join("system/view-sdk.pak");
+    std::fs::copy(&source, &destination).with_context(|| {
+        format!(
+            "install Pocket Pi View SDK resources {} -> {}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+    Ok(())
 }
 
 fn build_app_with_pocketjs(root: &Path, pocketjs: &Path, app: &str) -> Result<()> {

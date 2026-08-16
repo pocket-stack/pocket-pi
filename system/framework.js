@@ -177,7 +177,7 @@
     },
     dataChanged() {
       refreshBindings();
-      return "";
+      return event(view?.dataChanged?.());
     },
     updateView(line) {
       return event(view?.update?.(JSON.parse(line)));
