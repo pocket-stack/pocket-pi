@@ -167,6 +167,9 @@
     hasView() {
       return view !== null;
     },
+    telemetryVisible() {
+      return view?.telemetryVisible?.() === true;
+    },
     registerActionPump,
     beginAction(line) {
       if (!actions) fail("Actions not defined");

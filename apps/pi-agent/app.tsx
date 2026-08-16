@@ -47,6 +47,11 @@ type SystemFacts = {
     };
     firmwareVersion?: string;
     workspaceFree?: string;
+    telemetry?: {
+      cpuPercent?: number | null;
+      psramUsedPercent?: number;
+      psramFree?: string;
+    };
   };
 };
 
@@ -323,6 +328,7 @@ function AppsScreen() {
 
 function SettingsScreen() {
   const settings = () => facts().settings ?? {};
+  const telemetry = () => settings().telemetry ?? {};
   const wifi = () => settings().wifi ?? {};
   const networks = () => (wifi().networks ?? []).slice(wifiOffset(), wifiOffset() + 5);
   const detail = () => wifi().ipAddress
@@ -332,6 +338,12 @@ function SettingsScreen() {
     <View class="flex-col w-full h-full bg-slate-50">
       <Header title="SETTINGS" />
       <View class="h-[1060] px-6 pt-5 flex-col">
+        <View class="h-[64] px-5 flex-row items-center justify-between bg-slate-900">
+          <Text class="text-base text-white font-bold">SYSTEM</Text>
+          <Text class="text-base text-orange-500 font-bold">{"CPU " + String(telemetry().cpuPercent ?? "--") + "%"}</Text>
+          <Text class="text-base text-slate-300 font-bold">{"PSRAM " + String(telemetry().psramUsedPercent ?? "--") + "%  ·  " + String(telemetry().psramFree ?? "--") + " FREE"}</Text>
+        </View>
+        <View class="h-[8]" />
         <View class="relative h-[154] px-5 pt-5 flex-col bg-white">
           <Text class="text-lg text-slate-900 font-bold">WI-FI</Text>
           <Text class="pt-3 text-lg text-orange-600 font-bold">{wifi().connectedSsid || "NOT CONNECTED"}</Text>
@@ -613,6 +625,9 @@ mount(() => <Root />);
 queueMicrotask(() => refreshFiles(""));
 
 PocketPi.defineView({
+  telemetryVisible() {
+    return !facts().install && screen() === "settings";
+  },
   tick() {
     return "";
   },
@@ -739,11 +754,11 @@ PocketPi.defineView({
     }
     if (screen() === "settings") {
       const networks = facts().settings?.wifi?.networks ?? [];
-      if (x >= 480 && y >= 126 && y <= 218) return PocketPi.command("device.wifi.scan");
-      if (x >= 620 && y >= 330 && y <= 462) setWifiOffset(Math.max(0, wifiOffset() - 4));
-      else if (x >= 620 && y >= 650 && y <= 782) setWifiOffset(Math.min(Math.max(0, networks.length - 5), wifiOffset() + 4));
-      else if (x < 610 && y >= 330 && y < 790) {
-        const row = Math.floor((y - 330) / 92);
+      if (x >= 480 && y >= 218 && y <= 290) return PocketPi.command("device.wifi.scan");
+      if (x >= 620 && y >= 398 && y <= 530) setWifiOffset(Math.max(0, wifiOffset() - 4));
+      else if (x >= 620 && y >= 718 && y <= 850) setWifiOffset(Math.min(Math.max(0, networks.length - 5), wifiOffset() + 4));
+      else if (x < 610 && y >= 398 && y < 858) {
+        const row = Math.floor((y - 398) / 92);
         const network = networks[wifiOffset() + row];
         if (network) {
           if (!network.secured) return PocketPi.command("device.wifi.connect", { ssid: network.ssid, password: "" });
@@ -751,8 +766,8 @@ PocketPi.defineView({
           setInput("");
           setScreen("keyboard");
         }
-      } else if (x <= 340 && y >= 1010 && y <= 1090) return PocketPi.command("device.wifi.forget");
-      else if (x >= 356 && y >= 1010 && y <= 1090) return PocketPi.command("device.restart");
+      } else if (x <= 340 && y >= 1056 && y <= 1136) return PocketPi.command("device.wifi.forget");
+      else if (x >= 356 && y >= 1056 && y <= 1136) return PocketPi.command("device.restart");
     }
     return "";
   },

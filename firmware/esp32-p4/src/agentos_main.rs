@@ -30,6 +30,8 @@ use super::{
 };
 
 const AGENTOS_FREERTOS_HZ: u32 = 100;
+const SYSTEM_TELEMETRY_INTERVAL: Duration = Duration::from_secs(10);
+const SYSTEM_TELEMETRY_CORES: u64 = 2;
 const UART_INSTALL_BEGIN: &str = "PPI-INSTALL-BEGIN:";
 const UART_INSTALL_CHUNK: &str = "PPI-INSTALL-CHUNK:";
 const UART_INSTALL_READY: &str = "PPI-INSTALL-READY";
@@ -37,6 +39,7 @@ const UART_INSTALL_ACK: &str = "PPI-INSTALL-ACK";
 const UART_INSTALL_UPLOADED: &str = "PPI-INSTALL-UPLOADED";
 const UART_INSTALL_ERROR: &str = "PPI-INSTALL-ERROR:";
 const _: () = assert!(esp_idf_svc::sys::configTICK_RATE_HZ == AGENTOS_FREERTOS_HZ);
+const _: () = assert!(esp_idf_svc::sys::configNUM_CORES as u64 == SYSTEM_TELEMETRY_CORES);
 
 #[derive(Clone)]
 struct Message {
@@ -48,6 +51,96 @@ struct InstallUi {
     state: &'static str,
     descriptor: AppDescriptor,
     error: Option<String>,
+}
+
+struct SystemTelemetry {
+    idle_tasks: [esp_idf_svc::sys::TaskHandle_t; 2],
+    previous: Option<([u32; 2], i64)>,
+    facts: Option<SystemTelemetryFacts>,
+}
+
+struct SystemTelemetryFacts {
+    cpu_percent: Option<u8>,
+    psram_used_percent: u8,
+    psram_free_bytes: usize,
+}
+
+impl SystemTelemetry {
+    fn new() -> Self {
+        let idle_tasks = unsafe {
+            [
+                esp_idf_svc::sys::xTaskGetIdleTaskHandleForCore(0),
+                esp_idf_svc::sys::xTaskGetIdleTaskHandleForCore(1),
+            ]
+        };
+        Self {
+            idle_tasks,
+            previous: None,
+            facts: None,
+        }
+    }
+
+    fn update(&mut self, visible: bool) {
+        if !visible {
+            self.previous = None;
+            return;
+        }
+        let now = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
+        let idle = idle_run_times(self.idle_tasks);
+        let Some((previous_idle, previous_time)) = self.previous else {
+            self.previous = Some((idle, now));
+            self.facts = Some(telemetry_facts(None));
+            return;
+        };
+        let elapsed = now.saturating_sub(previous_time) as u64;
+        if elapsed < SYSTEM_TELEMETRY_INTERVAL.as_micros() as u64 {
+            return;
+        }
+        let idle_elapsed = idle
+            .iter()
+            .zip(previous_idle)
+            .map(|(current, previous)| current.wrapping_sub(previous) as u64)
+            .sum::<u64>();
+        let capacity = elapsed.saturating_mul(SYSTEM_TELEMETRY_CORES);
+        let cpu = (capacity != 0).then(|| {
+            100u64.saturating_sub(idle_elapsed.saturating_mul(100) / capacity)
+                .min(100) as u8
+        });
+        self.previous = Some((idle, now));
+        self.facts = Some(telemetry_facts(cpu));
+    }
+}
+
+fn idle_run_times(tasks: [esp_idf_svc::sys::TaskHandle_t; 2]) -> [u32; 2] {
+    tasks.map(|task| unsafe {
+        let mut status = core::mem::zeroed::<esp_idf_svc::sys::TaskStatus_t>();
+        esp_idf_svc::sys::vTaskGetInfo(
+            task,
+            &mut status,
+            0,
+            esp_idf_svc::sys::eTaskState_eRunning,
+        );
+        status.ulRunTimeCounter
+    })
+}
+
+fn telemetry_facts(cpu_percent: Option<u8>) -> SystemTelemetryFacts {
+    let total = unsafe {
+        esp_idf_svc::sys::heap_caps_get_total_size(esp_idf_svc::sys::MALLOC_CAP_SPIRAM)
+    };
+    let free = unsafe {
+        esp_idf_svc::sys::heap_caps_get_free_size(esp_idf_svc::sys::MALLOC_CAP_SPIRAM)
+    };
+    let psram_used_percent = if total == 0 {
+        0
+    } else {
+        (total.saturating_sub(free).saturating_mul(100) / total).min(100) as u8
+    };
+    SystemTelemetryFacts {
+        cpu_percent,
+        psram_used_percent,
+        psram_free_bytes: free,
+    }
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -172,6 +265,7 @@ pub fn run() -> anyhow::Result<()> {
     let mut supervisor = with_psram_pthread_config(ACTION_STACK_BYTES, || {
         AppSupervisor::new(storage::WORKSPACE_ROOT, catalog, services)
     })?;
+    let mut telemetry = SystemTelemetry::new();
     supervisor.frame()?;
 
     let mut renderer = pocketjs_esp32p4_ppa::Renderer::new(Default::default())
@@ -500,8 +594,11 @@ pub fn run() -> anyhow::Result<()> {
 
         if last_system_refresh.elapsed() >= Duration::from_secs(5) {
             if supervisor.active_id() == pocket_pi_agentos::ROOT_APP_ID {
+                telemetry.update(supervisor.system_telemetry_visible()?);
                 system_dirty = true;
                 redraw = true;
+            } else {
+                telemetry.update(false);
             }
             last_system_refresh = Instant::now();
         }
@@ -518,6 +615,7 @@ pub fn run() -> anyhow::Result<()> {
                 install_ui.as_ref(),
                 pending_uninstall.as_deref(),
                 uninstall_error.as_deref(),
+                telemetry.facts.as_ref(),
             );
             supervisor.update_system(&facts)?;
             system_dirty = false;
@@ -917,6 +1015,7 @@ fn system_facts(
     install: Option<&InstallUi>,
     uninstalling_app: Option<&str>,
     uninstall_error: Option<&str>,
+    telemetry: Option<&SystemTelemetryFacts>,
 ) -> Value {
     let schedule = tools.schedule_projection();
     let schedule_text = match schedule.next_in_seconds {
@@ -1003,6 +1102,11 @@ fn system_facts(
             },
             "firmwareVersion":settings.firmware_version,
             "workspaceFree":settings.workspace_free_bytes.map(|bytes| format!("{} KB", bytes / 1024)),
+            "telemetry":telemetry.map(|telemetry| json!({
+                "cpuPercent":telemetry.cpu_percent,
+                "psramUsedPercent":telemetry.psram_used_percent,
+                "psramFree":format!("{:.1} MB", telemetry.psram_free_bytes as f32 / (1024.0 * 1024.0)),
+            })),
         },
     })
 }

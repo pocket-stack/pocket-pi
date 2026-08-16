@@ -249,7 +249,7 @@
 
   function Header(props = {}) {
     const leading = props.onBack
-      ? Pressable({ onPress: props.onBack, style: { width: 42, height: 64, justify: "center" }, children: Text({ text: "‹", style: { color: "white", fontSize: "title", fontWeight: "bold" } }) })
+      ? Pressable({ onPress: props.onBack, style: { width: 42, height: 64, align: "center", justify: "center" }, children: Text({ text: "‹", style: { color: "white", fontSize: "title", fontWeight: "bold" } }) })
       : Box({ style: { width: 34, height: 34, radius: 8, background: props.accent === "busy" ? "warning" : props.accent === "danger" ? "danger" : props.accent === "none" ? "shellMuted" : "success" } });
     return Row({
       style: { height: 112, paddingX: 24, align: "center", justify: "between", background: "shell" },

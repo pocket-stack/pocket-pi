@@ -2347,6 +2347,13 @@ impl AppSupervisor {
         self.system.update(facts)
     }
 
+    pub fn system_telemetry_visible(&self) -> Result<bool> {
+        if self.active_app.is_some() {
+            return Ok(false);
+        }
+        self.system.call_method("telemetryVisible", ())
+    }
+
     pub fn tap(&self, x: u16, y: u16) -> Result<Value> {
         let event = self.active().tap(x, y)?;
         if event.get("type").and_then(Value::as_str) == Some("command") {
