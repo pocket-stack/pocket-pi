@@ -6,6 +6,7 @@
   let actionRunning = false;
   let view = null;
   let database = -1;
+  let resources = Object.freeze({});
   const bindings = [];
 
   function fail(message) {
@@ -117,6 +118,12 @@
     for (const binding of bindings) binding.refresh();
   }
 
+  function freeze(value) {
+    if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
+    for (const child of Object.values(value)) freeze(child);
+    return Object.freeze(value);
+  }
+
   globalThis.PocketPi = Object.freeze({
     frameworkApi: 1,
     defineActions,
@@ -125,6 +132,12 @@
     command: (command, args = {}) => ({ type: "command", command, args }),
     navigate: (app) => ({ type: "command", command: "apps.open", args: { app } }),
     data: Object.freeze({ query: rows, exec, transaction }),
+    resources: Object.freeze({
+      get(name) {
+        if (!Object.hasOwn(resources, name)) fail(`unknown resource: ${name}`);
+        return resources[name];
+      },
+    }),
     services: Object.freeze({ call: callService }),
     actionContext: Object.freeze({
       remainingMs() {
@@ -139,9 +152,10 @@
   });
 
   globalThis.PocketPiSystem = Object.freeze({
-    configure(id) {
+    configure(id, resourceLine = "{}") {
       if (appId) fail("Guest already configured");
       appId = id;
+      resources = freeze(JSON.parse(resourceLine));
     },
     actionNames() {
       return JSON.stringify(Object.keys(actions ?? {}));

@@ -343,6 +343,7 @@ function boot(configJson: string): void {
     } else if (event.type === "message_end") {
       compact.role = event.message?.role;
       compact.stopReason = event.message?.stopReason;
+      compact.errorMessage = event.message?.errorMessage;
     } else if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {
       compact.name = event.toolName;
       compact.toolCallId = event.toolCallId;

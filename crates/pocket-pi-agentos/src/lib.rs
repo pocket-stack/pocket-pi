@@ -27,6 +27,8 @@ pub const POCKETJS_REVISION: &str = "e12cf12f82cc60b636368119d49a06eb9ed2a3d5";
 pub const SYSTEM_FRAMEWORK_API: u32 = 1;
 const VIEWPORT: (f32, f32) = (720.0, 1280.0);
 pub const MAX_POCKETAPP_BYTES: usize = 2 * 1024 * 1024;
+const MAX_JSON_RESOURCE_BYTES: usize = 256 * 1024;
+const MAX_RESOURCE_BYTES: usize = 512 * 1024;
 const VIEW_RUNTIME_LIMIT: usize = 3;
 const ACTION_RUNTIME_LIMIT: usize = 3;
 
@@ -114,11 +116,19 @@ fn new_action_deadline() -> Instant {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AppDescriptor {
+    #[serde(default)]
+    pub format: u32,
+    #[serde(default)]
+    pub framework_api: u32,
     pub id: String,
-    #[serde(skip)]
+    #[serde(default)]
     pub title: String,
     pub description: String,
     pub version: String,
+    #[serde(default)]
+    pub schema_version: u32,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
     #[serde(default)]
     pub tool_namespace: String,
     #[serde(default)]
@@ -129,6 +139,16 @@ pub struct AppDescriptor {
     pub schedules: Vec<AppSchedule>,
     #[serde(default)]
     pub native_services: NativeServices,
+    #[serde(default)]
+    pub resources: BTreeMap<String, AppResource>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AppResource {
+    pub path: String,
+    #[serde(rename = "type")]
+    pub kind: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -203,20 +223,6 @@ pub fn stage_pocketapp_bytes(bytes: &[u8], staging_dir: &Path) -> Result<StagedA
     );
     std::fs::create_dir_all(staging_dir)?;
     let result = (|| -> Result<StagedApp> {
-        let allowed = BTreeSet::from([
-            "app.json",
-            "pocket.json",
-            "plan.json",
-            "app.js",
-            "app.pak",
-            "actions.js",
-            "credentials.json",
-        ]);
-        let required =
-            BTreeSet::from(["app.json", "pocket.json", "plan.json", "app.js", "app.pak"])
-                .into_iter()
-                .map(str::to_owned)
-                .collect::<BTreeSet<_>>();
         let mut seen = BTreeSet::new();
         let mut credentials: BTreeMap<String, String> = BTreeMap::new();
         let mut total = 0usize;
@@ -255,17 +261,10 @@ pub fn stage_pocketapp_bytes(bytes: &[u8], staging_dir: &Path) -> Result<StagedA
                 .iter()
                 .position(|byte| *byte == 0)
                 .unwrap_or(100);
-            let name = std::str::from_utf8(&header[..name_end])
-                .ok()
-                .filter(|name| !name.is_empty() && !name.contains('/') && !name.contains('\\'))
-                .ok_or_else(|| anyhow!("App package contains an invalid path"))?
-                .to_owned();
+            let name = std::str::from_utf8(&header[..name_end])?;
+            let path = package_file_path(name)?;
             anyhow::ensure!(
-                allowed.contains(name.as_str()),
-                "unexpected App package file: {name}"
-            );
-            anyhow::ensure!(
-                seen.insert(name.clone()),
+                seen.insert(name.to_owned()),
                 "duplicate App package file: {name}"
             );
             let size = usize::try_from(tar_octal(&header[124..136])?)
@@ -288,7 +287,11 @@ pub fn stage_pocketapp_bytes(bytes: &[u8], staging_dir: &Path) -> Result<StagedA
                     "credentials.json contains invalid credentials"
                 );
             } else {
-                let mut file = std::fs::File::create(staging_dir.join(&name))?;
+                let path = staging_dir.join(path);
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let mut file = std::fs::File::create(path)?;
                 file.write_all(contents)?;
                 file.sync_all()?;
             }
@@ -301,10 +304,7 @@ pub fn stage_pocketapp_bytes(bytes: &[u8], staging_dir: &Path) -> Result<StagedA
                 .ok_or_else(|| anyhow!("App package is too large"))?;
         }
         anyhow::ensure!(finished, "App package is missing its end marker");
-        anyhow::ensure!(
-            required.is_subset(&seen),
-            "App package is missing required files"
-        );
+        anyhow::ensure!(seen.contains("app.json"), "App package is missing app.json");
         let descriptor_id: String =
             serde_json::from_slice::<Value>(&std::fs::read(staging_dir.join("app.json"))?)?["id"]
                 .as_str()
@@ -314,7 +314,7 @@ pub fn stage_pocketapp_bytes(bytes: &[u8], staging_dir: &Path) -> Result<StagedA
             descriptor_id != ROOT_APP_ID,
             "the Pi Agent System App is built into Firmware"
         );
-        let app = load_release(staging_dir, &descriptor_id, false)?;
+        let app = load_ordinary_release(staging_dir, &descriptor_id)?;
         validate_package_credentials(&app.descriptor, &credentials)?;
         Ok(StagedApp {
             descriptor: app.descriptor,
@@ -326,6 +326,35 @@ pub fn stage_pocketapp_bytes(bytes: &[u8], staging_dir: &Path) -> Result<StagedA
         let _ = std::fs::remove_dir_all(staging_dir);
     }
     result
+}
+
+fn package_file_path(name: &str) -> Result<PathBuf> {
+    const ROOT_FILES: &[&str] = &[
+        "app.json",
+        "pocket.json",
+        "plan.json",
+        "app.js",
+        "app.pak",
+        "actions.js",
+        "schema.sql",
+        "view.js",
+        "credentials.json",
+    ];
+    if ROOT_FILES.contains(&name) {
+        return Ok(PathBuf::from(name));
+    }
+    let asset = name
+        .strip_prefix("assets/")
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| anyhow!("unexpected App package file: {name}"))?;
+    anyhow::ensure!(
+        !name.contains('\\') && name.len() <= 100,
+        "invalid App asset path: {name}"
+    );
+    for component in asset.split('/') {
+        ensure_safe_component(component, "App asset path")?;
+    }
+    Ok(PathBuf::from(name))
 }
 
 fn tar_octal(field: &[u8]) -> Result<u64> {
@@ -390,8 +419,16 @@ pub const fn system_view_pak() -> &'static [u8] {
 #[derive(Clone, Debug)]
 struct InstalledApp {
     descriptor: AppDescriptor,
-    manifest: Value,
     release_dir: PathBuf,
+    release: ReleaseKind,
+    resources: Arc<str>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReleaseKind {
+    SystemBundle,
+    OrdinaryBundle,
+    Source,
 }
 
 #[derive(Clone, Debug)]
@@ -416,7 +453,7 @@ impl InstalledAppIndex {
         seed_system_app(workspace, system)?;
         seed_system_runtime(workspace)?;
         let mut apps = BTreeMap::new();
-        let root = load_release(&workspace.join("system/app"), ROOT_APP_ID, true)?;
+        let root = load_system_release(&workspace.join("system/app"))?;
         apps.insert(ROOT_APP_ID.to_owned(), root);
 
         let apps_root = workspace.join("apps");
@@ -435,7 +472,7 @@ impl InstalledAppIndex {
                 if !release.is_dir() {
                     continue;
                 }
-                let installed = load_release(&release, &app_id, false)?;
+                let installed = load_ordinary_release(&release, &app_id)?;
                 anyhow::ensure!(
                     apps.insert(app_id.clone(), installed).is_none(),
                     "duplicate installed App id: {app_id}"
@@ -721,7 +758,28 @@ fn validate_package_credentials(
     Ok(())
 }
 
-fn load_release(release_dir: &Path, expected_id: &str, system: bool) -> Result<InstalledApp> {
+fn load_system_release(release_dir: &Path) -> Result<InstalledApp> {
+    load_bundle_release(release_dir, ROOT_APP_ID, true)
+}
+
+fn load_ordinary_release(release_dir: &Path, expected_id: &str) -> Result<InstalledApp> {
+    let descriptor: Value = serde_json::from_slice(
+        &std::fs::read(release_dir.join("app.json")).context("read installed app.json")?,
+    )
+    .context("parse installed app.json")?;
+    if descriptor.get("format").and_then(Value::as_u64) == Some(1) {
+        load_source_release(release_dir, expected_id)
+    } else {
+        load_bundle_release(release_dir, expected_id, false)
+    }
+}
+
+fn load_bundle_release(
+    release_dir: &Path,
+    expected_id: &str,
+    system: bool,
+) -> Result<InstalledApp> {
+    validate_bundle_root(release_dir, system)?;
     for required in ["app.json", "pocket.json", "plan.json", "app.js", "app.pak"] {
         anyhow::ensure!(
             release_dir.join(required).is_file(),
@@ -742,7 +800,6 @@ fn load_release(release_dir: &Path, expected_id: &str, system: bool) -> Result<I
     )
     .context("parse installed app.json")?;
     anyhow::ensure!(descriptor.id == expected_id, "installed App id mismatch");
-    ensure_safe_component(&descriptor.id, "App id")?;
     let manifest: Value = serde_json::from_slice(
         &std::fs::read(release_dir.join("pocket.json")).context("read installed pocket.json")?,
     )
@@ -761,9 +818,118 @@ fn load_release(release_dir: &Path, expected_id: &str, system: bool) -> Result<I
         .filter(|title| !title.is_empty())
         .ok_or_else(|| anyhow!("App {} pocket.json is missing title", descriptor.id))?
         .to_owned();
+    descriptor.capabilities = manifest
+        .pointer("/engine/capabilities/requires")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|value| value.as_str().map(str::to_owned))
+        .collect();
     anyhow::ensure!(
         manifest.get("version").and_then(Value::as_str) == Some(descriptor.version.as_str()),
         "App {} version differs between app.json and pocket.json",
+        descriptor.id
+    );
+    validate_descriptor(&mut descriptor)?;
+    anyhow::ensure!(
+        (descriptor.tools.is_empty() && descriptor.schedules.is_empty())
+            || release_dir.join("actions.js").is_file(),
+        "App {} Actions require actions.js",
+        descriptor.id
+    );
+    let plan: Value = serde_json::from_slice(
+        &std::fs::read(release_dir.join("plan.json")).context("read installed plan.json")?,
+    )
+    .context("parse installed plan.json")?;
+    anyhow::ensure!(
+        plan.get("runtime").and_then(Value::as_str) == Some("pocket-pi-agentos")
+            && plan.get("pocketjsRevision").and_then(Value::as_str) == Some(POCKETJS_REVISION)
+            && plan.get("frameworkApi").and_then(Value::as_u64)
+                == Some(u64::from(SYSTEM_FRAMEWORK_API))
+            && plan.get("app").and_then(Value::as_str) == Some(descriptor.id.as_str()),
+        "App {} plan.json does not target this runtime",
+        descriptor.id
+    );
+    Ok(InstalledApp {
+        descriptor,
+        release_dir: release_dir.to_owned(),
+        release: if system {
+            ReleaseKind::SystemBundle
+        } else {
+            ReleaseKind::OrdinaryBundle
+        },
+        resources: Arc::from("{}"),
+    })
+}
+
+fn validate_bundle_root(release_dir: &Path, system: bool) -> Result<()> {
+    let mut allowed = BTreeSet::from(["app.json", "pocket.json", "plan.json", "app.js", "app.pak"]);
+    allowed.insert(if system { "agent.js" } else { "actions.js" });
+    for entry in std::fs::read_dir(release_dir)? {
+        let entry = entry?;
+        let name = entry
+            .file_name()
+            .to_str()
+            .ok_or_else(|| anyhow!("App Bundle contains a non-UTF-8 file"))?
+            .to_owned();
+        anyhow::ensure!(
+            entry.file_type()?.is_file() && allowed.contains(name.as_str()),
+            "unexpected App Bundle file: {name}"
+        );
+    }
+    Ok(())
+}
+
+fn load_source_release(release_dir: &Path, expected_id: &str) -> Result<InstalledApp> {
+    for required in ["app.json", "schema.sql", "actions.js", "view.js"] {
+        anyhow::ensure!(
+            release_dir.join(required).is_file(),
+            "App {expected_id} source is missing {required}"
+        );
+    }
+    let mut descriptor: AppDescriptor = serde_json::from_slice(
+        &std::fs::read(release_dir.join("app.json")).context("read source app.json")?,
+    )
+    .context("parse source app.json")?;
+    anyhow::ensure!(descriptor.id == expected_id, "installed App id mismatch");
+    anyhow::ensure!(
+        descriptor.format == 1,
+        "App {} requires format 1",
+        descriptor.id
+    );
+    anyhow::ensure!(
+        descriptor.framework_api == SYSTEM_FRAMEWORK_API,
+        "App {} requires unsupported Framework API {}",
+        descriptor.id,
+        descriptor.framework_api
+    );
+    anyhow::ensure!(
+        descriptor.schema_version > 0 && descriptor.schema_version <= i32::MAX as u32,
+        "App {} has an invalid schemaVersion",
+        descriptor.id
+    );
+    validate_descriptor(&mut descriptor)?;
+    validate_source_root(release_dir)?;
+    let resources = load_source_resources(release_dir, &descriptor.resources)?;
+    Ok(InstalledApp {
+        descriptor,
+        release_dir: release_dir.to_owned(),
+        release: ReleaseKind::Source,
+        resources: resources.into(),
+    })
+}
+
+fn validate_descriptor(descriptor: &mut AppDescriptor) -> Result<()> {
+    ensure_safe_component(&descriptor.id, "App id")?;
+    anyhow::ensure!(
+        !descriptor.title.is_empty(),
+        "App {} has no title",
+        descriptor.id
+    );
+    anyhow::ensure!(
+        !descriptor.version.is_empty(),
+        "App {} has no version",
         descriptor.id
     );
     if descriptor.tool_namespace.is_empty() {
@@ -781,6 +947,15 @@ fn load_release(release_dir: &Path, expected_id: &str, system: bool) -> Result<I
         "App {} declares invalid provider operations",
         descriptor.id
     );
+    let capabilities = descriptor.capabilities.iter().collect::<BTreeSet<_>>();
+    anyhow::ensure!(
+        capabilities.len() == descriptor.capabilities.len()
+            && capabilities.iter().all(|capability| {
+                matches!(capability.as_str(), "data.fs" | "data.sqlite" | "net.http")
+            }),
+        "App {} declares unsupported capabilities",
+        descriptor.id
+    );
     for schedule in &descriptor.schedules {
         anyhow::ensure!(
             !schedule.action.is_empty() && !schedule.action.contains('.'),
@@ -790,42 +965,106 @@ fn load_release(release_dir: &Path, expected_id: &str, system: bool) -> Result<I
             schedule.action
         );
     }
-    anyhow::ensure!(
-        (descriptor.tools.is_empty() && descriptor.schedules.is_empty())
-            || release_dir.join("actions.js").is_file(),
-        "App {} Actions require actions.js",
-        descriptor.id
-    );
-    for capability in manifest
-        .pointer("/engine/capabilities/requires")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-    {
+    Ok(())
+}
+
+fn validate_source_root(release_dir: &Path) -> Result<()> {
+    let allowed = BTreeSet::from(["app.json", "schema.sql", "actions.js", "view.js", "assets"]);
+    for entry in std::fs::read_dir(release_dir)? {
+        let entry = entry?;
+        let name = entry
+            .file_name()
+            .to_str()
+            .ok_or_else(|| anyhow!("source App contains a non-UTF-8 file"))?
+            .to_owned();
         anyhow::ensure!(
-            matches!(capability, "data.fs" | "data.sqlite" | "net.http"),
-            "unsupported App capability: {capability}"
+            allowed.contains(name.as_str()),
+            "unexpected source App file: {name}"
+        );
+        let kind = entry.file_type()?;
+        anyhow::ensure!(
+            (name == "assets" && kind.is_dir()) || (name != "assets" && kind.is_file()),
+            "invalid source App file: {name}"
         );
     }
-    let plan: Value = serde_json::from_slice(
-        &std::fs::read(release_dir.join("plan.json")).context("read installed plan.json")?,
-    )
-    .context("parse installed plan.json")?;
+    Ok(())
+}
+
+fn load_source_resources(
+    release_dir: &Path,
+    declarations: &BTreeMap<String, AppResource>,
+) -> Result<String> {
+    let actual = collect_asset_files(&release_dir.join("assets"))?;
+    let declared = declarations
+        .values()
+        .map(|resource| resource.path.clone())
+        .collect::<BTreeSet<_>>();
     anyhow::ensure!(
-        plan.get("runtime").and_then(Value::as_str) == Some("pocket-pi-agentos")
-            && plan.get("pocketjsRevision").and_then(Value::as_str) == Some(POCKETJS_REVISION)
-            && plan.get("frameworkApi").and_then(Value::as_u64)
-                == Some(u64::from(SYSTEM_FRAMEWORK_API))
-            && plan.get("app").and_then(Value::as_str) == Some(descriptor.id.as_str()),
-        "App {} plan.json does not target this runtime",
-        descriptor.id
+        declared.len() == declarations.len() && actual == declared,
+        "source App assets must exactly match app.json resources"
     );
-    Ok(InstalledApp {
-        descriptor,
-        manifest,
-        release_dir: release_dir.to_owned(),
-    })
+    let mut resources = BTreeMap::new();
+    let mut total = 0usize;
+    for (name, resource) in declarations {
+        ensure_safe_component(name, "App resource name")?;
+        validate_resource_path(&resource.path)?;
+        anyhow::ensure!(
+            resource.kind == "json",
+            "unsupported App resource type: {}",
+            resource.kind
+        );
+        let path = release_dir.join(&resource.path);
+        let size = usize::try_from(std::fs::metadata(&path)?.len())?;
+        anyhow::ensure!(
+            size <= MAX_JSON_RESOURCE_BYTES,
+            "App JSON resource is too large"
+        );
+        total = total.saturating_add(size);
+        anyhow::ensure!(total <= MAX_RESOURCE_BYTES, "App resources are too large");
+        resources.insert(
+            name.clone(),
+            serde_json::from_slice::<Value>(&std::fs::read(path)?)
+                .with_context(|| format!("parse App resource {name}"))?,
+        );
+    }
+    Ok(serde_json::to_string(&resources)?)
+}
+
+fn collect_asset_files(root: &Path) -> Result<BTreeSet<String>> {
+    if !root.exists() {
+        return Ok(BTreeSet::new());
+    }
+    let mut pending = vec![(root.to_owned(), "assets".to_owned())];
+    let mut files = BTreeSet::new();
+    while let Some((directory, prefix)) = pending.pop() {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            let name = entry
+                .file_name()
+                .to_str()
+                .ok_or_else(|| anyhow!("App asset path is not UTF-8"))?
+                .to_owned();
+            ensure_safe_component(&name, "App asset path")?;
+            let path = format!("{prefix}/{name}");
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                pending.push((entry.path(), path));
+            } else {
+                anyhow::ensure!(kind.is_file(), "App asset is not a regular file: {path}");
+                files.insert(path);
+            }
+        }
+    }
+    Ok(files)
+}
+
+fn validate_resource_path(path: &str) -> Result<()> {
+    let normalized = package_file_path(path)?;
+    anyhow::ensure!(
+        path.starts_with("assets/") && normalized == Path::new(path),
+        "invalid App resource path: {path}"
+    );
+    Ok(())
 }
 
 fn ensure_safe_component(value: &str, label: &str) -> Result<()> {
@@ -841,7 +1080,7 @@ fn ensure_safe_component(value: &str, label: &str) -> Result<()> {
     Ok(())
 }
 
-/// The native transport/security boundary used by App bundles. Implementations
+/// The native transport/security boundary used by Apps. Implementations
 /// own TLS, credentials and MCP sessions; Apps own operation selection,
 /// normalization, SQLite and View behavior.
 pub trait AppServiceHost: Send + Sync {
@@ -959,6 +1198,7 @@ struct ActionConfig {
     app_id: String,
     source_path: PathBuf,
     framework: Arc<str>,
+    resources: Arc<str>,
     database: SharedDb,
     revision: AppRevision,
     net: bool,
@@ -1087,7 +1327,7 @@ impl ActionRuntime {
             )?;
             None
         };
-        install_system_framework(&guest, &config.app_id, &config.framework)?;
+        install_system_framework(&guest, &config.app_id, &config.framework, &config.resources)?;
         let source = std::fs::read_to_string(&config.source_path)
             .with_context(|| format!("read {} Action", config.app_id))?;
         guest.eval(&format!("{}-actions", config.app_id), &source)?;
@@ -1359,9 +1599,17 @@ impl ActionRunner {
     }
 }
 
+#[derive(Clone)]
+struct AppRuntimeAssets {
+    framework: Arc<str>,
+    view_sdk: Arc<str>,
+    view_pak: PathBuf,
+}
+
 struct ViewRuntime {
     guest: Guest,
     surface: UiSurface,
+    frame: bool,
     _fs: Rc<RefCell<FsModule>>,
     _db: SharedDb,
     revision: AppRevision,
@@ -1375,7 +1623,7 @@ struct ViewRuntime {
 impl ViewRuntime {
     fn load(
         app: &InstalledApp,
-        framework: &str,
+        assets: &AppRuntimeAssets,
         fs_root: &Path,
         tmp_root: &Path,
         db: SharedDb,
@@ -1384,8 +1632,13 @@ impl ViewRuntime {
         std::fs::create_dir_all(fs_root)?;
         let guest = new_app_guest().context("create App View Guest")?;
         let surface = UiSurface::new(VIEWPORT);
-        let pak = std::fs::read(app.release_dir.join("app.pak")).context("read App pak")?;
-        surface.feed_pak(&pak);
+        if app.release == ReleaseKind::Source {
+            let pak = std::fs::read(&assets.view_pak).context("read Pocket Pi View resources")?;
+            surface.feed_pak(&pak);
+        } else {
+            let pak = std::fs::read(app.release_dir.join("app.pak")).context("read App pak")?;
+            surface.feed_pak(&pak);
+        }
         surface.mount(&guest)?;
 
         let fs = Rc::new(RefCell::new(FsModule::with_quota(
@@ -1397,23 +1650,35 @@ impl ViewRuntime {
         )));
         pocket_fs::mount(&guest, fs.clone())?;
         mount_db(&guest, db.clone(), false)?;
-        install_system_framework(&guest, &app.descriptor.id, framework)?;
+        install_system_framework(
+            &guest,
+            &app.descriptor.id,
+            &assets.framework,
+            &app.resources,
+        )?;
 
-        let source =
-            std::fs::read_to_string(app.release_dir.join("app.js")).context("read App bundle")?;
-        eval_bundle(&guest, &app.descriptor.id, &source)?;
+        let entry = if app.release == ReleaseKind::Source {
+            guest.eval("pocket-pi-view-sdk", &assets.view_sdk)?;
+            "view.js"
+        } else {
+            "app.js"
+        };
+        let source = std::fs::read_to_string(app.release_dir.join(entry))
+            .with_context(|| format!("read {} {entry}", app.descriptor.id))?;
+        guest.eval(&format!("{}-{entry}", app.descriptor.id), &source)?;
         anyhow::ensure!(
             guest.with(|ctx| -> Result<bool> {
                 let system: Object = ctx.globals().get("PocketPiSystem")?;
                 let has_view: Function = system.get("hasView")?;
                 Ok(has_view.call::<_, bool>(())?)
             })?,
-            "{} bundle installed no View",
+            "{} installed no View",
             app.descriptor.id
         );
+        let frame = app.release != ReleaseKind::Source;
         anyhow::ensure!(
-            guest.has_frame(),
-            "{} bundle installed no frame()",
+            !frame || guest.has_frame(),
+            "{} installed no frame()",
             app.descriptor.id
         );
 
@@ -1421,6 +1686,7 @@ impl ViewRuntime {
         Ok(Self {
             guest,
             surface,
+            frame,
             _fs: fs,
             _db: db,
             revision,
@@ -1459,7 +1725,9 @@ impl ViewRuntime {
             }
         }
         if render_surface {
-            self.guest.frame(0)?;
+            if self.frame {
+                self.guest.frame(0)?;
+            }
             self.surface.tick();
         }
         Ok(())
@@ -1512,11 +1780,12 @@ impl ViewRuntime {
     }
 }
 
-fn eval_bundle(guest: &Guest, label: &str, source: &str) -> Result<()> {
-    guest.eval(label, source)
-}
-
-fn install_system_framework(guest: &Guest, app_id: &str, source: &str) -> Result<()> {
+fn install_system_framework(
+    guest: &Guest,
+    app_id: &str,
+    source: &str,
+    resources: &str,
+) -> Result<()> {
     guest.eval("pocket-pi-system-framework", source)?;
     guest.with(|ctx| -> Result<()> {
         let public: Object = ctx.globals().get("PocketPi")?;
@@ -1527,7 +1796,7 @@ fn install_system_framework(guest: &Guest, app_id: &str, source: &str) -> Result
         );
         let system: Object = ctx.globals().get("PocketPiSystem")?;
         let configure: Function = system.get("configure")?;
-        configure.call::<_, ()>((app_id,))?;
+        configure.call::<_, ()>((app_id, resources))?;
         Ok(())
     })
 }
@@ -1693,7 +1962,7 @@ pub struct AppSupervisor {
     workspace: PathBuf,
     catalog: InstalledAppIndex,
     services: Arc<dyn AppServiceHost>,
-    framework: Arc<str>,
+    assets: AppRuntimeAssets,
     action_runner: ActionRunner,
     databases: BTreeMap<String, SharedDb>,
     revisions: BTreeMap<String, AppRevision>,
@@ -1715,19 +1984,27 @@ impl AppSupervisor {
         services: Arc<dyn AppServiceHost>,
     ) -> Result<Self> {
         let workspace = workspace.into();
-        let framework: Arc<str> = std::fs::read_to_string(workspace.join("system/framework.js"))
-            .context("read Pocket Pi System Framework")?
-            .into();
+        let assets = AppRuntimeAssets {
+            framework: std::fs::read_to_string(workspace.join("system/framework.js"))
+                .context("read Pocket Pi System Framework")?
+                .into(),
+            view_sdk: std::fs::read_to_string(workspace.join("system/view-sdk.js"))
+                .context("read Pocket Pi View SDK")?
+                .into(),
+            view_pak: workspace.join("system/view-sdk.pak"),
+        };
         let schedules = AppScheduleStore::load(&workspace, &catalog)?;
         let mut databases = BTreeMap::new();
         let mut revisions = BTreeMap::new();
-        for descriptor in catalog.descriptors() {
+        for app in catalog.apps() {
+            let descriptor = &app.descriptor;
             let (_, db_root, _) = data_paths(&workspace, &descriptor.id);
             std::fs::create_dir_all(&db_root)?;
-            databases.insert(
-                descriptor.id.clone(),
-                Arc::new(Mutex::new(DbModule::new(DbStorage::Dir(db_root)))),
-            );
+            let database = Arc::new(Mutex::new(DbModule::new(DbStorage::Dir(db_root))));
+            if app.release == ReleaseKind::Source {
+                prepare_source_database(&app, &database)?;
+            }
+            databases.insert(descriptor.id.clone(), database);
             revisions.insert(descriptor.id.clone(), Arc::new(AtomicU32::new(0)));
         }
         let action_configs = catalog
@@ -1739,7 +2016,8 @@ impl AppSupervisor {
                 source_path.is_file().then(|| ActionConfig {
                     app_id: descriptor.id.clone(),
                     source_path,
-                    framework: framework.clone(),
+                    framework: assets.framework.clone(),
+                    resources: app.resources.clone(),
                     database: databases
                         .get(&descriptor.id)
                         .expect("database created for descriptor")
@@ -1748,13 +2026,10 @@ impl AppSupervisor {
                         .get(&descriptor.id)
                         .expect("revision created for descriptor")
                         .clone(),
-                    net: app
-                        .manifest
-                        .pointer("/engine/capabilities/requires")
-                        .and_then(Value::as_array)
-                        .is_some_and(|capabilities| {
-                            capabilities.iter().any(|value| value == "net.http")
-                        }),
+                    net: descriptor
+                        .capabilities
+                        .iter()
+                        .any(|capability| capability == "net.http"),
                 })
             })
             .collect();
@@ -1765,7 +2040,7 @@ impl AppSupervisor {
             &catalog,
             &databases,
             &revisions,
-            &framework,
+            &assets,
             ROOT_APP_ID,
         )?;
         log::info!("Pi Agent System App loaded");
@@ -1773,7 +2048,7 @@ impl AppSupervisor {
             workspace,
             catalog,
             services,
-            framework,
+            assets,
             action_runner,
             databases,
             revisions,
@@ -1844,7 +2119,7 @@ impl AppSupervisor {
         credentials: BTreeMap<String, String>,
         app_root: &Path,
     ) -> Result<AppDescriptor> {
-        let mut app = load_release(staging_release, &descriptor.id, false)?;
+        let mut app = load_ordinary_release(staging_release, &descriptor.id)?;
         validate_package_credentials(&app.descriptor, &credentials)?;
         self.catalog.validate_insert(&app)?;
 
@@ -1852,18 +2127,22 @@ impl AppSupervisor {
         std::fs::create_dir_all(&db_root)?;
         std::fs::create_dir_all(&tmp_root)?;
         let database = Arc::new(Mutex::new(DbModule::new(DbStorage::Dir(db_root))));
+        if app.release == ReleaseKind::Source {
+            prepare_source_database(&app, &database)?;
+        }
         let revision = Arc::new(AtomicU32::new(0));
         let net = app
-            .manifest
-            .pointer("/engine/capabilities/requires")
-            .and_then(Value::as_array)
-            .is_some_and(|capabilities| capabilities.iter().any(|value| value == "net.http"));
+            .descriptor
+            .capabilities
+            .iter()
+            .any(|capability| capability == "net.http");
         let staged_action = staging_release.join("actions.js");
         if staged_action.is_file() {
             let candidate = ActionConfig {
                 app_id: descriptor.id.clone(),
                 source_path: staged_action,
-                framework: self.framework.clone(),
+                framework: self.assets.framework.clone(),
+                resources: app.resources.clone(),
                 database: database.clone(),
                 revision: revision.clone(),
                 net,
@@ -1873,7 +2152,7 @@ impl AppSupervisor {
         }
         let runtime = ViewRuntime::load(
             &app,
-            &self.framework,
+            &self.assets,
             &fs_root,
             &tmp_root,
             database.clone(),
@@ -1894,7 +2173,8 @@ impl AppSupervisor {
             self.action_runner.register(ActionConfig {
                 app_id: descriptor.id.clone(),
                 source_path: release_dir.join("actions.js"),
-                framework: self.framework.clone(),
+                framework: self.assets.framework.clone(),
+                resources: app.resources.clone(),
                 database: database.clone(),
                 revision: revision.clone(),
                 net,
@@ -2005,7 +2285,7 @@ impl AppSupervisor {
                     &self.catalog,
                     &self.databases,
                     &self.revisions,
-                    &self.framework,
+                    &self.assets,
                     app_id,
                 )?
             }
@@ -2227,7 +2507,7 @@ fn load_runtime(
     catalog: &InstalledAppIndex,
     databases: &BTreeMap<String, SharedDb>,
     revisions: &BTreeMap<String, AppRevision>,
-    framework: &str,
+    assets: &AppRuntimeAssets,
     app_id: &str,
 ) -> Result<ViewRuntime> {
     let app = catalog
@@ -2242,7 +2522,7 @@ fn load_runtime(
         .get(app_id)
         .cloned()
         .ok_or_else(|| anyhow!("App {app_id} has no revision owner"))?;
-    ViewRuntime::load(&app, framework, &fs_root, &tmp_root, db, revision)
+    ViewRuntime::load(&app, assets, &fs_root, &tmp_root, db, revision)
         .with_context(|| format!("load App {app_id}"))
 }
 
@@ -2257,6 +2537,50 @@ fn data_paths(workspace: &Path, app_id: &str) -> (PathBuf, PathBuf, PathBuf) {
         let root = workspace.join("apps").join(app_id);
         (root.join("data"), root.join("data"), root.join("tmp"))
     }
+}
+
+fn prepare_source_database(app: &InstalledApp, database: &SharedDb) -> Result<()> {
+    let mut database = database
+        .lock()
+        .map_err(|_| anyhow!("App database lock was poisoned"))?;
+    let handle = database.open(&app.descriptor.id);
+    anyhow::ensure!(handle >= 0, "open {}.sqlite", app.descriptor.id);
+    let version: Value =
+        serde_json::from_str(&database.query(handle, "PRAGMA user_version", "[]"))?;
+    anyhow::ensure!(
+        version.get("error").is_none(),
+        "read {} schema version",
+        app.descriptor.id
+    );
+    let current = version["rows"][0][0]
+        .as_u64()
+        .ok_or_else(|| anyhow!("invalid {} schema version", app.descriptor.id))?;
+    let expected = u64::from(app.descriptor.schema_version);
+    if current == expected {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        current == 0,
+        "App {} data schema is {current}; source requires {expected}",
+        app.descriptor.id
+    );
+    let schema = std::fs::read_to_string(app.release_dir.join("schema.sql"))
+        .context("read source schema.sql")?;
+    anyhow::ensure!(
+        !schema.trim().is_empty(),
+        "App {} schema.sql is empty",
+        app.descriptor.id
+    );
+    let sql = format!(
+        "BEGIN IMMEDIATE;\n{schema}\nPRAGMA user_version={};\nCOMMIT;",
+        app.descriptor.schema_version
+    );
+    if database.exec(handle, &sql) != 0 {
+        let error = database.last_error(handle);
+        let _ = database.exec(handle, "ROLLBACK");
+        anyhow::bail!("initialize {} schema: {error}", app.descriptor.id);
+    }
+    Ok(())
 }
 
 fn seed_system_app(workspace: &Path, bundle: SystemAppBundle) -> Result<()> {
@@ -2728,10 +3052,14 @@ mod tests {
     #[test]
     fn package_credentials_must_exactly_match_the_descriptor() {
         let descriptor = AppDescriptor {
+            format: 0,
+            framework_api: 0,
             id: "search".into(),
             title: "Search".into(),
             description: "Research".into(),
             version: "1".into(),
+            schema_version: 0,
+            capabilities: Vec::new(),
             tool_namespace: "search".into(),
             tools: Vec::new(),
             provider_operations: Vec::new(),
@@ -2749,6 +3077,7 @@ mod tests {
                 }],
                 mcp: Vec::new(),
             },
+            resources: BTreeMap::new(),
         };
 
         assert!(validate_package_credentials(&descriptor, &BTreeMap::new()).is_err());
@@ -2782,7 +3111,7 @@ mod tests {
         let guest = new_app_guest().unwrap();
         let database = Arc::new(Mutex::new(DbModule::new(DbStorage::Memory)));
         mount_db(&guest, database, false).unwrap();
-        install_system_framework(&guest, "projection-test", system_framework()).unwrap();
+        install_system_framework(&guest, "projection-test", system_framework(), "{}").unwrap();
 
         let error = guest
             .eval(
@@ -2800,7 +3129,7 @@ mod tests {
         let surface = UiSurface::new(VIEWPORT);
         surface.feed_pak(system_view_pak());
         surface.mount(&guest).unwrap();
-        install_system_framework(&guest, "raw-view-test", system_framework()).unwrap();
+        install_system_framework(&guest, "raw-view-test", system_framework(), "{}").unwrap();
         guest.eval("pocket-pi-view-sdk", system_view_sdk()).unwrap();
         guest
             .eval(
@@ -2879,7 +3208,7 @@ mod tests {
             );
         }
         mount_db(&guest, database.clone(), false).unwrap();
-        install_system_framework(&guest, "raw-projection-test", system_framework()).unwrap();
+        install_system_framework(&guest, "raw-projection-test", system_framework(), "{}").unwrap();
         guest.eval("pocket-pi-view-sdk", system_view_sdk()).unwrap();
         guest
             .eval(
@@ -2927,6 +3256,91 @@ mod tests {
     }
 
     #[test]
+    fn source_app_runs_schema_actions_projection_view_and_resources() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("device");
+        let package = source_package(&[
+            ("app.json", SOURCE_APP_JSON.as_bytes()),
+            (
+                "schema.sql",
+                b"CREATE TABLE entries(value TEXT NOT NULL, source TEXT NOT NULL); INSERT INTO entries VALUES('SCHEMA','install');",
+            ),
+            ("actions.js", SOURCE_ACTIONS.as_bytes()),
+            ("view.js", SOURCE_VIEW.as_bytes()),
+            ("assets/settings.json", br#"{"label":"READY"}"#),
+        ]);
+        let staged = stage_pocketapp_bytes(&package, &temp.path().join("staged")).unwrap();
+        let catalog = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
+        let mut supervisor = AppSupervisor::new(&workspace, catalog, Arc::new(NoServices)).unwrap();
+        supervisor
+            .activate_app(&staged.release_dir, staged.credentials)
+            .unwrap();
+        supervisor.open("source").unwrap();
+        supervisor.frame_render(true).unwrap();
+        assert_eq!(
+            supervisor.tap(10, 10).unwrap(),
+            json!({"type":"action","action":"record","args":{}})
+        );
+
+        for source in [ActionSource::Tool, ActionSource::Ui, ActionSource::Schedule] {
+            let (response, result) = mpsc::channel();
+            supervisor
+                .action_runner
+                .enqueue(
+                    "source",
+                    source,
+                    "record",
+                    Value::Null,
+                    new_action_deadline(),
+                    ActionCompletion::Response(response),
+                )
+                .unwrap();
+            let outcome = result.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert!(!outcome.is_error, "{}", outcome.text);
+            let result: Value = serde_json::from_str(&outcome.text).unwrap();
+            assert_eq!(result["label"], "READY");
+            assert_eq!(result["frozen"], true);
+            assert_eq!(result["source"], source.as_str());
+        }
+
+        supervisor.frame_render(true).unwrap();
+        assert_eq!(
+            supervisor
+                .cached_view("source")
+                .unwrap()
+                .projection_refreshes
+                .get(),
+            1
+        );
+        assert_eq!(source_rows(&supervisor), 4);
+
+        drop(supervisor);
+        let catalog = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
+        let restored = AppSupervisor::new(&workspace, catalog, Arc::new(NoServices)).unwrap();
+        assert_eq!(source_rows(&restored), 4);
+    }
+
+    #[test]
+    fn source_package_confines_declared_resources() {
+        let temp = tempfile::tempdir().unwrap();
+        let package = source_package(&[
+            ("app.json", SOURCE_APP_JSON.as_bytes()),
+            (
+                "schema.sql",
+                b"CREATE TABLE entries(value TEXT, source TEXT);",
+            ),
+            ("actions.js", SOURCE_ACTIONS.as_bytes()),
+            ("view.js", SOURCE_VIEW.as_bytes()),
+            ("assets/settings.json", br#"{"label":"READY"}"#),
+            ("assets/undeclared.json", b"{}"),
+        ]);
+        let staging = temp.path().join("staged");
+        assert!(stage_pocketapp_bytes(&package, &staging).is_err());
+        assert!(!staging.exists());
+        assert!(package_file_path("assets/../outside.json").is_err());
+    }
+
+    #[test]
     fn view_queries_cannot_write_sqlite() {
         let guest = new_app_guest().unwrap();
         let database = Arc::new(Mutex::new(DbModule::new(DbStorage::Memory)));
@@ -2942,7 +3356,7 @@ mod tests {
             );
         }
         mount_db(&guest, database.clone(), false).unwrap();
-        install_system_framework(&guest, "readonly-test", system_framework()).unwrap();
+        install_system_framework(&guest, "readonly-test", system_framework(), "{}").unwrap();
 
         let error = guest
             .eval("view-write", r#"PocketPi.data.query("DELETE FROM items");"#)
@@ -3011,6 +3425,7 @@ mod tests {
                 app_id: "scheduled".into(),
                 source_path: source,
                 framework: Arc::from(system_framework()),
+                resources: Arc::from("{}"),
                 database: Arc::new(Mutex::new(DbModule::new(DbStorage::Memory))),
                 revision: Arc::new(AtomicU32::new(0)),
                 net: false,
@@ -3054,28 +3469,20 @@ mod tests {
         std::fs::create_dir_all(&staging).unwrap();
         std::fs::write(
             staging.join("app.json"),
-            r#"{"id":"broken","description":"Broken","version":"1","tools":[],"schedules":[]}"#,
+            r#"{"format":1,"frameworkApi":1,"id":"broken","title":"Broken","description":"Broken","version":"1","schemaVersion":1,"capabilities":[],"resources":{},"tools":[],"schedules":[]}"#,
         )
         .unwrap();
         std::fs::write(
-            staging.join("pocket.json"),
-            r#"{"pocket":2,"name":"broken","title":"Broken","version":"1","engine":{"capabilities":{"requires":[]}}}"#,
+            staging.join("schema.sql"),
+            "CREATE TABLE state(value INTEGER);",
         )
         .unwrap();
         std::fs::write(
-            staging.join("plan.json"),
-            json!({
-                "runtime":"pocket-pi-agentos",
-                "pocketjsRevision":POCKETJS_REVISION,
-                "frameworkApi":SYSTEM_FRAMEWORK_API,
-                "app":"broken",
-                "modules":[]
-            })
-            .to_string(),
+            staging.join("actions.js"),
+            "PocketPi.defineActions({ run() {} });",
         )
         .unwrap();
-        std::fs::write(staging.join("app.js"), "").unwrap();
-        std::fs::write(staging.join("app.pak"), []).unwrap();
+        std::fs::write(staging.join("view.js"), "").unwrap();
 
         let index = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
         let mut supervisor = AppSupervisor::new(&workspace, index, Arc::new(NoServices)).unwrap();
@@ -3444,6 +3851,7 @@ PocketPi.defineActions({ run() { return "ok"; } });
                     app_id: app_id.into(),
                     source_path: source.clone(),
                     framework: Arc::from(include_str!("../../../system/framework.js")),
+                    resources: Arc::from("{}"),
                     database,
                     revision: Arc::new(AtomicU32::new(0)),
                     net: false,
@@ -3481,16 +3889,91 @@ PocketPi.defineActions({ run() { return "ok"; } });
         assert_eq!(load_count("four"), 1);
     }
 
+    const SOURCE_APP_JSON: &str = r#"{
+      "format":1,
+      "frameworkApi":1,
+      "id":"source",
+      "title":"Source App",
+      "description":"Source runtime fixture",
+      "version":"1",
+      "schemaVersion":1,
+      "capabilities":["data.sqlite"],
+      "resources":{"settings":{"path":"assets/settings.json","type":"json"}},
+      "tools":[{"name":"source.record","action":"record","parameters":{"type":"object"}}],
+      "schedules":[{"id":"record","everyMinutes":1,"action":"record","args":{}}]
+    }"#;
+
+    const SOURCE_ACTIONS: &str = r#"
+      PocketPi.defineActions({
+        record(_args, context) {
+          const settings = PocketPi.resources.get("settings");
+          return PocketPi.data.transaction(() => {
+            PocketPi.data.exec(`INSERT INTO entries VALUES('RUN','${context.source}')`);
+            return {
+              label: settings.label,
+              frozen: Object.isFrozen(settings),
+              source: context.source,
+            };
+          });
+        },
+      });
+    "#;
+
+    const SOURCE_VIEW: &str = r#"
+      const count = View.state(0);
+      PocketPi.projection.one(
+        "SELECT COUNT(*) AS count FROM entries",
+        {},
+        (row) => count.set(row.count),
+      );
+      View.mount(() => View.Screen({
+        children: View.ActionButton({
+          label: `COUNT ${count.get()}`,
+          onPress: () => PocketPi.action("record"),
+        }),
+      }));
+    "#;
+
+    fn source_package(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut archive = tar::Builder::new(&mut bytes);
+            for (name, contents) in files {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(contents.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                archive.append_data(&mut header, *name, *contents).unwrap();
+            }
+            archive.finish().unwrap();
+        }
+        bytes
+    }
+
+    fn source_rows(supervisor: &AppSupervisor) -> u64 {
+        let mut database = supervisor.databases["source"].lock().unwrap();
+        let handle = database.open("source");
+        let result: Value =
+            serde_json::from_str(&database.query(handle, "SELECT COUNT(*) FROM entries", "[]"))
+                .unwrap();
+        result["rows"][0][0].as_u64().unwrap()
+    }
+
     fn install_view_fixture(workspace: &Path, app_id: &str) {
-        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/exa");
         let release = workspace.join("apps").join(app_id).join("release");
         std::fs::create_dir_all(&release).unwrap();
         std::fs::write(
             release.join("app.json"),
             json!({
+                "format":1,
+                "frameworkApi":1,
                 "id":app_id,
+                "title":app_id,
                 "description":"View cache fixture",
                 "version":"1",
+                "schemaVersion":1,
+                "capabilities":[],
+                "resources":{},
                 "tools":[],
                 "schedules":[]
             })
@@ -3498,43 +3981,20 @@ PocketPi.defineActions({ run() { return "ok"; } });
         )
         .unwrap();
         std::fs::write(
-            release.join("pocket.json"),
-            json!({
-                "pocket":2,
-                "name":app_id,
-                "title":app_id,
-                "version":"1",
-                "engine":{"capabilities":{"requires":[]}}
-            })
-            .to_string(),
+            release.join("schema.sql"),
+            "CREATE TABLE state(value INTEGER);",
         )
         .unwrap();
         std::fs::write(
-            release.join("plan.json"),
-            json!({
-                "runtime":"pocket-pi-agentos",
-                "pocketjsRevision":POCKETJS_REVISION,
-                "frameworkApi":SYSTEM_FRAMEWORK_API,
-                "app":app_id,
-                "modules":[]
-            })
-            .to_string(),
+            release.join("actions.js"),
+            "PocketPi.defineActions({ run() {} });",
         )
         .unwrap();
-        std::fs::copy(source.join("dist/app.js"), release.join("app.js")).unwrap();
-        std::fs::copy(source.join("dist/app.pak"), release.join("app.pak")).unwrap();
-        let mut database = DbModule::new(DbStorage::Dir(
-            workspace.join("apps").join(app_id).join("data"),
-        ));
-        let handle = database.open(app_id);
-        assert!(handle > 0);
-        assert_eq!(
-            database.exec(
-                handle,
-                "CREATE TABLE searches(id INTEGER, query TEXT, searched_at INTEGER, status TEXT, result_count INTEGER, top_title TEXT, error TEXT); PRAGMA user_version=5;"
-            ),
-            0
-        );
+        std::fs::write(
+            release.join("view.js"),
+            "View.mount(() => View.Text({ text: 'READY' }));",
+        )
+        .unwrap();
     }
 
     fn install_fixture(workspace: &Path, app_id: &str, descriptor: &str) {

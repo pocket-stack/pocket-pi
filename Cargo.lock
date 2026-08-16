@@ -1998,6 +1998,7 @@ dependencies = [
  "pocketjs-core",
  "serde",
  "serde_json",
+ "tar",
  "tempfile",
 ]
 

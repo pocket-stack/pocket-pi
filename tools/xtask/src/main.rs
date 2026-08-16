@@ -31,7 +31,11 @@ fn main() -> Result<()> {
                 "the System App is built with `cargo xtask build pi-agent`"
             );
             build_app(&root, app)?;
-            package_app(&root, app, rest.get(1).map(PathBuf::from).as_deref())
+            package_bundle_app(&root, app, rest.get(1).map(PathBuf::from).as_deref())
+        }
+        (Some("package"), Some("app")) => {
+            let app = rest.first().context("package app requires an App id")?;
+            package_source_app(&root, app, rest.get(1).map(PathBuf::from).as_deref())
         }
         (Some("build"), Some("esp32-p4")) => {
             build_system_assets(&root)?;
@@ -68,7 +72,7 @@ fn main() -> Result<()> {
         }
         _ => {
             eprintln!(
-                "usage:\n  cargo xtask build pi-agent|view-sdk|esp32-p4|esp32-p4-sim\n  cargo xtask build app <id> [credentials.json]\n  cargo xtask run esp32-p4-sim [args]\n  cargo xtask snapshot esp32-p4-sim"
+                "usage:\n  cargo xtask build pi-agent|view-sdk|esp32-p4|esp32-p4-sim\n  cargo xtask build app <id> [credentials.json]\n  cargo xtask package app <id> [credentials.json]\n  cargo xtask run esp32-p4-sim [args]\n  cargo xtask snapshot esp32-p4-sim"
             );
             bail!("unknown xtask command")
         }
@@ -158,7 +162,7 @@ fn build_app_with_pocketjs(root: &Path, pocketjs: &Path, app: &str) -> Result<()
     Ok(())
 }
 
-fn package_app(root: &Path, app: &str, credentials: Option<&Path>) -> Result<()> {
+fn package_bundle_app(root: &Path, app: &str, credentials: Option<&Path>) -> Result<()> {
     let app_root = app_root(root, app)?;
     let descriptor: Value = serde_json::from_slice(&std::fs::read(app_root.join("app.json"))?)?;
     let manifest: Value = serde_json::from_slice(&std::fs::read(app_root.join("pocket.json"))?)?;
@@ -219,6 +223,80 @@ fn package_app(root: &Path, app: &str, credentials: Option<&Path>) -> Result<()>
     std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o600))?;
     println!("packaged {}", output.display());
     Ok(())
+}
+
+fn package_source_app(root: &Path, app: &str, credentials: Option<&Path>) -> Result<()> {
+    let app_root = app_root(root, app)?;
+    let descriptor: Value = serde_json::from_slice(&std::fs::read(app_root.join("app.json"))?)?;
+    anyhow::ensure!(
+        descriptor["format"] == 1
+            && descriptor["frameworkApi"] == SYSTEM_FRAMEWORK_API
+            && descriptor["id"] == app,
+        "App does not target this source runtime"
+    );
+    let credentials_map = credentials.map_or_else(
+        || Ok(BTreeMap::new()),
+        |path| {
+            serde_json::from_slice::<BTreeMap<String, String>>(&std::fs::read(path)?)
+                .context("parse credentials.json")
+        },
+    )?;
+    anyhow::ensure!(
+        credentials_map.keys().cloned().collect::<BTreeSet<_>>()
+            == descriptor_credential_ids(&descriptor),
+        "credentials.json ids do not match app.json"
+    );
+    let mut assets = BTreeSet::new();
+    for resource in descriptor["resources"]
+        .as_object()
+        .into_iter()
+        .flat_map(|resources| resources.values())
+    {
+        let path = resource["path"]
+            .as_str()
+            .context("App resource is missing path")?;
+        anyhow::ensure!(
+            resource["type"] == "json" && valid_asset_path(path) && assets.insert(path),
+            "invalid App resource {path}"
+        );
+        anyhow::ensure!(app_root.join(path).is_file(), "missing App resource {path}");
+    }
+
+    let output_dir = root.join("target/pocketapps");
+    std::fs::create_dir_all(&output_dir)?;
+    let output = output_dir.join(format!("{app}.pocketapp"));
+    let file = std::fs::File::create(&output)?;
+    let mut archive = tar::Builder::new(file);
+    for name in ["app.json", "schema.sql", "actions.js", "view.js"] {
+        archive.append_path_with_name(app_root.join(name), name)?;
+    }
+    for path in assets {
+        archive.append_path_with_name(app_root.join(path), path)?;
+    }
+    if let Some(credentials) = credentials {
+        archive.append_path_with_name(credentials, "credentials.json")?;
+    }
+    archive.finish()?;
+    #[cfg(unix)]
+    std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o600))?;
+    println!("packaged {}", output.display());
+    Ok(())
+}
+
+fn valid_asset_path(path: &str) -> bool {
+    path.len() <= 100
+        && path.strip_prefix("assets/").is_some_and(|path| {
+            !path.is_empty()
+                && !path.contains('\\')
+                && path.split('/').all(|component| {
+                    !component.is_empty()
+                        && component != "."
+                        && component != ".."
+                        && component.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_')
+                        })
+                })
+        })
 }
 
 fn descriptor_credential_ids(descriptor: &Value) -> BTreeSet<String> {
