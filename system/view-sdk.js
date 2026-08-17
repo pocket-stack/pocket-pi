@@ -85,7 +85,16 @@
   }
 
   function Box(props = {}) {
-    return element(NODE_VIEW, props, props.children);
+    const recipe = element(NODE_VIEW, props, props.children);
+    if (props.style?.direction === undefined && recipe.children.length > 1) {
+      let flowChildren = 0;
+      for (const child of recipe.children) {
+        if (child.props.style?.position !== "absolute" && ++flowChildren > 1) {
+          fail("multiple flow children require Row, Column, or an explicit direction");
+        }
+      }
+    }
+    return recipe;
   }
 
   function Row(props = {}) {

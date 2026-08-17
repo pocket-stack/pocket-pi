@@ -436,7 +436,7 @@ function accountsScreen(state) {
       ? View.Row({ style: { gap: 20 }, children: [
         View.Column({ style: { grow: 1, gap: 12 }, children: visible.map((account) => View.Pressable({
           onPress: () => selectAccount(account),
-          style: { width: "full", height: 100, paddingX: 20, justify: "center", gap: 12, radius: 12, shadow: 1, background: account.number === state.selectedAccount ? "successSoft" : "surface", borderColor: account.number === state.selectedAccount ? "success" : "border", borderWidth: 1 },
+          style: { width: "full", height: 100, paddingX: 20, direction: "column", justify: "center", gap: 12, radius: 12, shadow: 1, background: account.number === state.selectedAccount ? "successSoft" : "surface", borderColor: account.number === state.selectedAccount ? "success" : "border", borderWidth: 1 },
           children: [
             View.Row({ style: { align: "center", justify: "between" }, children: [
               View.Text({ text: account.label, style: { fontSize: "xl", color: "heading", fontWeight: "bold" } }),
