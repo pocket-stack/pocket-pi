@@ -12,7 +12,7 @@
     width: 1, height: 2, minWidth: 3, minHeight: 4, maxWidth: 5, maxHeight: 6,
     paddingTop: 8, paddingRight: 9, paddingBottom: 10, paddingLeft: 11,
     marginTop: 12, marginRight: 13, marginBottom: 14, marginLeft: 15,
-    gap: 16, direction: 17, justify: 18, align: 19, grow: 20, shrink: 21,
+    gap: 16, direction: 17, justify: 18, align: 19, grow: 20, shrink: 21, basis: 22,
     wrap: 23, position: 24, top: 25, right: 26, bottom: 27, left: 28,
     display: 29, overflow: 30, zIndex: 31, hitPass: 32,
     background: 64, radius: 68, opacity: 69, borderColor: 70, borderWidth: 71,
@@ -442,8 +442,8 @@
     return Row({
       style: { height: 112, paddingX: 24, align: "center", justify: "between", background: "shell" },
       children: [
-        Row({ style: { align: "center", gap: 16 }, children: [leading, Text({ text: props.title, style: { color: "white", fontSize: "title", fontWeight: "bold" } })] }),
-        Column({ style: { width: 332, align: "end", gap: 8 }, children: [
+        Row({ style: { grow: 1, align: "center", gap: 16 }, children: [leading, Text({ text: props.title, style: { color: "white", fontSize: "title", fontWeight: "bold" } })] }),
+        Column({ style: { align: "end", gap: 8 }, children: [
           Text({ text: props.metaTop ?? "", style: { color: "subtle", fontWeight: "bold" } }),
           Text({ text: props.metaBottom ?? "", style: { color: "muted" } }),
         ] }),
@@ -481,7 +481,7 @@
   }
 
   function EmptyState(props = {}) {
-    return Card({ style: { width: "full", height: props.compact ? 150 : 430, paddingX: props.compact ? 20 : 48, align: "center", justify: "center" }, children: [
+    return Card({ style: { width: "full", height: props.compact ? 150 : 430, paddingX: props.compact ? 20 : 48, align: "center", justify: "center", ...props.style }, children: [
       props.icon ? Box({ style: { width: 88, height: 88, align: "center", justify: "center", radius: 12, background: props.tone === "info" ? "infoSoft" : "border" }, children: Text({ text: props.icon, style: { color: props.tone === "info" ? "info" : "muted", fontSize: "title", fontWeight: "bold" } }) }) : null,
       Text({ text: props.title, style: { marginTop: props.icon ? 28 : 0, color: props.icon ? "heading" : "muted", fontSize: props.icon ? "title" : "lg", fontWeight: "bold" } }),
       props.detail ? Text({ text: props.detail, style: { marginTop: 16, color: "muted", fontSize: "lg" } }) : null,
@@ -503,6 +503,14 @@
   function ScrollButton(props = {}) {
     return Pressable({ ...props, style: { width: 68, height: 132, align: "center", justify: "center", radius: 12, background: "accentSoft", ...props.style }, children:
       Text({ text: props.direction === "up" ? "UP" : "DN", style: { color: "accent", fontWeight: "bold" } }) });
+  }
+
+  function ScrollRail(props = {}) {
+    if (typeof props.onUp !== "function" || typeof props.onDown !== "function") fail("ScrollRail requires onUp and onDown");
+    return Column({ style: { width: 68, height: "full", justify: "between", ...props.style }, children: [
+      ScrollButton({ direction: "up", onPress: props.onUp }),
+      ScrollButton({ direction: "down", onPress: props.onDown }),
+    ] });
   }
 
   const keyboardLayers = Object.freeze({
@@ -560,6 +568,7 @@
     MetricCard,
     StatusBar,
     ScrollButton,
+    ScrollRail,
     Keyboard,
   });
 })();

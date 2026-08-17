@@ -303,7 +303,7 @@ function header(title, metaBottom) {
 }
 
 function metric(label, value) {
-  return View.Box({ style: { width: 210, height: 104 }, children: View.MetricCard({ label, value: money(value) }) });
+  return View.Box({ style: { grow: 1, basis: 0, height: "full" }, children: View.MetricCard({ label, value: money(value) }) });
 }
 
 function activityPreview(state, index) {
@@ -314,7 +314,7 @@ function activityPreview(state, index) {
 function compactActivity(state, index) {
   const item = activityPreview(state, index);
   return View.Row({ style: { height: 72, paddingX: 20, align: "center", justify: "between" }, children: [
-    View.Column({ style: { width: 450, gap: 8 }, children: [
+    View.Column({ style: { grow: 1, gap: 8 }, children: [
       View.Text({ text: item.title, style: { fontSize: "lg", color: "heading", fontWeight: "bold" } }),
       View.Text({ text: item.timestamp ? item.timestamp + "  ·  " + item.detail : "", style: { color: "muted" } }),
     ] }),
@@ -329,10 +329,10 @@ function positionPreview(state, index) {
 
 function compactPosition(state, index) {
   const item = positionPreview(state, index);
-  return View.Row({ style: { height: 64, paddingX: 20, align: "center" }, children: [
-    View.Text({ text: item.symbol, style: { width: 240, fontSize: "lg", color: "heading", fontWeight: "bold" } }),
-    View.Text({ text: item.quantity ? item.quantity + " SH" : "", style: { width: 156, color: "muted" } }),
-    View.Text({ text: item.averagePrice ? "AVG " + money(item.averagePrice) : "", style: { color: "muted" } }),
+  return View.Row({ style: { height: 64, paddingX: 20, align: "center", gap: 12 }, children: [
+    View.Text({ text: item.symbol, style: { grow: 1, basis: 0, fontSize: "lg", color: "heading", fontWeight: "bold" } }),
+    View.Text({ text: item.quantity ? item.quantity + " SH" : "", style: { grow: 1, basis: 0, color: "muted" } }),
+    View.Text({ text: item.averagePrice ? "AVG " + money(item.averagePrice) : "", style: { grow: 1, basis: 0, color: "muted" } }),
   ] });
 }
 
@@ -355,13 +355,13 @@ function chart(state) {
   ] });
 }
 
-function section(title, detail, height, cardHeight, children, onPress) {
+function section(title, detail, height, children, onPress) {
   return View.Pressable({
     onPress,
-    style: { height, paddingX: 24, direction: "column" },
+    style: { height, direction: "column" },
     children: [
       View.SectionHeading({ title, detail, action: true }),
-      View.Card({ style: { height: cardHeight }, children }),
+      View.Card({ style: { grow: 1 }, children }),
     ],
   });
 }
@@ -375,84 +375,85 @@ function dashboardScreen(state) {
   const pnl = state.span === "day" ? dashboard.pnlDay : dashboard.pnlWeek;
   return View.Screen({ children: [
     header("ROBINHOOD"),
-    View.Box({ style: { height: 64, paddingX: 24, paddingTop: 8 }, children: View.Pressable({
-      onPress: () => model.update({ screen: "accounts" }),
-      style: { width: "full", height: 56, paddingX: 20, direction: "row", align: "center", justify: "between", radius: 12, background: "surface", borderColor: "border", borderWidth: 1, shadow: 1 },
-      children: [
-        View.Text({ text: "ACCOUNT", style: { color: "muted", fontWeight: "bold" } }),
-        View.Text({ text: accountLabel, style: { color: "heading", fontWeight: "bold" } }),
-      ],
-    }) }),
-    View.Box({ style: { height: 304, paddingX: 24, paddingTop: 12 }, children: View.Card({
-      style: { height: 291, paddingX: 20, paddingTop: 16 },
-      children: [
-        View.Row({ style: { height: 64, align: "end", justify: "between" }, children: [
-          View.Text({ text: money(dashboard.totalValue), style: { fontSize: "title", color: "heading", fontWeight: "bold" } }),
-          View.Text({ text: state.chartTrend.change + "  (" + state.chartTrend.percent + ")", style: { fontSize: "lg", color: state.chartTrend.positive ? "success" : "danger", fontWeight: "bold" } }),
-        ] }),
-        chart(state),
-      ],
-    }) }),
-    View.Row({ style: { height: 60, paddingX: 24, paddingTop: 8, gap: 12 }, children: [
-      View.Pressable({ onPress: () => setSpan("day"), style: { width: 100, height: 44, align: "center", justify: "center", radius: 8, background: state.span === "day" ? "accent" : "surface" }, children:
-        View.Text({ text: "1D", style: { color: state.span === "day" ? "white" : "muted", fontWeight: "bold" } }) }),
-      View.Pressable({ onPress: () => setSpan("week"), style: { width: 100, height: 44, align: "center", justify: "center", radius: 8, background: state.span === "week" ? "accent" : "surface" }, children:
-        View.Text({ text: "1W", style: { color: state.span === "week" ? "white" : "muted", fontWeight: "bold" } }) }),
-      View.Text({ text: state.span === "day" ? "TODAY" : "PAST WEEK", style: { marginTop: 12, color: "muted" } }),
-    ] }),
-    View.Row({ style: { height: 126, paddingX: 24, paddingTop: 12, gap: 21 }, children: [
-      metric("VALUE", dashboard.totalValue), metric("CASH", dashboard.cash), metric("BUY POWER", dashboard.buyingPower),
-    ] }),
-    section("ACTIVITY", "LAST 7 DAYS", 200, 150, [compactActivity(state, 0), compactActivity(state, 1)], () => model.update({ screen: "activity" })),
-    section("POSITIONS", "", 184, 136, [compactPosition(state, 0), compactPosition(state, 1)], () => model.update({ screen: "positions" })),
-    View.Box({ style: { height: 126, paddingX: 24, paddingTop: 8 }, children: View.Card({
-      style: { width: "full", height: 110, paddingX: 20, direction: "row", align: "center", justify: "between" },
-      children: [
-        View.Column({ style: { gap: 12 }, children: [
-          View.Text({ text: "REALIZED P&L", style: { fontSize: "xl", color: "heading", fontWeight: "bold" } }),
-          View.Text({ text: "EQUITIES / " + (state.span === "day" ? "TODAY" : "WEEK"), style: { color: "muted" } }),
-        ] }),
-        View.Text({ text: money(pnl), style: { fontSize: "title", color: (number(pnl) ?? 0) >= 0 ? "success" : "danger", fontWeight: "bold" } }),
-      ],
-    }) }),
-    View.Row({ style: { height: 104, paddingX: 24, align: "center", justify: "between" }, children: [
-      View.Box({ style: { width: 460, height: 64 }, children: View.StatusBar({ text: state.status, tone: state.status.startsWith("REFRESH FAILED") ? "danger" : "neutral" }) }),
-      View.Box({ style: { width: 176, height: 64 }, children: View.ActionButton({ label: state.refreshing ? "REFRESHING" : "REFRESH NOW", disabled: state.refreshing, onPress: refreshPortfolio }) }),
+    View.Column({ style: { grow: 1, paddingX: 24, paddingY: 12, gap: 12 }, children: [
+      View.Pressable({
+        onPress: () => model.update({ screen: "accounts" }),
+        style: { width: "full", height: 56, paddingX: 20, direction: "row", align: "center", justify: "between", radius: 12, background: "surface", borderColor: "border", borderWidth: 1, shadow: 1 },
+        children: [
+          View.Text({ text: "ACCOUNT", style: { color: "muted", fontWeight: "bold" } }),
+          View.Text({ text: accountLabel, style: { color: "heading", fontWeight: "bold" } }),
+        ],
+      }),
+      View.Card({
+        style: { grow: 1, minHeight: 291, paddingX: 20, paddingTop: 16 },
+        children: [
+          View.Row({ style: { height: 64, align: "end", justify: "between" }, children: [
+            View.Text({ text: money(dashboard.totalValue), style: { fontSize: "title", color: "heading", fontWeight: "bold" } }),
+            View.Text({ text: state.chartTrend.change + "  (" + state.chartTrend.percent + ")", style: { fontSize: "lg", color: state.chartTrend.positive ? "success" : "danger", fontWeight: "bold" } }),
+          ] }),
+          chart(state),
+        ],
+      }),
+      View.Row({ style: { height: 44, gap: 12 }, children: [
+        View.Pressable({ onPress: () => setSpan("day"), style: { width: 100, height: 44, align: "center", justify: "center", radius: 8, background: state.span === "day" ? "accent" : "surface" }, children:
+          View.Text({ text: "1D", style: { color: state.span === "day" ? "white" : "muted", fontWeight: "bold" } }) }),
+        View.Pressable({ onPress: () => setSpan("week"), style: { width: 100, height: 44, align: "center", justify: "center", radius: 8, background: state.span === "week" ? "accent" : "surface" }, children:
+          View.Text({ text: "1W", style: { color: state.span === "week" ? "white" : "muted", fontWeight: "bold" } }) }),
+        View.Text({ text: state.span === "day" ? "TODAY" : "PAST WEEK", style: { marginTop: 12, color: "muted" } }),
+      ] }),
+      View.Row({ style: { height: 104, gap: 16 }, children: [
+        metric("VALUE", dashboard.totalValue), metric("CASH", dashboard.cash), metric("BUY POWER", dashboard.buyingPower),
+      ] }),
+      section("ACTIVITY", "LAST 7 DAYS", 194, [compactActivity(state, 0), compactActivity(state, 1)], () => model.update({ screen: "activity" })),
+      section("POSITIONS", "", 180, [compactPosition(state, 0), compactPosition(state, 1)], () => model.update({ screen: "positions" })),
+      View.Card({
+        style: { width: "full", height: 110, paddingX: 20, direction: "row", align: "center", justify: "between" },
+        children: [
+          View.Column({ style: { gap: 12 }, children: [
+            View.Text({ text: "REALIZED P&L", style: { fontSize: "xl", color: "heading", fontWeight: "bold" } }),
+            View.Text({ text: "EQUITIES / " + (state.span === "day" ? "TODAY" : "WEEK"), style: { color: "muted" } }),
+          ] }),
+          View.Text({ text: money(pnl), style: { fontSize: "title", color: (number(pnl) ?? 0) >= 0 ? "success" : "danger", fontWeight: "bold" } }),
+        ],
+      }),
+      View.Row({ style: { height: 64, gap: 16 }, children: [
+        View.Box({ style: { grow: 1, height: "full" }, children: View.StatusBar({ text: state.status, tone: state.status.startsWith("REFRESH FAILED") ? "danger" : "neutral" }) }),
+        View.Box({ style: { width: 176, height: 64 }, children: View.ActionButton({ label: state.refreshing ? "REFRESHING" : "REFRESH NOW", disabled: state.refreshing, onPress: refreshPortfolio }) }),
+      ] }),
     ] }),
   ] });
 }
 
-function sideButtons(screen) {
-  return [
-    View.ScrollButton({ direction: "up", onPress: () => scroll(screen, -1), style: { position: "absolute", left: 628, top: 156 } }),
-    View.ScrollButton({ direction: "down", onPress: () => scroll(screen, 1), style: { position: "absolute", left: 628, top: 972 } }),
-  ];
+function scrollRail(screen) {
+  return View.ScrollRail({ onUp: () => scroll(screen, -1), onDown: () => scroll(screen, 1) });
 }
 
 function accountsScreen(state) {
   const visible = state.accounts.slice(state.accountScroll, state.accountScroll + 8);
-  return View.Screen({ style: { position: "relative" }, children: [
+  return View.Screen({ children: [
     header("ACCOUNTS"),
-    View.Column({ style: { paddingX: 24, paddingTop: 14, gap: 12 }, children: visible.map((account) => View.Pressable({
-      onPress: () => selectAccount(account),
-      style: { width: 584, height: 100, paddingX: 20, justify: "center", gap: 12, radius: 12, shadow: 1, background: account.number === state.selectedAccount ? "successSoft" : "surface", borderColor: account.number === state.selectedAccount ? "success" : "border", borderWidth: 1 },
-      children: [
-        View.Row({ style: { align: "center", justify: "between" }, children: [
-          View.Text({ text: account.label, style: { fontSize: "xl", color: "heading", fontWeight: "bold" } }),
-          View.Text({ text: "····" + account.suffix, style: { fontSize: "lg", color: "muted", fontWeight: "bold" } }),
-        ] }),
-        View.Row({ style: { align: "center", justify: "between" }, children: [
-          View.Badge({ label: account.status, tone: "success" }),
-          account.number === state.selectedAccount ? View.Text({ text: "SELECTED", style: { color: "success", fontWeight: "bold" } }) : null,
-        ] }),
-      ],
-    })) }),
-    sideButtons("accounts"),
+    View.Row({ style: { grow: 1, padding: 24, gap: 20 }, children: [
+      View.Column({ style: { grow: 1, gap: 12 }, children: visible.map((account) => View.Pressable({
+        onPress: () => selectAccount(account),
+        style: { width: "full", height: 100, paddingX: 20, justify: "center", gap: 12, radius: 12, shadow: 1, background: account.number === state.selectedAccount ? "successSoft" : "surface", borderColor: account.number === state.selectedAccount ? "success" : "border", borderWidth: 1 },
+        children: [
+          View.Row({ style: { align: "center", justify: "between" }, children: [
+            View.Text({ text: account.label, style: { fontSize: "xl", color: "heading", fontWeight: "bold" } }),
+            View.Text({ text: "····" + account.suffix, style: { fontSize: "lg", color: "muted", fontWeight: "bold" } }),
+          ] }),
+          View.Row({ style: { align: "center", justify: "between" }, children: [
+            View.Badge({ label: account.status, tone: "success" }),
+            account.number === state.selectedAccount ? View.Text({ text: "SELECTED", style: { color: "success", fontWeight: "bold" } }) : null,
+          ] }),
+        ],
+      })) }),
+      scrollRail("accounts"),
+    ] }),
   ] });
 }
 
 function activityCard(item) {
-  return View.Card({ style: { width: 584, height: 112, paddingX: 20, justify: "center", gap: 8 }, children: [
+  return View.Card({ style: { width: "full", height: 112, paddingX: 20, justify: "center", gap: 8 }, children: [
     View.Row({ style: { align: "center", justify: "between" }, children: [
       View.Text({ text: item.title, style: { fontSize: "lg", color: "heading", fontWeight: "bold" } }),
       View.Text({ text: money(item.amount), style: { fontSize: "lg", color: item.side === "SELL" ? "success" : "heading", fontWeight: "bold" } }),
@@ -465,18 +466,20 @@ function activityCard(item) {
 function activityScreen(state) {
   const visible = state.dashboard.activity.slice(state.activityScroll, state.activityScroll + 8);
   const empty = state.dashboard.activityAvailable ? "NO ACTIVITY YET" : "ACTIVITY UNAVAILABLE";
-  return View.Screen({ style: { position: "relative" }, children: [
+  return View.Screen({ children: [
     header("ACTIVITY", "LAST 7 DAYS"),
-    View.Column({ style: { paddingX: 24, paddingTop: 14, gap: 14 }, children:
-      visible.length ? visible.map(activityCard) : View.EmptyState({ title: empty, compact: true }) }),
-    sideButtons("activity"),
+    View.Row({ style: { grow: 1, padding: 24, gap: 20 }, children: [
+      View.Column({ style: { grow: 1, gap: 12 }, children:
+        visible.length ? visible.map(activityCard) : View.EmptyState({ title: empty, compact: true }) }),
+      scrollRail("activity"),
+    ] }),
   ] });
 }
 
 function positionCard(item) {
-  return View.Card({ style: { width: 584, height: 98, paddingX: 20, justify: "center", gap: 12 }, children: [
+  return View.Card({ style: { width: "full", height: 98, paddingX: 20, justify: "center", gap: 12 }, children: [
     View.Row({ style: { align: "center" }, children: [
-      View.Text({ text: item.symbol, style: { width: 170, fontSize: "xl", color: "heading", fontWeight: "bold" } }),
+      View.Text({ text: item.symbol, style: { grow: 1, fontSize: "xl", color: "heading", fontWeight: "bold" } }),
       View.Text({ text: item.quantity + " SH", style: { fontSize: "lg", color: "heading", fontWeight: "bold" } }),
     ] }),
     View.Text({ text: "AVERAGE COST  " + money(item.averagePrice) + (item.marketValue ? "  ·  VALUE " + money(item.marketValue) : ""), style: { color: "muted" } }),
@@ -486,11 +489,13 @@ function positionCard(item) {
 function positionsScreen(state) {
   const visible = state.dashboard.positions.slice(state.positionScroll, state.positionScroll + 9);
   const empty = state.dashboard.positionsAvailable ? "NO OPEN POSITIONS" : "POSITIONS UNAVAILABLE";
-  return View.Screen({ style: { position: "relative" }, children: [
+  return View.Screen({ children: [
     header("POSITIONS"),
-    View.Column({ style: { paddingX: 24, paddingTop: 14, gap: 12 }, children:
-      visible.length ? visible.map(positionCard) : View.EmptyState({ title: empty, compact: true }) }),
-    sideButtons("positions"),
+    View.Row({ style: { grow: 1, padding: 24, gap: 20 }, children: [
+      View.Column({ style: { grow: 1, gap: 12 }, children:
+        visible.length ? visible.map(positionCard) : View.EmptyState({ title: empty, compact: true }) }),
+      scrollRail("positions"),
+    ] }),
   ] });
 }
 

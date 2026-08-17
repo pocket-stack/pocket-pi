@@ -56,7 +56,7 @@ function historyCard(item) {
   return View.Card({
     style: { height: 126, paddingX: 20, direction: "row", align: "center", justify: "between" },
     children: [
-      View.Column({ style: { width: 390, gap: 8 }, children: [
+      View.Column({ style: { grow: 1, gap: 8 }, children: [
         View.Text({ text: item.query.slice(0, 48), style: { fontSize: "lg", fontWeight: "bold", color: "heading" } }),
         View.Text({ text: (item.top_title || item.error || "No result title").slice(0, 58), style: { color: "muted" } }),
         View.Text({ text: searchTime(item.searched_at), style: { color: "info", fontWeight: "bold" } }),
@@ -85,19 +85,17 @@ function render() {
       description: "Every research.search call is saved here automatically.",
       tone: "info",
     }),
-    View.Box({ style: { position: "relative", grow: 1, paddingX: 24, paddingTop: 16 }, children: [
-      View.ScrollButton({ direction: "up", onPress: () => scrollHistory(-1), style: { position: "absolute", left: 628, top: 16 } }),
-      View.ScrollButton({ direction: "down", onPress: () => scrollHistory(1), style: { position: "absolute", left: 628, top: 742 } }),
-      View.Column({ style: { width: 584, height: 890, gap: 12 }, children: visible.map(historyCard) }),
-      state.history.length === 0 ? View.Box({
-        style: { position: "absolute", left: 24, top: 16, width: 672, height: 890, background: "canvas" },
-        children: View.EmptyState({
+    View.Row({ style: { grow: 1, paddingX: 24, paddingY: 16, gap: 20 }, children: [
+      state.history.length === 0
+        ? View.EmptyState({
+          style: { height: "full" },
           icon: "E",
           title: "No searches yet",
           detail: "Ask Pi Agent to research a topic.\nThe search and its results will appear here.",
           tone: "info",
-        }),
-      }) : null,
+        })
+        : View.Column({ style: { grow: 1, gap: 12 }, children: visible.map(historyCard) }),
+      state.history.length ? View.ScrollRail({ onUp: () => scrollHistory(-1), onDown: () => scrollHistory(1) }) : null,
     ] }),
     View.Box({ style: { height: 96 }, children: View.StatusBar({
       text: state.status,

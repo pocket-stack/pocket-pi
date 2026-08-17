@@ -79,7 +79,7 @@
       children: tabs.map((name) => View.Pressable({
         onPress: () => openTab(name),
         style: {
-          width: 165, height: 76, align: "center", justify: "center",
+          grow: 1, basis: 0, height: "full", align: "center", justify: "center",
           background: activeTab.get() === name ? "accent" : "shellMuted",
         },
         children: View.Text({ text: name.toUpperCase(), style: { color: "white", fontWeight: "bold" } }),
@@ -89,7 +89,7 @@
 
   function chatCard(slot) {
     return View.Card({
-      style: { width: 584, height: 318, paddingX: 24, paddingY: 20 },
+      style: { width: "full", height: 318, paddingX: 24, paddingY: 20 },
       children: [
         View.Pressable({
           onPress: () => openReader("YOU", slot.user.get()),
@@ -127,32 +127,20 @@
   function chatScreen() {
     return View.Screen({ children: [
       systemHeader("ESP32 PI AGENT"),
-      View.Column({
-        style: { position: "relative", height: 686, paddingX: 24, paddingTop: 28, gap: 22 },
-        children: [
-          ...chatSlots.slice(0, chatCount.get()).map(chatCard),
-          View.ScrollButton({
-            direction: "up", onPress: () => moveChat(2),
-            style: { position: "absolute", left: 628, top: 28 },
-          }),
-          View.ScrollButton({
-            direction: "down", onPress: () => moveChat(-2),
-            style: { position: "absolute", left: 628, top: 512 },
-          }),
-        ],
-      }),
-      View.Card({
-        style: { height: 228, marginX: 24, paddingX: 24, paddingY: 20 },
-        children: [
+      View.Column({ style: { grow: 1, padding: 24, gap: 24 }, children: [
+        View.Row({ style: { grow: 1, gap: 20 }, children: [
+          View.Column({ style: { grow: 1, gap: 22 }, children: chatSlots.slice(0, chatCount.get()).map(chatCard) }),
+          View.ScrollRail({ onUp: () => moveChat(2), onDown: () => moveChat(-2) }),
+        ] }),
+        View.Card({ style: { height: 204, paddingX: 24, paddingY: 20, gap: 24 }, children: [
           View.Text({ text: "NEXT WAKE", style: { color: "muted", fontWeight: "bold" } }),
           View.Text({
             text: scheduleText.get,
-            style: { paddingTop: 24, color: schedulePresent.get() ? "heading" : "muted", fontSize: "lg", fontWeight: schedulePresent.get() ? "bold" : "regular" },
+            style: { color: schedulePresent.get() ? "heading" : "muted", fontSize: "lg", fontWeight: schedulePresent.get() ? "bold" : "regular" },
           }),
-        ],
-      }),
-      View.Box({ style: { height: 146, paddingX: 24, paddingTop: 28 }, children:
-        View.ActionButton({ label: "TYPE A MESSAGE", onPress: openPromptKeyboard }) }),
+        ] }),
+        View.Box({ style: { height: 80 }, children: View.ActionButton({ label: "TYPE A MESSAGE", onPress: openPromptKeyboard }) }),
+      ] }),
       bottomBar(),
     ] });
   }
@@ -160,13 +148,13 @@
   function fileRow(entry) {
     return View.Pressable({
       onPress: () => openFileEntry(entry),
-      style: { width: 584, height: 92, paddingX: 18, direction: "row", align: "center", gap: 20, background: "surface" },
+      style: { width: "full", height: 92, paddingX: 18, direction: "row", align: "center", gap: 20, background: "surface" },
       children: [
         View.Box({
           style: { width: 48, height: 48, align: "center", justify: "center", background: entry.kind === "dir" ? "infoSoft" : "successSoft" },
           children: View.Text({ text: entry.kind === "dir" ? "D" : "F", style: { color: entry.kind === "dir" ? "info" : "success", fontSize: "lg", fontWeight: "bold" } }),
         }),
-        View.Column({ style: { width: 474, gap: 8 }, children: [
+        View.Column({ style: { grow: 1, gap: 8 }, children: [
           View.Text({ text: (entry.name + (entry.kind === "dir" ? "/" : "")).slice(0, 52), style: { fontSize: "lg", fontWeight: "bold" } }),
           View.Text({ text: entry.kind === "dir" ? "FOLDER" : formatSize(entry.size), style: { color: "muted" } }),
         ] }),
@@ -180,15 +168,15 @@
     const path = filePath.get();
     return View.Screen({ children: [
       systemHeader("WORKSPACE FILES", path ? goUpDirectory : undefined),
-      View.Column({ style: { position: "relative", height: 1060, paddingX: 24, paddingTop: 20 }, children: [
+      View.Column({ style: { grow: 1, padding: 24, gap: 12 }, children: [
         View.Box({ style: { height: 48, paddingX: 16, justify: "center", background: "border" }, children:
           View.Text({ text: "/workspace" + (path ? "/" + path : ""), style: { color: "muted" } }) }),
-        View.Column({ style: { paddingTop: 10, gap: 12 }, children: entries.slice(offset, offset + 8).map(fileRow) }),
-        entries.length ? null : View.Text({ text: fileError.get, style: { paddingTop: 80, paddingLeft: 40, color: "muted", fontSize: "lg" } }),
-        entries.length > 8 ? [
-          View.ScrollButton({ direction: "up", onPress: () => moveFiles(-4), style: { position: "absolute", left: 628, top: 78 } }),
-          View.ScrollButton({ direction: "down", onPress: () => moveFiles(4), style: { position: "absolute", left: 628, top: 828 } }),
-        ] : null,
+        View.Row({ style: { grow: 1, gap: 20 }, children: [
+          entries.length
+            ? View.Column({ style: { grow: 1, gap: 12 }, children: entries.slice(offset, offset + 8).map(fileRow) })
+            : View.EmptyState({ compact: true, title: fileError.get }),
+          entries.length > 8 ? View.ScrollRail({ onUp: () => moveFiles(-4), onDown: () => moveFiles(4) }) : null,
+        ] }),
       ] }),
       bottomBar(),
     ] });
@@ -198,12 +186,12 @@
     const busy = uninstallingApp.get();
     return View.Pressable({
       onPress: () => uninstallMode.get() ? "" : PocketPi.navigate(app.id),
-      style: { width: 672, height: 150, paddingX: 24, direction: "row", align: "center", justify: "between", background: "surface" },
+      style: { width: "full", height: 150, paddingX: 24, direction: "row", align: "center", gap: 20, background: "surface" },
       children: [
-        View.Row({ style: { align: "center", gap: 20 }, children: [
+        View.Row({ style: { grow: 1, align: "center", gap: 20 }, children: [
           View.Box({ style: { width: 68, height: 68, align: "center", justify: "center", background: "accentSoft" }, children:
             View.Text({ text: app.title.slice(0, 1).toUpperCase(), style: { color: "accent", fontSize: "xl", fontWeight: "bold" } }) }),
-          View.Column({ style: { width: 448, gap: 8 }, children: [
+          View.Column({ style: { grow: 1, gap: 8 }, children: [
             View.Text({ text: app.title, style: { fontSize: "xl", fontWeight: "bold" } }),
             View.Text({ text: app.description, style: { color: "muted", fontSize: "lg" } }),
             app.scheduleEveryMinutes ? View.Text({ text: `UPDATES EVERY ${app.scheduleEveryMinutes} MINUTES`, style: { color: "muted" } }) : null,
@@ -228,12 +216,13 @@
       : "APP DATA STAYS ISOLATED.  PI AGENT CAN USE EACH APP'S TOOLS.";
     return View.Screen({ children: [
       systemHeader("APPS"),
-      View.Column({ style: { position: "relative", height: 1060, paddingX: 24, paddingTop: 28, gap: 16 }, children: [
+      View.Column({ style: { grow: 1, padding: 24, gap: 16 }, children: [
         View.Text({ text: `${installed.length} INSTALLED APPS`, style: { color: "muted", fontWeight: "bold" } }),
-        installed.length ? installed.map(appRow) : View.EmptyState({ compact: true, title: "NO OPTIONAL APPS INSTALLED" }),
-        View.Box({ style: { position: "absolute", left: 24, top: 820, width: 672, height: 112, paddingX: 24, background: "border" }, children:
+        View.Column({ style: { grow: 1, gap: 16 }, children:
+          installed.length ? installed.map(appRow) : View.EmptyState({ compact: true, title: "NO OPTIONAL APPS INSTALLED" }) }),
+        View.Box({ style: { height: 112, paddingX: 24, background: "border" }, children:
           View.StatusBar({ text: status, tone: error ? "danger" : "neutral" }) }),
-        View.Box({ style: { position: "absolute", left: 24, top: 948, width: 672, height: 80 }, children:
+        View.Box({ style: { height: 80 }, children:
           View.ActionButton({
             label: uninstallMode.get() ? "DONE" : "UNINSTALL APP",
             disabled: (!uninstallMode.get() && installed.length === 0) || Boolean(busy),
@@ -248,7 +237,7 @@
   function networkRow(network) {
     return View.Pressable({
       onPress: () => selectNetwork(network),
-      style: { width: 584, height: 84, paddingX: 20, direction: "row", align: "center", justify: "between", background: "surface" },
+      style: { width: "full", height: 84, paddingX: 20, direction: "row", align: "center", justify: "between", background: "surface" },
       children: [
         View.Text({ text: network.ssid, style: { fontSize: "lg", fontWeight: "bold" } }),
         View.Text({ text: `${network.rssiDbm} DBM  ${network.secured ? "LOCK" : "OPEN"}`, style: { color: "muted" } }),
@@ -261,36 +250,36 @@
     const offset = wifiOffset.get();
     return View.Screen({ children: [
       systemHeader("SETTINGS"),
-      View.Column({ style: { height: 1060, paddingX: 24, paddingTop: 20 }, children: [
+      View.Column({ style: { grow: 1, padding: 24, gap: 12 }, children: [
         View.Row({ style: { height: 64, paddingX: 20, align: "center", justify: "between", background: "shell" }, children: [
           View.Text({ text: "SYSTEM", style: { color: "white", fontWeight: "bold" } }),
           View.Text({ text: cpuText.get, style: { color: "accent", fontWeight: "bold" } }),
           View.Text({ text: psramText.get, style: { color: "subtle", fontWeight: "bold" } }),
         ] }),
-        View.Box({ style: { height: 8 } }),
-        View.Column({ style: { position: "relative", height: 154, paddingX: 20, paddingTop: 20, background: "surface" }, children: [
-          View.Text({ text: "WI-FI", style: { fontSize: "lg", fontWeight: "bold" } }),
-          View.Text({ text: wifiSsid.get, style: { paddingTop: 12, color: "accent", fontSize: "lg", fontWeight: "bold" } }),
-          View.Text({ text: wifiDetail.get, style: { paddingTop: 12, color: "muted" } }),
-          View.Box({ style: { position: "absolute", left: 456, top: 14, width: 196, height: 72 }, children:
+        View.Row({ style: { height: 154, paddingX: 20, align: "center", gap: 16, background: "surface" }, children: [
+          View.Column({ style: { grow: 1, gap: 12 }, children: [
+            View.Text({ text: "WI-FI", style: { fontSize: "lg", fontWeight: "bold" } }),
+            View.Text({ text: wifiSsid.get, style: { color: "accent", fontSize: "lg", fontWeight: "bold" } }),
+            View.Text({ text: wifiDetail.get, style: { color: "muted" } }),
+          ] }),
+          View.Box({ style: { width: 196, height: 72 }, children:
             View.ActionButton({ label: wifiScanning.get() ? "SCANNING" : "SCAN", disabled: wifiScanning.get(), onPress: () => PocketPi.command("device.wifi.scan") }) }),
         ] }),
-        View.Text({ text: "AVAILABLE NETWORKS", style: { height: 40, paddingTop: 12, color: "muted" } }),
-        View.Column({ style: { position: "relative", height: 470, gap: 8 }, children: [
-          ...(available.length ? available.slice(offset, offset + 5).map(networkRow) : [View.EmptyState({ compact: true, title: "NO NETWORK LIST YET", detail: "TAP SCAN TO FIND WI-FI" })]),
-          available.length > 5 ? [
-            View.ScrollButton({ direction: "up", onPress: () => moveWifi(-4), style: { position: "absolute", left: 604, top: 0 } }),
-            View.ScrollButton({ direction: "down", onPress: () => moveWifi(4), style: { position: "absolute", left: 604, top: 320 } }),
-          ] : null,
+        View.Text({ text: "AVAILABLE NETWORKS", style: { color: "muted" } }),
+        View.Row({ style: { grow: 1, gap: 20 }, children: [
+          available.length
+            ? View.Column({ style: { grow: 1, gap: 8 }, children: available.slice(offset, offset + 5).map(networkRow) })
+            : View.EmptyState({ compact: true, title: "NO NETWORK LIST YET", detail: "TAP SCAN TO FIND WI-FI" }),
+          available.length > 5 ? View.ScrollRail({ onUp: () => moveWifi(-4), onDown: () => moveWifi(4) }) : null,
         ] }),
-        View.Column({ style: { height: 160, paddingX: 20, paddingTop: 20, background: "surface" }, children: [
+        View.Column({ style: { height: 160, paddingX: 20, justify: "center", gap: 12, background: "surface" }, children: [
           View.Text({ text: "MODEL BACKEND", style: { color: "muted" } }),
-          View.Text({ text: model.get, style: { paddingTop: 12, fontSize: "lg", fontWeight: "bold" } }),
-          View.Text({ text: deviceText.get, style: { paddingTop: 12, color: "muted" } }),
+          View.Text({ text: model.get, style: { fontSize: "lg", fontWeight: "bold" } }),
+          View.Text({ text: deviceText.get, style: { color: "muted" } }),
         ] }),
-        View.Row({ style: { height: 108, paddingTop: 28, gap: 16 }, children: [
-          View.Box({ style: { width: 316, height: 80 }, children: View.ActionButton({ label: "FORGET WI-FI", tone: "neutral", onPress: () => PocketPi.command("device.wifi.forget") }) }),
-          View.Box({ style: { width: 340, height: 80 }, children: View.ActionButton({ label: "RESTART DEVICE", tone: "danger", onPress: () => PocketPi.command("device.restart") }) }),
+        View.Row({ style: { height: 80, gap: 16 }, children: [
+          View.Box({ style: { grow: 1, basis: 0, height: "full" }, children: View.ActionButton({ label: "FORGET WI-FI", tone: "neutral", onPress: () => PocketPi.command("device.wifi.forget") }) }),
+          View.Box({ style: { grow: 1, basis: 0, height: "full" }, children: View.ActionButton({ label: "RESTART DEVICE", tone: "danger", onPress: () => PocketPi.command("device.restart") }) }),
         ] }),
       ] }),
       bottomBar(),
@@ -302,8 +291,8 @@
     const limit = purpose.type === "wifi" ? 63 : 256;
     return View.Screen({ children: [
       systemHeader(purpose.type === "wifi" ? "WIFI PASSWORD" : "NEW MESSAGE", closeKeyboard),
-      View.Column({ style: { height: 408, paddingX: 24, paddingTop: 20 }, children: [
-        View.Box({ style: { height: 270, paddingX: 22, paddingTop: 24, background: "surface" }, children:
+      View.Column({ style: { grow: 1, paddingX: 24, paddingTop: 20 }, children: [
+        View.Box({ style: { grow: 1, paddingX: 22, paddingTop: 24, background: "surface" }, children:
           View.Text({
             text: () => input.get() ? (purpose.type === "wifi" ? "*".repeat(input.get().length) : input.get()) : purpose.type === "wifi" ? "ENTER NETWORK PASSWORD..." : "TYPE YOUR MESSAGE...",
             style: { color: "heading", fontSize: "lg" },
@@ -324,17 +313,18 @@
     const current = viewer.get();
     return View.Screen({ children: [
       systemHeader("FILE VIEWER", closeViewer),
-      View.Column({ style: { position: "relative", height: 1168, paddingX: 24, paddingTop: 20 }, children: [
-        View.Box({ style: { height: 82, paddingX: 16, justify: "center", background: "surface" }, children:
-          View.Text({ text: current?.path ?? "NO FILE OPEN", style: { fontSize: "lg", fontWeight: "bold" } }) }),
-        View.Box({ style: { width: 584, height: 900, paddingX: 20, paddingTop: 20, background: "shell" }, children:
-          View.Text({ text: current?.page.text ?? "", style: { color: "border" } }) }),
-        View.Text({
-          text: current ? `PAGE ${current.pageIndex + 1}  ·  SOURCE LINES ${current.page.startSourceLine + 1}-${current.page.lastSourceLine + 1}` : "NO FILE OPEN",
-          style: { paddingTop: 12, color: "muted" },
-        }),
-        View.ScrollButton({ direction: "up", onPress: () => moveViewerPage(-1), style: { position: "absolute", left: 628, top: 58 } }),
-        View.ScrollButton({ direction: "down", onPress: () => moveViewerPage(1), style: { position: "absolute", left: 628, top: 828 } }),
+      View.Row({ style: { grow: 1, padding: 24, gap: 20 }, children: [
+        View.Column({ style: { grow: 1, gap: 12 }, children: [
+          View.Box({ style: { height: 82, paddingX: 16, justify: "center", background: "surface" }, children:
+            View.Text({ text: current?.path ?? "NO FILE OPEN", style: { fontSize: "lg", fontWeight: "bold" } }) }),
+          View.Box({ style: { grow: 1, paddingX: 20, paddingTop: 20, background: "shell" }, children:
+            View.Text({ text: current?.page.text ?? "", style: { color: "border" } }) }),
+          View.Text({
+            text: current ? `PAGE ${current.pageIndex + 1}  ·  SOURCE LINES ${current.page.startSourceLine + 1}-${current.page.lastSourceLine + 1}` : "NO FILE OPEN",
+            style: { color: "muted" },
+          }),
+        ] }),
+        View.ScrollRail({ onUp: () => moveViewerPage(-1), onDown: () => moveViewerPage(1) }),
       ] }),
     ] });
   }
@@ -344,13 +334,14 @@
     const offset = readerOffset.get();
     return View.Screen({ children: [
       systemHeader("MESSAGE READER", closeReader),
-      View.Column({ style: { position: "relative", height: 1168, paddingX: 24, paddingTop: 20 }, children: [
-        View.Box({ style: { height: 82, paddingX: 16, justify: "center", background: "surface" }, children:
-          View.Text({ text: current?.author ?? "PI", style: { color: "accent", fontSize: "lg", fontWeight: "bold" } }) }),
-        View.Box({ style: { width: 584, height: 900, paddingX: 20, paddingTop: 20, background: "surface" }, children:
-          View.Text({ text: current ? current.lines.slice(offset, offset + READER_PAGE_LINES).join("\n") : "", style: { fontSize: "xl" } }) }),
-        View.ScrollButton({ direction: "up", onPress: () => moveReader(-18), style: { position: "absolute", left: 628, top: 58 } }),
-        View.ScrollButton({ direction: "down", onPress: () => moveReader(18), style: { position: "absolute", left: 628, top: 828 } }),
+      View.Row({ style: { grow: 1, padding: 24, gap: 20 }, children: [
+        View.Column({ style: { grow: 1, gap: 12 }, children: [
+          View.Box({ style: { height: 82, paddingX: 16, justify: "center", background: "surface" }, children:
+            View.Text({ text: current?.author ?? "PI", style: { color: "accent", fontSize: "lg", fontWeight: "bold" } }) }),
+          View.Box({ style: { grow: 1, paddingX: 20, paddingTop: 20, background: "surface" }, children:
+            View.Text({ text: current ? current.lines.slice(offset, offset + READER_PAGE_LINES).join("\n") : "", style: { fontSize: "xl" } }) }),
+        ] }),
+        View.ScrollRail({ onUp: () => moveReader(-18), onDown: () => moveReader(18) }),
       ] }),
     ] });
   }
@@ -365,9 +356,9 @@
     return View.Screen({ children: [
       View.Header({ title: status, accent: detail.state === "failed" ? "danger" : detail.state === "success" ? "ready" : "busy", metaTop: "LOCAL INSTALL", metaBottom: "PHYSICAL CONFIRMATION" }),
       View.PageIntro({ eyebrow: "APP PACKAGE", title: detail.name, description: `VERSION ${detail.version}  ·  ${detail.tools} TOOLS  ·  ${detail.schedules} SCHEDULES` }),
-      View.Column({ style: { height: 602, paddingX: 24 }, children: [
+      View.Column({ style: { grow: 1, paddingX: 24, gap: 16 }, children: [
         View.SectionHeading({ title: "REQUESTED ACCESS", detail: "PACKAGE MANIFEST" }),
-        View.Card({ style: { height: 526, paddingX: 24, paddingY: 24, gap: 20 }, children: [
+        View.Card({ style: { grow: 1, paddingX: 24, paddingY: 24, gap: 20 }, children: [
           View.Text({ text: "NETWORK", style: { color: "muted", fontWeight: "bold" } }),
           View.Text({ text: detail.network.length ? detail.network.slice(0, 2).join("\n") : "NO NETWORK ACCESS", style: { fontSize: "lg" } }),
           View.Box({ style: { height: 2, background: "border" } }),
@@ -377,19 +368,17 @@
           View.Text({ text: "CAPABILITIES", style: { color: "muted", fontWeight: "bold" } }),
           View.Text({ text: `${detail.tools} TOOLS  ·  ${detail.schedules} SCHEDULES`, style: { fontSize: "lg" } }),
         ] }),
-      ] }),
-      View.Box({ style: { height: 166, paddingX: 24, paddingTop: 16 }, children:
-        View.Column({ style: { width: "full", height: 150, paddingX: 24, justify: "center", gap: 12, radius: 12, background: surface }, children: [
+        View.Column({ style: { height: 150, paddingX: 24, justify: "center", gap: 12, radius: 12, background: surface }, children: [
           View.Text({ text: title, style: { color, fontSize: "xl", fontWeight: "bold" } }),
           View.Text({ text: message, style: { color: "muted" } }),
-        ] }) }),
-      View.Box({ style: { height: 168, paddingX: 24, paddingTop: 24, paddingBottom: 24 }, children:
-        View.ActionButton({
+        ] }),
+        View.Box({ style: { height: 120, paddingY: 20 }, children: View.ActionButton({
           label: detail.state === "review" ? "INSTALL" : detail.state === "installing" ? "INSTALLING..." : "DONE",
           disabled: detail.state === "installing",
           tone: detail.state === "review" ? "primary" : "neutral",
           onPress: () => PocketPi.command(detail.state === "review" ? "apps.install" : "apps.dismissInstall"),
         }) }),
+      ] }),
       View.Box({ style: { height: 66 }, children: View.StatusBar({ text: "Package received over your local network", dark: true }) }),
     ] });
   }
