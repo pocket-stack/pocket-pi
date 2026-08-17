@@ -432,23 +432,25 @@ function accountsScreen(state) {
   const visible = state.accounts.slice(state.accountScroll, state.accountScroll + 8);
   return View.Screen({ children: [
     header("ACCOUNTS"),
-    View.Row({ style: { grow: 1, padding: 24, gap: 20 }, children: [
-      View.Column({ style: { grow: 1, gap: 12 }, children: visible.map((account) => View.Pressable({
-        onPress: () => selectAccount(account),
-        style: { width: "full", height: 100, paddingX: 20, justify: "center", gap: 12, radius: 12, shadow: 1, background: account.number === state.selectedAccount ? "successSoft" : "surface", borderColor: account.number === state.selectedAccount ? "success" : "border", borderWidth: 1 },
-        children: [
-          View.Row({ style: { align: "center", justify: "between" }, children: [
-            View.Text({ text: account.label, style: { fontSize: "xl", color: "heading", fontWeight: "bold" } }),
-            View.Text({ text: "····" + account.suffix, style: { fontSize: "lg", color: "muted", fontWeight: "bold" } }),
-          ] }),
-          View.Row({ style: { align: "center", justify: "between" }, children: [
-            View.Badge({ label: account.status, tone: "success" }),
-            account.number === state.selectedAccount ? View.Text({ text: "SELECTED", style: { color: "success", fontWeight: "bold" } }) : null,
-          ] }),
-        ],
-      })) }),
-      scrollRail("accounts"),
-    ] }),
+    View.Column({ style: { grow: 1, padding: 24 }, children: visible.length
+      ? View.Row({ style: { gap: 20 }, children: [
+        View.Column({ style: { grow: 1, gap: 12 }, children: visible.map((account) => View.Pressable({
+          onPress: () => selectAccount(account),
+          style: { width: "full", height: 100, paddingX: 20, justify: "center", gap: 12, radius: 12, shadow: 1, background: account.number === state.selectedAccount ? "successSoft" : "surface", borderColor: account.number === state.selectedAccount ? "success" : "border", borderWidth: 1 },
+          children: [
+            View.Row({ style: { align: "center", justify: "between" }, children: [
+              View.Text({ text: account.label, style: { fontSize: "xl", color: "heading", fontWeight: "bold" } }),
+              View.Text({ text: "····" + account.suffix, style: { fontSize: "lg", color: "muted", fontWeight: "bold" } }),
+            ] }),
+            View.Row({ style: { align: "center", justify: "between" }, children: [
+              View.Badge({ label: account.status, tone: "success" }),
+              account.number === state.selectedAccount ? View.Text({ text: "SELECTED", style: { color: "success", fontWeight: "bold" } }) : null,
+            ] }),
+          ],
+        })) }),
+        state.accounts.length > 8 ? scrollRail("accounts") : null,
+      ] })
+      : View.EmptyState({ compact: true, style: { height: "full" }, title: "NO ACCOUNTS AVAILABLE" }) }),
   ] });
 }
 
@@ -468,11 +470,12 @@ function activityScreen(state) {
   const empty = state.dashboard.activityAvailable ? "NO ACTIVITY YET" : "ACTIVITY UNAVAILABLE";
   return View.Screen({ children: [
     header("ACTIVITY", "LAST 7 DAYS"),
-    View.Row({ style: { grow: 1, padding: 24, gap: 20 }, children: [
-      View.Column({ style: { grow: 1, gap: 12 }, children:
-        visible.length ? visible.map(activityCard) : View.EmptyState({ title: empty, compact: true }) }),
-      scrollRail("activity"),
-    ] }),
+    View.Column({ style: { grow: 1, padding: 24 }, children: visible.length
+      ? View.Row({ style: { gap: 20 }, children: [
+        View.Column({ style: { grow: 1, gap: 12 }, children: visible.map(activityCard) }),
+        state.dashboard.activity.length > 8 ? scrollRail("activity") : null,
+      ] })
+      : View.EmptyState({ title: empty, compact: true, style: { height: "full" } }) }),
   ] });
 }
 
@@ -491,11 +494,12 @@ function positionsScreen(state) {
   const empty = state.dashboard.positionsAvailable ? "NO OPEN POSITIONS" : "POSITIONS UNAVAILABLE";
   return View.Screen({ children: [
     header("POSITIONS"),
-    View.Row({ style: { grow: 1, padding: 24, gap: 20 }, children: [
-      View.Column({ style: { grow: 1, gap: 12 }, children:
-        visible.length ? visible.map(positionCard) : View.EmptyState({ title: empty, compact: true }) }),
-      scrollRail("positions"),
-    ] }),
+    View.Column({ style: { grow: 1, padding: 24 }, children: visible.length
+      ? View.Row({ style: { gap: 20 }, children: [
+        View.Column({ style: { grow: 1, gap: 12 }, children: visible.map(positionCard) }),
+        state.dashboard.positions.length > 9 ? scrollRail("positions") : null,
+      ] })
+      : View.EmptyState({ title: empty, compact: true, style: { height: "full" } }) }),
   ] });
 }
 

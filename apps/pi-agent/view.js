@@ -6,6 +6,7 @@
   const READER_TEXT_WIDTH = 544;
   const READER_PAGE_LINES = 36;
   const FILE_PAGE_LINES = 39;
+  const APP_VISIBLE_ROWS = 4;
   const tabs = ["chat", "files", "apps", "settings"];
 
   const screen = View.state("chat");
@@ -16,6 +17,7 @@
   const scheduleText = View.state("NO WAKE SCHEDULED\n\nASK PI TO CREATE ONE WITH SCHEDULE.SET");
   const install = jsonState(null);
   const apps = jsonState([]);
+  const appOffset = View.state(0);
   const uninstallMode = View.state(false);
   const uninstallingApp = View.state("");
   const uninstallError = View.state("");
@@ -128,10 +130,11 @@
     return View.Screen({ children: [
       systemHeader("ESP32 PI AGENT"),
       View.Column({ style: { grow: 1, padding: 24, gap: 24 }, children: [
-        View.Row({ style: { grow: 1, gap: 20 }, children: [
-          View.Column({ style: { grow: 1, gap: 22 }, children: chatSlots.slice(0, chatCount.get()).map(chatCard) }),
-          View.ScrollRail({ onUp: () => moveChat(2), onDown: () => moveChat(-2) }),
-        ] }),
+        View.Column({ style: { grow: 1 }, children:
+          View.Row({ style: { gap: 20 }, children: [
+            View.Column({ style: { grow: 1, gap: 22 }, children: chatSlots.slice(0, chatCount.get()).map(chatCard) }),
+            chatTurns.length > 2 ? View.ScrollRail({ onUp: () => moveChat(2), onDown: () => moveChat(-2) }) : null,
+          ] }) }),
         View.Card({ style: { height: 204, paddingX: 24, paddingY: 20, gap: 24 }, children: [
           View.Text({ text: "NEXT WAKE", style: { color: "muted", fontWeight: "bold" } }),
           View.Text({
@@ -171,12 +174,12 @@
       View.Column({ style: { grow: 1, padding: 24, gap: 12 }, children: [
         View.Box({ style: { height: 48, paddingX: 16, justify: "center", background: "border" }, children:
           View.Text({ text: "/workspace" + (path ? "/" + path : ""), style: { color: "muted" } }) }),
-        View.Row({ style: { grow: 1, gap: 20 }, children: [
-          entries.length
-            ? View.Column({ style: { grow: 1, gap: 12 }, children: entries.slice(offset, offset + 8).map(fileRow) })
-            : View.EmptyState({ compact: true, title: fileError.get }),
-          entries.length > 8 ? View.ScrollRail({ onUp: () => moveFiles(-4), onDown: () => moveFiles(4) }) : null,
-        ] }),
+        View.Column({ style: { grow: 1 }, children: entries.length
+          ? View.Row({ style: { gap: 20 }, children: [
+            View.Column({ style: { grow: 1, gap: 12 }, children: entries.slice(offset, offset + 8).map(fileRow) }),
+            entries.length > 8 ? View.ScrollRail({ onUp: () => moveFiles(-4), onDown: () => moveFiles(4) }) : null,
+          ] })
+          : View.EmptyState({ compact: true, style: { height: "full" }, title: fileError.get }) }),
       ] }),
       bottomBar(),
     ] });
@@ -209,6 +212,7 @@
 
   function appsScreen() {
     const installed = apps.get();
+    const offset = appOffset.get();
     const busy = uninstallingApp.get();
     const error = uninstallError.get();
     const status = error ? `UNINSTALL FAILED  ·  ${error}` : busy
@@ -218,8 +222,12 @@
       systemHeader("APPS"),
       View.Column({ style: { grow: 1, padding: 24, gap: 16 }, children: [
         View.Text({ text: `${installed.length} INSTALLED APPS`, style: { color: "muted", fontWeight: "bold" } }),
-        View.Column({ style: { grow: 1, gap: 16 }, children:
-          installed.length ? installed.map(appRow) : View.EmptyState({ compact: true, title: "NO OPTIONAL APPS INSTALLED" }) }),
+        View.Column({ style: { grow: 1 }, children: installed.length
+          ? View.Row({ style: { gap: 20 }, children: [
+            View.Column({ style: { grow: 1, gap: 16 }, children: installed.slice(offset, offset + APP_VISIBLE_ROWS).map(appRow) }),
+            installed.length > APP_VISIBLE_ROWS ? View.ScrollRail({ onUp: () => moveApps(-APP_VISIBLE_ROWS), onDown: () => moveApps(APP_VISIBLE_ROWS) }) : null,
+          ] })
+          : View.EmptyState({ compact: true, style: { height: "full" }, title: "NO OPTIONAL APPS INSTALLED" }) }),
         View.Box({ style: { height: 112, paddingX: 24, background: "border" }, children:
           View.StatusBar({ text: status, tone: error ? "danger" : "neutral" }) }),
         View.Box({ style: { height: 80 }, children:
@@ -266,12 +274,12 @@
             View.ActionButton({ label: wifiScanning.get() ? "SCANNING" : "SCAN", disabled: wifiScanning.get(), onPress: () => PocketPi.command("device.wifi.scan") }) }),
         ] }),
         View.Text({ text: "AVAILABLE NETWORKS", style: { color: "muted" } }),
-        View.Row({ style: { grow: 1, gap: 20 }, children: [
-          available.length
-            ? View.Column({ style: { grow: 1, gap: 8 }, children: available.slice(offset, offset + 5).map(networkRow) })
-            : View.EmptyState({ compact: true, title: "NO NETWORK LIST YET", detail: "TAP SCAN TO FIND WI-FI" }),
-          available.length > 5 ? View.ScrollRail({ onUp: () => moveWifi(-4), onDown: () => moveWifi(4) }) : null,
-        ] }),
+        View.Column({ style: { grow: 1 }, children: available.length
+          ? View.Row({ style: { gap: 20 }, children: [
+            View.Column({ style: { grow: 1, gap: 8 }, children: available.slice(offset, offset + 5).map(networkRow) }),
+            available.length > 5 ? View.ScrollRail({ onUp: () => moveWifi(-4), onDown: () => moveWifi(4) }) : null,
+          ] })
+          : View.EmptyState({ compact: true, style: { height: "full" }, title: "NO NETWORK LIST YET", detail: "TAP SCAN TO FIND WI-FI" }) }),
         View.Column({ style: { height: 160, paddingX: 20, justify: "center", gap: 12, background: "surface" }, children: [
           View.Text({ text: "MODEL BACKEND", style: { color: "muted" } }),
           View.Text({ text: model.get, style: { fontSize: "lg", fontWeight: "bold" } }),
@@ -311,20 +319,21 @@
 
   function viewerScreen() {
     const current = viewer.get();
+    const scrollable = Boolean(current && (current.pageIndex > 0 || current.page.hasMore));
     return View.Screen({ children: [
       systemHeader("FILE VIEWER", closeViewer),
-      View.Row({ style: { grow: 1, padding: 24, gap: 20 }, children: [
-        View.Column({ style: { grow: 1, gap: 12 }, children: [
-          View.Box({ style: { height: 82, paddingX: 16, justify: "center", background: "surface" }, children:
-            View.Text({ text: current?.path ?? "NO FILE OPEN", style: { fontSize: "lg", fontWeight: "bold" } }) }),
+      View.Column({ style: { grow: 1, padding: 24, gap: 12 }, children: [
+        View.Box({ style: { height: 82, paddingX: 16, justify: "center", background: "surface" }, children:
+          View.Text({ text: current?.path ?? "NO FILE OPEN", style: { fontSize: "lg", fontWeight: "bold" } }) }),
+        View.Row({ style: { grow: 1, gap: 20 }, children: [
           View.Box({ style: { grow: 1, paddingX: 20, paddingTop: 20, background: "shell" }, children:
             View.Text({ text: current?.page.text ?? "", style: { color: "border" } }) }),
-          View.Text({
-            text: current ? `PAGE ${current.pageIndex + 1}  ·  SOURCE LINES ${current.page.startSourceLine + 1}-${current.page.lastSourceLine + 1}` : "NO FILE OPEN",
-            style: { color: "muted" },
-          }),
+          scrollable ? View.ScrollRail({ onUp: () => moveViewerPage(-1), onDown: () => moveViewerPage(1) }) : null,
         ] }),
-        View.ScrollRail({ onUp: () => moveViewerPage(-1), onDown: () => moveViewerPage(1) }),
+        View.Text({
+          text: current ? `PAGE ${current.pageIndex + 1}  ·  SOURCE LINES ${current.page.startSourceLine + 1}-${current.page.lastSourceLine + 1}` : "NO FILE OPEN",
+          style: { color: "muted" },
+        }),
       ] }),
     ] });
   }
@@ -332,16 +341,17 @@
   function readerScreen() {
     const current = reader.get();
     const offset = readerOffset.get();
+    const scrollable = (current?.lines.length ?? 0) > READER_PAGE_LINES;
     return View.Screen({ children: [
       systemHeader("MESSAGE READER", closeReader),
-      View.Row({ style: { grow: 1, padding: 24, gap: 20 }, children: [
-        View.Column({ style: { grow: 1, gap: 12 }, children: [
-          View.Box({ style: { height: 82, paddingX: 16, justify: "center", background: "surface" }, children:
-            View.Text({ text: current?.author ?? "PI", style: { color: "accent", fontSize: "lg", fontWeight: "bold" } }) }),
+      View.Column({ style: { grow: 1, padding: 24, gap: 12 }, children: [
+        View.Box({ style: { height: 82, paddingX: 16, justify: "center", background: "surface" }, children:
+          View.Text({ text: current?.author ?? "PI", style: { color: "accent", fontSize: "lg", fontWeight: "bold" } }) }),
+        View.Row({ style: { grow: 1, gap: 20 }, children: [
           View.Box({ style: { grow: 1, paddingX: 20, paddingTop: 20, background: "surface" }, children:
             View.Text({ text: current ? current.lines.slice(offset, offset + READER_PAGE_LINES).join("\n") : "", style: { fontSize: "xl" } }) }),
+          scrollable ? View.ScrollRail({ onUp: () => moveReader(-18), onDown: () => moveReader(18) }) : null,
         ] }),
-        View.ScrollRail({ onUp: () => moveReader(-18), onDown: () => moveReader(18) }),
       ] }),
     ] });
   }
@@ -428,6 +438,11 @@
   function moveChat(delta) {
     chatScroll = Math.max(0, Math.min(Math.max(0, chatTurns.length - 2), chatScroll + delta));
     syncChat();
+    return "";
+  }
+
+  function moveApps(delta) {
+    appOffset.set(Math.max(0, Math.min(Math.max(0, apps.get().length - APP_VISIBLE_ROWS), appOffset.get() + delta)));
     return "";
   }
 
@@ -668,6 +683,7 @@
       ? PiText.wrapPreview(`${schedule.name}  ${schedule.next ?? ""}\n\n${schedule.prompt ?? ""}`, FONT_BODY, CHAT_TEXT_WIDTH, 5)
       : "NO WAKE SCHEDULED\n\nASK PI TO CREATE ONE WITH SCHEDULE.SET");
     apps.set(next.apps ?? []);
+    appOffset.set(Math.min(appOffset.get(), Math.max(0, (next.apps ?? []).length - APP_VISIBLE_ROWS)));
     install.set(next.install ?? null);
     uninstallingApp.set(next.uninstallingApp ?? "");
     uninstallError.set(next.uninstallError ?? "");

@@ -507,7 +507,7 @@
 
   function ScrollRail(props = {}) {
     if (typeof props.onUp !== "function" || typeof props.onDown !== "function") fail("ScrollRail requires onUp and onDown");
-    return Column({ style: { width: 68, height: "full", justify: "between", ...props.style }, children: [
+    return Column({ style: { width: 68, justify: "between", ...props.style }, children: [
       ScrollButton({ direction: "up", onPress: props.onUp }),
       ScrollButton({ direction: "down", onPress: props.onDown }),
     ] });

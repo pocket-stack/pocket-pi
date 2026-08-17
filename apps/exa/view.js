@@ -72,6 +72,7 @@ function historyCard(item) {
 function render() {
   const state = model.get();
   const visible = state.history.slice(state.offset, state.offset + HISTORY_VISIBLE_ROWS);
+  const scrollable = state.history.length > HISTORY_VISIBLE_ROWS || state.hasMore;
   return View.Screen({ children: [
     View.Header({
       title: "EXA RESEARCH",
@@ -85,18 +86,18 @@ function render() {
       description: "Every research.search call is saved here automatically.",
       tone: "info",
     }),
-    View.Row({ style: { grow: 1, paddingX: 24, paddingY: 16, gap: 20 }, children: [
-      state.history.length === 0
-        ? View.EmptyState({
-          style: { height: "full" },
-          icon: "E",
-          title: "No searches yet",
-          detail: "Ask Pi Agent to research a topic.\nThe search and its results will appear here.",
-          tone: "info",
-        })
-        : View.Column({ style: { grow: 1, gap: 12 }, children: visible.map(historyCard) }),
-      state.history.length ? View.ScrollRail({ onUp: () => scrollHistory(-1), onDown: () => scrollHistory(1) }) : null,
-    ] }),
+    View.Column({ style: { grow: 1, paddingX: 24, paddingY: 16 }, children: state.history.length === 0
+      ? View.EmptyState({
+        style: { height: "full" },
+        icon: "E",
+        title: "No searches yet",
+        detail: "Ask Pi Agent to research a topic.\nThe search and its results will appear here.",
+        tone: "info",
+      })
+      : View.Row({ style: { gap: 20 }, children: [
+        View.Column({ style: { grow: 1, gap: 12 }, children: visible.map(historyCard) }),
+        scrollable ? View.ScrollRail({ onUp: () => scrollHistory(-1), onDown: () => scrollHistory(1) }) : null,
+      ] }) }),
     View.Box({ style: { height: 96 }, children: View.StatusBar({
       text: state.status,
       tone: state.status.includes("FAILED") ? "danger" : "neutral",
