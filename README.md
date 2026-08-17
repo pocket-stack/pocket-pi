@@ -43,7 +43,7 @@ contracts while adding the device-level responsibilities Pocket Pi owns:
   Tools, UI events and Schedules route to the same Actions;
 - the native host owns credentials, transport, hardware and lifecycle.
 
-The companion simulator runs the same AgentOS, PocketJS App bundles, UI, Tool
+The companion simulator runs the same AgentOS, App source, UI, Tool
 registry and workspace contracts while replacing hardware adapters with macOS
 implementations. It is not an ESP32 CPU/peripheral emulator, and simulator
 success never replaces physical-device acceptance.
@@ -69,11 +69,12 @@ cargo xtask build esp32-p4-sim
 cargo xtask build esp32-p4
 ```
 
-Firmware embeds the Pi Agent Bundle so a blank device can boot. Ordinary Apps
+Firmware embeds the Pi Agent source View and Agent loop so a blank device can boot. Ordinary Apps
 use the installable container:
 
 ```sh
-cargo xtask build app exa path/to/exa-credentials.json
+cargo xtask package app exa path/to/exa-credentials.json
+cargo xtask package app robinhood path/to/robinhood-credentials.json
 ```
 
 Packages are written to `target/pocketapps/<id>.pocketapp`. The firmware image
@@ -124,10 +125,13 @@ python3 tools/uart-model-bridge.py "$DEVICE_PORT" --provider codex \
   --prompt 'Use write, read, schedule.set and schedule.list.'
 ```
 
-Use `espflash monitor` when only serial logs are needed:
+Use `espflash monitor` only for boot diagnostics. It controls DTR/RTS on the
+board's WCH USB bridge, so it must not run between an App upload and the
+on-device confirmation. Restore a normal boot after exiting:
 
 ```sh
 espflash monitor --port "$DEVICE_PORT"
+espflash reset --port "$DEVICE_PORT" --non-interactive
 ```
 
 To install over the local network, open `http://<device-ip>/` from a computer or
@@ -140,7 +144,9 @@ python3 tools/uart-install.py "$DEVICE_PORT" \
 ```
 
 Both transports stop at the same review screen; installation starts only after
-confirmation on Pocket Pi. Installation fails if that App id is already present,
+confirmation on Pocket Pi. Confirm before opening `espflash monitor`; otherwise
+its control-line sequence can reset the board and discard the pending review.
+Installation fails if that App id is already present,
 and every install must carry each credential declared by the App. Installer
 removes initial values from the package and stores them in native
 NVS; they are not exposed through the App filesystem or Agent workspace.
@@ -273,10 +279,10 @@ and [docs/esp32-p4-port.md](docs/esp32-p4-port.md) for board-specific details.
 
 ## Current validation
 
-On **2026-08-15**, the workspace completed 40 Rust tests and 3 App text behavior
+On **2026-08-16**, the workspace completed 45 Rust tests and 3 App text behavior
 tests with no failures, passed workspace Clippy with warnings denied, and built
-the ESP32-P4 release firmware. No new physical-board test was run for this
-refactor. On 2026-08-14, a simulator LAN smoke uploaded the generated Exa
+the simulator and ESP32-P4 release firmware. No new physical-board test was run
+for this refactor. On 2026-08-14, a simulator LAN smoke uploaded the generated Exa
 package through `POST /install` and received HTTP 202; the core install test
 proves activation, Tool routing, SQLite ownership and restart recovery for a
 previously absent App. The uninstall lifecycle test proves complete App-owned
@@ -289,7 +295,7 @@ provisioning received `PPI-CONFIG-STORED`; a bridge-free reset logged
 `loaded wireless model configuration from NVS`, restored Wi-Fi/DHCP on
 the saved network, and reached an idle Pi Agent; the independent App uploader
 transferred Exa to the shared review screen without resetting the board.
-That 2026-08-14 hardware evidence predates the current Bundle contract and is
+That 2026-08-14 hardware evidence predates the current Source App contract and is
 not physical-board acceptance for this refactor.
 
 Phone upload, fresh provider calls and unattended memory pressure remain
@@ -300,7 +306,7 @@ for fresh physical-board acceptance.
 
 ```sh
 cargo test --workspace
-bun test apps/_shared/text.test.ts
+bun test apps/pi-agent/text.test.js
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 

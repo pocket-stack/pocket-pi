@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
 use anyhow::{bail, Context, Result};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 const POCKETJS_REVISION: &str = "e12cf12f82cc60b636368119d49a06eb9ed2a3d5";
 const SYSTEM_FRAMEWORK_API: u32 = 1;
@@ -19,22 +19,17 @@ fn main() -> Result<()> {
     let target = args.next();
     let rest = args.collect::<Vec<_>>();
     match (command_name.as_deref(), target.as_deref()) {
-        (Some("build"), Some("pi-agent")) => {
-            build_embedded_guest(&root)?;
-            build_pi_agent(&root)
+        (Some("build"), Some("pi-agent")) => build_system_assets(&root),
+        (Some("build"), Some("view-sdk")) => {
+            let pocketjs = pocketjs_checkout(&root)?;
+            build_view_sdk(&root, &pocketjs)
         }
-        (Some("build"), Some("app")) => {
-            let app = rest.first().context("build app requires an App id")?;
-            anyhow::ensure!(
-                app != "pi-agent",
-                "the System App is built with `cargo xtask build pi-agent`"
-            );
-            build_app(&root, app)?;
-            package_app(&root, app, rest.get(1).map(PathBuf::from).as_deref())
+        (Some("package"), Some("app")) => {
+            let app = rest.first().context("package app requires an App id")?;
+            package_source_app(&root, app, rest.get(1).map(PathBuf::from).as_deref())
         }
         (Some("build"), Some("esp32-p4")) => {
-            build_embedded_guest(&root)?;
-            build_pi_agent(&root)?;
+            build_system_assets(&root)?;
             command(
                 Command::new("rustup")
                     .current_dir(root.join("firmware/esp32-p4"))
@@ -49,18 +44,15 @@ fn main() -> Result<()> {
             )
         }
         (Some("build"), Some("esp32-p4-sim")) => {
-            build_embedded_guest(&root)?;
-            build_pi_agent(&root)?;
+            build_system_assets(&root)?;
             cargo(&root, ["build", "-p", "pocket-pi-esp32-p4-sim"])
         }
         (Some("run"), Some("esp32-p4-sim")) => {
-            build_embedded_guest(&root)?;
-            build_pi_agent(&root)?;
+            build_system_assets(&root)?;
             cargo_with_args(&root, ["run", "-p", "pocket-pi-esp32-p4-sim", "--"], &rest)
         }
         (Some("snapshot"), Some("esp32-p4-sim")) => {
-            build_embedded_guest(&root)?;
-            build_pi_agent(&root)?;
+            build_system_assets(&root)?;
             let output = root.join("artifacts/screenshots/esp32-p4-sim.png");
             std::fs::create_dir_all(output.parent().unwrap())?;
             cargo_with_args(
@@ -71,16 +63,17 @@ fn main() -> Result<()> {
         }
         _ => {
             eprintln!(
-                "usage:\n  cargo xtask build pi-agent|esp32-p4|esp32-p4-sim\n  cargo xtask build app <id> [credentials.json]\n  cargo xtask run esp32-p4-sim [args]\n  cargo xtask snapshot esp32-p4-sim"
+                "usage:\n  cargo xtask build pi-agent|view-sdk|esp32-p4|esp32-p4-sim\n  cargo xtask package app <id> [credentials.json]\n  cargo xtask run esp32-p4-sim [args]\n  cargo xtask snapshot esp32-p4-sim"
             );
             bail!("unknown xtask command")
         }
     }
 }
 
-fn build_pi_agent(root: &Path) -> Result<()> {
+fn build_system_assets(root: &Path) -> Result<()> {
+    build_embedded_guest(root)?;
     let pocketjs = pocketjs_checkout(root)?;
-    build_app_with_pocketjs(root, &pocketjs, "pi-agent")
+    build_view_sdk(root, &pocketjs)
 }
 
 fn pocketjs_checkout(root: &Path) -> Result<PathBuf> {
@@ -103,41 +96,40 @@ fn pocketjs_checkout(root: &Path) -> Result<PathBuf> {
     Ok(pocketjs)
 }
 
-fn build_app(root: &Path, app: &str) -> Result<()> {
-    let pocketjs = pocketjs_checkout(root)?;
-    build_app_with_pocketjs(root, &pocketjs, app)
-}
-
-fn build_app_with_pocketjs(root: &Path, pocketjs: &Path, app: &str) -> Result<()> {
-    let app_root = app_root(root, app)?;
+fn build_view_sdk(root: &Path, pocketjs: &Path) -> Result<()> {
+    let output = root.join("target/view-sdk");
+    std::fs::create_dir_all(&output)?;
     command(
         Command::new("bun")
             .current_dir(pocketjs)
             .arg("tools/build.ts")
-            .arg(app_root.join("app.tsx"))
-            .arg(format!("--outdir={}", app_root.join("dist").display()))
-            .arg("--framework=solid"),
-        &format!("building AgentOS App {app}"),
+            .arg(root.join("system/view-sdk-pack.ts"))
+            .arg(format!("--outdir={}", output.display()))
+            .arg("--framework=solid")
+            .arg("--no-config"),
+        "building Pocket Pi View SDK resources",
     )?;
-    minify_agentos_bundle(&app_root)?;
-    let actions_entry = app_root.join("actions.ts");
-    if actions_entry.is_file() {
-        command(
-            Command::new("bun")
-                .arg(root.join("tools/build-agentos-actions.ts"))
-                .arg(&actions_entry)
-                .arg(app_root.join("dist/actions.js"))
-                .arg(pocketjs),
-            &format!("building AgentOS Actions {app}"),
-        )?;
-    }
+    let source = output.join("view-sdk-pack.pak");
+    let destination = root.join("system/view-sdk.pak");
+    std::fs::copy(&source, &destination).with_context(|| {
+        format!(
+            "install Pocket Pi View SDK resources {} -> {}",
+            source.display(),
+            destination.display()
+        )
+    })?;
     Ok(())
 }
 
-fn package_app(root: &Path, app: &str, credentials: Option<&Path>) -> Result<()> {
+fn package_source_app(root: &Path, app: &str, credentials: Option<&Path>) -> Result<()> {
     let app_root = app_root(root, app)?;
     let descriptor: Value = serde_json::from_slice(&std::fs::read(app_root.join("app.json"))?)?;
-    let manifest: Value = serde_json::from_slice(&std::fs::read(app_root.join("pocket.json"))?)?;
+    anyhow::ensure!(
+        descriptor["format"] == 1
+            && descriptor["frameworkApi"] == SYSTEM_FRAMEWORK_API
+            && descriptor["id"] == app,
+        "App does not target this source runtime"
+    );
     let credentials_map = credentials.map_or_else(
         || Ok(BTreeMap::new()),
         |path| {
@@ -146,55 +138,61 @@ fn package_app(root: &Path, app: &str, credentials: Option<&Path>) -> Result<()>
         },
     )?;
     anyhow::ensure!(
-        descriptor["id"] == app && manifest["name"] == app,
-        "App id mismatch"
-    );
-    anyhow::ensure!(
-        descriptor["version"] == manifest["version"],
-        "App version mismatch"
-    );
-    anyhow::ensure!(
         credentials_map.keys().cloned().collect::<BTreeSet<_>>()
             == descriptor_credential_ids(&descriptor),
         "credentials.json ids do not match app.json"
     );
+    let mut assets = BTreeSet::new();
+    for resource in descriptor["resources"]
+        .as_object()
+        .into_iter()
+        .flat_map(|resources| resources.values())
+    {
+        let path = resource["path"]
+            .as_str()
+            .context("App resource is missing path")?;
+        anyhow::ensure!(
+            resource["type"] == "json" && valid_asset_path(path) && assets.insert(path),
+            "invalid App resource {path}"
+        );
+        anyhow::ensure!(app_root.join(path).is_file(), "missing App resource {path}");
+    }
+
     let output_dir = root.join("target/pocketapps");
     std::fs::create_dir_all(&output_dir)?;
     let output = output_dir.join(format!("{app}.pocketapp"));
     let file = std::fs::File::create(&output)?;
     let mut archive = tar::Builder::new(file);
-    for (source, name) in [
-        (app_root.join("app.json"), "app.json"),
-        (app_root.join("pocket.json"), "pocket.json"),
-        (app_root.join("dist/app.js"), "app.js"),
-        (app_root.join("dist/app.pak"), "app.pak"),
-    ] {
-        archive.append_path_with_name(source, name)?;
+    for name in ["app.json", "schema.sql", "actions.js", "view.js"] {
+        archive.append_path_with_name(app_root.join(name), name)?;
     }
-    let actions = app_root.join("dist/actions.js");
-    if actions.is_file() {
-        archive.append_path_with_name(actions, "actions.js")?;
+    for path in assets {
+        archive.append_path_with_name(app_root.join(path), path)?;
     }
     if let Some(credentials) = credentials {
         archive.append_path_with_name(credentials, "credentials.json")?;
     }
-    let plan = serde_json::to_vec_pretty(&json!({
-        "runtime":"pocket-pi-agentos",
-        "pocketjsRevision":POCKETJS_REVISION,
-        "frameworkApi":SYSTEM_FRAMEWORK_API,
-        "app":app,
-        "modules":manifest.pointer("/engine/capabilities/requires").cloned().unwrap_or_else(|| json!([]))
-    }))?;
-    let mut header = tar::Header::new_gnu();
-    header.set_size(plan.len() as u64);
-    header.set_mode(0o644);
-    header.set_cksum();
-    archive.append_data(&mut header, "plan.json", plan.as_slice())?;
     archive.finish()?;
     #[cfg(unix)]
     std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o600))?;
     println!("packaged {}", output.display());
     Ok(())
+}
+
+fn valid_asset_path(path: &str) -> bool {
+    path.len() <= 100
+        && path.strip_prefix("assets/").is_some_and(|path| {
+            !path.is_empty()
+                && !path.contains('\\')
+                && path.split('/').all(|component| {
+                    !component.is_empty()
+                        && component != "."
+                        && component != ".."
+                        && component.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_')
+                        })
+                })
+        })
 }
 
 fn descriptor_credential_ids(descriptor: &Value) -> BTreeSet<String> {
@@ -229,22 +227,6 @@ fn app_root(root: &Path, app: &str) -> Result<PathBuf> {
         path.display()
     );
     Ok(path)
-}
-
-fn minify_agentos_bundle(app_root: &Path) -> Result<()> {
-    let bundle = app_root.join("dist/app.js");
-    let minified = app_root.join("dist/app.min.js");
-    command(
-        Command::new("bun")
-            .arg("build")
-            .arg(&bundle)
-            .arg(format!("--outfile={}", minified.display()))
-            .arg("--minify"),
-        &format!("minifying {} for the device image", bundle.display()),
-    )?;
-    std::fs::rename(&minified, &bundle)
-        .with_context(|| format!("replace {} with minified bundle", bundle.display()))?;
-    Ok(())
 }
 
 fn build_embedded_guest(root: &Path) -> Result<()> {

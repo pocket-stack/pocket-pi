@@ -1,11 +1,13 @@
 (() => {
   let appId = "";
   let actions = null;
-  let actionPump = null;
+  const actionPumps = [];
   let actionResult;
   let actionRunning = false;
   let view = null;
+  let systemHooks = null;
   let database = -1;
+  let resources = Object.freeze({});
   const bindings = [];
 
   function fail(message) {
@@ -39,14 +41,27 @@
       if (!name || typeof action !== "function") fail(`invalid Action: ${name}`);
     }
     actions = Object.freeze({ ...definitions });
-    actionPump = options?.pump ?? null;
-    if (actionPump !== null && typeof actionPump !== "function") fail("Action pump must be a function");
+    if (options?.pump !== undefined) registerActionPump(options.pump);
+  }
+
+  function registerActionPump(pump) {
+    if (typeof pump !== "function") fail("Action pump must be a function");
+    actionPumps.push(pump);
   }
 
   function defineView(definition) {
     if (view) fail("View already defined");
     if (!definition || typeof definition !== "object") fail("View must be an object");
     view = definition;
+  }
+
+  function defineSystem(definition) {
+    if (appId !== "pi-agent") fail("System hooks belong to the resident System App");
+    if (systemHooks) fail("System hooks already defined");
+    if (!definition || typeof definition.update !== "function" || typeof definition.telemetryVisible !== "function") {
+      fail("System hooks require update and telemetryVisible");
+    }
+    systemHooks = definition;
   }
 
   function event(value) {
@@ -117,14 +132,27 @@
     for (const binding of bindings) binding.refresh();
   }
 
+  function freeze(value) {
+    if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
+    for (const child of Object.values(value)) freeze(child);
+    return Object.freeze(value);
+  }
+
   globalThis.PocketPi = Object.freeze({
     frameworkApi: 1,
     defineActions,
     defineView,
+    defineSystem,
     action: (action, args = {}) => ({ type: "action", action, args }),
     command: (command, args = {}) => ({ type: "command", command, args }),
     navigate: (app) => ({ type: "command", command: "apps.open", args: { app } }),
     data: Object.freeze({ query: rows, exec, transaction }),
+    resources: Object.freeze({
+      get(name) {
+        if (!Object.hasOwn(resources, name)) fail(`unknown resource: ${name}`);
+        return resources[name];
+      },
+    }),
     services: Object.freeze({ call: callService }),
     actionContext: Object.freeze({
       remainingMs() {
@@ -139,9 +167,10 @@
   });
 
   globalThis.PocketPiSystem = Object.freeze({
-    configure(id) {
+    configure(id, resourceLine = "{}") {
       if (appId) fail("Guest already configured");
       appId = id;
+      resources = freeze(JSON.parse(resourceLine));
     },
     actionNames() {
       return JSON.stringify(Object.keys(actions ?? {}));
@@ -149,6 +178,10 @@
     hasView() {
       return view !== null;
     },
+    telemetryVisible() {
+      return systemHooks?.telemetryVisible() === true;
+    },
+    registerActionPump,
     beginAction(line) {
       if (!actions) fail("Actions not defined");
       if (actionRunning) fail("Action already running");
@@ -165,7 +198,7 @@
       }
     },
     tickAction() {
-      if (actionPump) actionPump();
+      for (const pump of actionPumps) pump();
     },
     pollActionResult() {
       const value = actionResult;
@@ -177,10 +210,10 @@
     },
     dataChanged() {
       refreshBindings();
-      return "";
+      return event(view?.dataChanged?.());
     },
     updateView(line) {
-      return event(view?.update?.(JSON.parse(line)));
+      return event(systemHooks?.update(JSON.parse(line)));
     },
     tap(x, y) {
       return event(view?.tap?.(x, y));

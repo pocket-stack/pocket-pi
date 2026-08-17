@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Pocket Pi AgentOS app supervisor, bundle runtime and app tool router"
+description = "Pocket Pi AgentOS app supervisor, app runtime and tool router"
 publish = false
 
 [dependencies]
@@ -21,4 +21,5 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+tar.workspace = true
 tempfile = "3"

@@ -1,7 +1,14 @@
 {
+  "format": 1,
+  "frameworkApi": 1,
   "id": "robinhood",
+  "title": "Robinhood",
   "description": "Portfolio, positions, and trading",
   "version": "1.1.0",
+  "schemaVersion": 5,
+  "capabilities": [
+    "data.sqlite"
+  ],
   "nativeServices": {
     "mcp": [
       {
@@ -71,6 +78,12 @@
     "update_scan_filters",
     "update_watchlist"
   ],
+  "resources": {
+    "toolCatalog": {
+      "path": "assets/tool-catalog.json",
+      "type": "json"
+    }
+  },
   "tools": [
     {
       "name": "robinhood.search_tools",

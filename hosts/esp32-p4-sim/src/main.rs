@@ -166,7 +166,7 @@ impl PlatformTools for SimPlatform {
 }
 
 /// Deterministic native fixtures keep the simulator useful without credentials.
-/// The App code, SQLite writes and View are exactly the same bundles as the board.
+/// The App code, SQLite writes and View are exactly the same releases as the board.
 struct SimAppServices;
 
 impl AppServiceHost for SimAppServices {
@@ -1182,30 +1182,21 @@ mod tests {
                 .join(app_id);
             let staging = workspace.join(format!(".staged-{app_id}"));
             std::fs::create_dir_all(&staging).unwrap();
-            for (from, to) in [
-                ("app.json", "app.json"),
-                ("pocket.json", "pocket.json"),
-                ("dist/app.js", "app.js"),
-                ("dist/app.pak", "app.pak"),
-                ("dist/actions.js", "actions.js"),
-            ] {
-                std::fs::copy(source.join(from), staging.join(to)).unwrap();
+            for name in ["app.json", "schema.sql", "actions.js", "view.js"] {
+                std::fs::copy(source.join(name), staging.join(name)).unwrap();
             }
-            let manifest: Value =
-                serde_json::from_slice(&std::fs::read(source.join("pocket.json")).unwrap())
-                    .unwrap();
-            std::fs::write(
-                staging.join("plan.json"),
-                serde_json::to_vec(&json!({
-                    "runtime":"pocket-pi-agentos",
-                    "pocketjsRevision":pocket_pi_agentos::POCKETJS_REVISION,
-                    "frameworkApi":pocket_pi_agentos::SYSTEM_FRAMEWORK_API,
-                    "app":app_id,
-                    "modules":manifest.pointer("/engine/capabilities/requires").unwrap()
-                }))
-                .unwrap(),
-            )
-            .unwrap();
+            let descriptor: Value =
+                serde_json::from_slice(&std::fs::read(source.join("app.json")).unwrap()).unwrap();
+            for resource in descriptor["resources"]
+                .as_object()
+                .into_iter()
+                .flat_map(|resources| resources.values())
+            {
+                let path = resource["path"].as_str().unwrap();
+                let destination = staging.join(path);
+                std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+                std::fs::copy(source.join(path), destination).unwrap();
+            }
             let credentials = match app_id {
                 "robinhood" => BTreeMap::from([(
                     "robinhood.oauth-access-token".to_owned(),
@@ -1224,36 +1215,13 @@ mod tests {
             .join("../..")
             .join("apps")
             .join(app_id);
-        let manifest: Value =
-            serde_json::from_slice(&std::fs::read(source.join("pocket.json")).unwrap()).unwrap();
         let file = std::fs::File::create(output).unwrap();
         let mut archive = tar::Builder::new(file);
-        for (from, to) in [
-            ("app.json", "app.json"),
-            ("pocket.json", "pocket.json"),
-            ("dist/app.js", "app.js"),
-            ("dist/app.pak", "app.pak"),
-            ("dist/actions.js", "actions.js"),
-        ] {
+        for name in ["app.json", "schema.sql", "actions.js", "view.js"] {
             archive
-                .append_path_with_name(source.join(from), to)
+                .append_path_with_name(source.join(name), name)
                 .unwrap();
         }
-        let plan = serde_json::to_vec(&json!({
-            "runtime":"pocket-pi-agentos",
-            "pocketjsRevision":pocket_pi_agentos::POCKETJS_REVISION,
-            "frameworkApi":pocket_pi_agentos::SYSTEM_FRAMEWORK_API,
-            "app":app_id,
-            "modules":manifest.pointer("/engine/capabilities/requires").unwrap()
-        }))
-        .unwrap();
-        let mut header = tar::Header::new_gnu();
-        header.set_size(plan.len() as u64);
-        header.set_mode(0o644);
-        header.set_cksum();
-        archive
-            .append_data(&mut header, "plan.json", plan.as_slice())
-            .unwrap();
         let credentials = serde_json::to_vec(&json!({"exa.api-key":"test-secret"})).unwrap();
         let mut header = tar::Header::new_gnu();
         header.set_size(credentials.len() as u64);

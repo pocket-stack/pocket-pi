@@ -43,9 +43,7 @@ CONFIG_ESP_TASK_WDT_TIMEOUT_S=5
 CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
 CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=y
 
-# Expose per-task runtime counters so the status bar can report real average
-# CPU utilization across both ESP32-P4 cores.
-
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
 # HTTPS clients need the ESP-IDF certificate bundle. Model endpoints
 # still perform normal hostname verification.
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y

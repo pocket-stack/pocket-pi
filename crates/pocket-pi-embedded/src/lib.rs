@@ -236,6 +236,7 @@ impl GuestAgent {
         let payload: serde_json::Value = serde_json::from_str(&raw)
             .map_err(|error| format!("parse Pi Agent events: {error}"))?;
         let mut events = Vec::new();
+        let mut terminal_error = None;
         for event in payload["events"].as_array().into_iter().flatten() {
             match event["type"].as_str() {
                 Some("agent_ready") => events.push(AgentEvent::Ready),
@@ -244,7 +245,23 @@ impl GuestAgent {
                         events.push(AgentEvent::ResponseText(delta.to_owned()));
                     }
                 }
-                Some("agent_end") => events.push(AgentEvent::Done),
+                Some("message_end") => {
+                    if event["role"] == "assistant" && event["stopReason"] == "error" {
+                        terminal_error = Some(
+                            event["errorMessage"]
+                                .as_str()
+                                .unwrap_or("model request failed")
+                                .to_owned(),
+                        );
+                    }
+                }
+                Some("agent_end") => {
+                    events.push(
+                        terminal_error
+                            .take()
+                            .map_or(AgentEvent::Done, AgentEvent::Failed),
+                    );
+                }
                 Some("agent_error") => events.push(AgentEvent::Failed(
                     event["message"]
                         .as_str()
@@ -365,6 +382,18 @@ mod tests {
         }
     }
 
+    struct FailingBackend;
+
+    impl ModelBackend for FailingBackend {
+        fn complete(
+            &self,
+            _request_json: &str,
+            _on_event: &mut dyn FnMut(ModelStreamEvent),
+        ) -> Result<String, String> {
+            Err("network unavailable".into())
+        }
+    }
+
     struct Tools;
 
     impl ToolHost for Tools {
@@ -427,6 +456,32 @@ mod tests {
         }
         assert!(done);
         assert_eq!(deltas, ["x".repeat(100)]);
+    }
+
+    #[test]
+    fn model_failure_ends_the_turn_as_failed() {
+        let guest = Guest::new().unwrap();
+        let agent = GuestAgent::mount_source(
+            &guest,
+            r#"{"model":"offline"}"#,
+            Arc::new(FailingBackend),
+            Arc::new(Tools),
+            TEST_AGENT_BUNDLE,
+        )
+        .unwrap();
+        agent.prompt(&guest, "fail").unwrap();
+
+        for _ in 0..200 {
+            let events = agent.tick(&guest).unwrap();
+            assert!(!events.contains(&AgentEvent::Done));
+            if events.contains(&AgentEvent::Failed(
+                "model backend failed: network unavailable".into(),
+            )) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        panic!("model failure did not terminate the turn");
     }
 
     struct ThinkingToolBackend {

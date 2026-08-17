@@ -1,7 +1,12 @@
 {
+  "format": 1,
+  "frameworkApi": 1,
   "id": "pi-agent",
+  "title": "Pi Agent",
   "description": "System Agent and workspace",
   "version": "1.0.0",
+  "capabilities": ["data.fs", "data.sqlite"],
+  "resources": {},
   "tools": [],
   "schedules": []
 }

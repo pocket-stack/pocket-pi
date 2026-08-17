@@ -12,7 +12,7 @@ The repository also provides one companion development composition:
 | Supported hardware target | `firmware/esp32-p4` | ESP32-P4 |
 | Product-contract simulator | `hosts/esp32-p4-sim` | macOS development host |
 
-The physical host and simulator use the same PocketJS App bundles and
+The physical host and simulator use the same ordinary App source and
 `pocket-pi-agentos` supervisor at a 720x1280 logical viewport. Simulator mouse
 clicks and physical touch coordinates are both dispatched to the selected App
 View. The Pi Agent Root View displays Chat, Apps, Files and Settings; there is
@@ -87,13 +87,21 @@ tools/uart-provision.py /dev/cu.usbserial-... \
 
 tools/uart-install.py /dev/cu.usbserial-... \
   target/pocketapps/exa.pocketapp
-
-espflash monitor --port /dev/cu.usbserial-...
 ```
 
 The App uploader does not reset the board or configure a model. It only transfers
-one complete package to the same Installer used by HTTP. For unprovisioned
-development-board bring-up, the optional model bridge can still route requests
+one complete package to the same Installer used by HTTP. Confirm installation
+on the device before opening `espflash monitor`: on this board's WCH USB bridge,
+the monitor's DTR/RTS sequence can reset the board and discard a pending review.
+For boot-only diagnostics, restore a normal boot after exiting the monitor:
+
+```sh
+espflash monitor --port /dev/cu.usbserial-...
+espflash reset --port /dev/cu.usbserial-... --non-interactive
+```
+
+For unprovisioned development-board bring-up, the optional model bridge can
+still route requests
 to a logged-in Mac Codex or Claude Code without persisting that backend:
 
 All UART CLIs leave DTR/RTS inactive before closing the port so the WCH USB
