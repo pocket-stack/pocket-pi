@@ -357,15 +357,20 @@
   }
 
   function installScreen(detail) {
-    const status = detail.state === "review" ? "REVIEW APP" : detail.state === "installing" ? "INSTALLING" : detail.state === "success" ? "APP INSTALLED" : "INSTALL FAILED";
-    const title = detail.state === "review" ? "Ready to install" : detail.state === "installing" ? "Installing App..." : detail.state === "success" ? "Installation complete" : "Installation failed";
-    const message = detail.state === "review" ? "Confirm this package on the device." : detail.state === "installing" ? "Do not operate the device until installation finishes." : detail.state === "success" ? "The App is available to you and Pi Agent." : detail.error || "The package could not be installed.";
+    const verb = detail.update ? "UPDATE" : "INSTALL";
+    const progress = detail.update ? "UPDATING" : "INSTALLING";
+    const action = detail.update ? "Update" : "Installation";
+    const status = detail.state === "review" ? `REVIEW ${verb}` : detail.state === "installing" ? progress : detail.state === "success" ? `APP ${detail.update ? "UPDATED" : "INSTALLED"}` : `${verb} FAILED`;
+    const title = detail.state === "review" ? `Ready to ${verb.toLowerCase()}` : detail.state === "installing" ? `${progress[0]}${progress.slice(1).toLowerCase()} App...` : detail.state === "success" ? `${action} complete` : `${action} failed`;
+    const message = detail.state === "review" ? "Confirm this package on the device." : detail.state === "installing" ? `Do not operate the device until the ${verb.toLowerCase()} finishes.` : detail.state === "success" ? "The App is available to you and Pi Agent." : detail.error || `The package could not be ${detail.update ? "updated" : "installed"}.`;
+    const schema = detail.update ? `SCHEMA ${detail.currentSchemaVersion} TO ${detail.schemaVersion}` : `SCHEMA ${detail.schemaVersion}`;
+    const version = detail.update ? `${detail.currentVersion} TO ${detail.version}` : detail.version;
     const tone = detail.state === "failed" ? "danger" : detail.state === "success" ? "success" : detail.state === "installing" ? "warning" : "accent";
     const surface = tone === "danger" ? "dangerSoft" : tone === "success" ? "successSoft" : tone === "warning" ? "warningSoft" : "accentSoft";
     const color = tone === "danger" ? "danger" : tone === "success" ? "success" : tone === "warning" ? "warningText" : "accent";
     return View.Screen({ children: [
-      View.Header({ title: status, accent: detail.state === "failed" ? "danger" : detail.state === "success" ? "ready" : "busy", metaTop: "LOCAL INSTALL", metaBottom: "PHYSICAL CONFIRMATION" }),
-      View.PageIntro({ eyebrow: "APP PACKAGE", title: detail.name, description: `VERSION ${detail.version}  ·  ${detail.tools} TOOLS  ·  ${detail.schedules} SCHEDULES` }),
+      View.Header({ title: status, accent: detail.state === "failed" ? "danger" : detail.state === "success" ? "ready" : "busy", metaTop: `LOCAL ${verb}`, metaBottom: "PHYSICAL CONFIRMATION" }),
+      View.PageIntro({ eyebrow: "APP PACKAGE", title: detail.name, description: `VERSION ${version}  |  ${schema}` }),
       View.Column({ style: { grow: 1, paddingX: 24, gap: 16 }, children: [
         View.SectionHeading({ title: "REQUESTED ACCESS", detail: "PACKAGE MANIFEST" }),
         View.Card({ style: { grow: 1, paddingX: 24, paddingY: 24, gap: 20 }, children: [
@@ -373,17 +378,17 @@
           View.Text({ text: detail.network.length ? detail.network.slice(0, 2).join("\n") : "NO NETWORK ACCESS", style: { fontSize: "lg" } }),
           View.Box({ style: { height: 2, background: "border" } }),
           View.Text({ text: "CREDENTIALS", style: { color: "muted", fontWeight: "bold" } }),
-          View.Text({ text: detail.credentials.length ? detail.credentials.slice(0, 3).join(", ") : "NONE", style: { fontSize: "lg" } }),
+          View.Text({ text: detail.update ? "PRESERVE INSTALLED CREDENTIALS" : detail.credentials.length ? detail.credentials.slice(0, 3).join(", ") : "NONE", style: { fontSize: "lg" } }),
           View.Box({ style: { height: 2, background: "border" } }),
           View.Text({ text: "CAPABILITIES", style: { color: "muted", fontWeight: "bold" } }),
-          View.Text({ text: `${detail.tools} TOOLS  ·  ${detail.schedules} SCHEDULES`, style: { fontSize: "lg" } }),
+          View.Text({ text: `${detail.tools} TOOLS  |  ${detail.schedules} SCHEDULES`, style: { fontSize: "lg" } }),
         ] }),
         View.Column({ style: { height: 150, paddingX: 24, justify: "center", gap: 12, radius: 12, background: surface }, children: [
           View.Text({ text: title, style: { color, fontSize: "xl", fontWeight: "bold" } }),
           View.Text({ text: message, style: { color: "muted" } }),
         ] }),
         View.Box({ style: { height: 120, paddingY: 20 }, children: View.ActionButton({
-          label: detail.state === "review" ? "INSTALL" : detail.state === "installing" ? "INSTALLING..." : "DONE",
+          label: detail.state === "review" ? verb : detail.state === "installing" ? `${progress}...` : "DONE",
           disabled: detail.state === "installing",
           tone: detail.state === "review" ? "primary" : "neutral",
           onPress: () => PocketPi.command(detail.state === "review" ? "apps.install" : "apps.dismissInstall"),

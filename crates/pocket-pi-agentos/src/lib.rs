@@ -161,7 +161,7 @@ pub struct AppSchedule {
     pub args: Value,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeServices {
     #[serde(default)]
@@ -170,7 +170,7 @@ pub struct NativeServices {
     pub mcp: Vec<McpServicePolicy>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CredentialBinding {
     pub id: String,
@@ -179,7 +179,7 @@ pub struct CredentialBinding {
     pub prefix: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HttpServicePolicy {
     pub method: String,
@@ -189,7 +189,7 @@ pub struct HttpServicePolicy {
     pub credential: Option<CredentialBinding>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServicePolicy {
     pub connection: String,
@@ -201,6 +201,13 @@ pub struct StagedApp {
     pub descriptor: AppDescriptor,
     pub release_dir: PathBuf,
     pub credentials: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AppInstallReview {
+    pub update: bool,
+    pub current_version: Option<String>,
+    pub current_schema_version: Option<u32>,
 }
 
 pub fn stage_pocketapp(package: &Path, staging_dir: &Path) -> Result<StagedApp> {
@@ -315,7 +322,6 @@ pub fn stage_pocketapp_bytes(bytes: &[u8], staging_dir: &Path) -> Result<StagedA
             "the Pi Agent System App is built into Firmware"
         );
         let app = load_source_release(staging_dir, &descriptor_id)?;
-        validate_package_credentials(&app.descriptor, &credentials)?;
         Ok(StagedApp {
             descriptor: app.descriptor,
             release_dir: staging_dir.to_owned(),
@@ -338,6 +344,15 @@ fn package_file_path(name: &str) -> Result<PathBuf> {
     ];
     if ROOT_FILES.contains(&name) {
         return Ok(PathBuf::from(name));
+    }
+    if let Some(name) = name.strip_prefix("migrations/") {
+        anyhow::ensure!(
+            name.len() > 4
+                && name.ends_with(".sql")
+                && name[..name.len() - 4].parse::<u32>().is_ok(),
+            "invalid App migration path: migrations/{name}"
+        );
+        return Ok(PathBuf::from(format!("migrations/{name}")));
     }
     let asset = name
         .strip_prefix("assets/")
@@ -417,6 +432,7 @@ struct InstalledApp {
     descriptor: AppDescriptor,
     release_dir: PathBuf,
     resources: Arc<str>,
+    migrations: BTreeMap<u32, PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -440,6 +456,7 @@ impl InstalledAppIndex {
     pub fn load(workspace: &Path, system: SystemAppBundle) -> Result<Self> {
         seed_system_app(workspace, system)?;
         seed_system_runtime(workspace)?;
+        recover_app_updates(workspace)?;
         let mut apps = BTreeMap::new();
         let root = load_system_release(&workspace.join("system/app"))?;
         apps.insert(ROOT_APP_ID.to_owned(), root);
@@ -626,6 +643,32 @@ impl InstalledAppIndex {
         index.apps.insert(app.descriptor.id.clone(), app);
     }
 
+    fn validate_replace(&self, app: &InstalledApp) -> Result<()> {
+        let index = self.inner.read().expect("installed App index lock");
+        anyhow::ensure!(
+            index.apps.contains_key(&app.descriptor.id),
+            "App {} is not installed",
+            app.descriptor.id
+        );
+        let routes = index
+            .tool_routes
+            .iter()
+            .filter(|(_, route)| route.app_id != app.descriptor.id)
+            .map(|(name, route)| (name.clone(), route.clone()))
+            .collect();
+        validate_app_tools(app, &routes)?;
+        Ok(())
+    }
+
+    fn replace_validated(&self, app: InstalledApp) {
+        let mut index = self.inner.write().expect("installed App index lock");
+        index
+            .tool_routes
+            .retain(|_, route| route.app_id != app.descriptor.id);
+        add_app_tools(&app, &mut index.tool_routes);
+        index.apps.insert(app.descriptor.id.clone(), app);
+    }
+
     fn remove(&self, app_id: &str) -> Option<InstalledApp> {
         let mut index = self.inner.write().expect("installed App index lock");
         let app = index.apps.remove(app_id)?;
@@ -787,6 +830,7 @@ fn load_system_release(release_dir: &Path) -> Result<InstalledApp> {
         descriptor,
         release_dir: release_dir.to_owned(),
         resources: Arc::from("{}"),
+        migrations: BTreeMap::new(),
     })
 }
 
@@ -838,10 +882,12 @@ fn load_source_release(release_dir: &Path, expected_id: &str) -> Result<Installe
     validate_descriptor(&mut descriptor)?;
     validate_source_root(release_dir)?;
     let resources = load_source_resources(release_dir, &descriptor.resources)?;
+    let migrations = load_source_migrations(release_dir, descriptor.schema_version)?;
     Ok(InstalledApp {
         descriptor,
         release_dir: release_dir.to_owned(),
         resources: resources.into(),
+        migrations,
     })
 }
 
@@ -894,7 +940,14 @@ fn validate_descriptor(descriptor: &mut AppDescriptor) -> Result<()> {
 }
 
 fn validate_source_root(release_dir: &Path) -> Result<()> {
-    let allowed = BTreeSet::from(["app.json", "schema.sql", "actions.js", "view.js", "assets"]);
+    let allowed = BTreeSet::from([
+        "app.json",
+        "schema.sql",
+        "actions.js",
+        "view.js",
+        "assets",
+        "migrations",
+    ]);
     for entry in std::fs::read_dir(release_dir)? {
         let entry = entry?;
         let name = entry
@@ -908,11 +961,43 @@ fn validate_source_root(release_dir: &Path) -> Result<()> {
         );
         let kind = entry.file_type()?;
         anyhow::ensure!(
-            (name == "assets" && kind.is_dir()) || (name != "assets" && kind.is_file()),
+            (matches!(name.as_str(), "assets" | "migrations") && kind.is_dir())
+                || (!matches!(name.as_str(), "assets" | "migrations") && kind.is_file()),
             "invalid source App file: {name}"
         );
     }
     Ok(())
+}
+
+fn load_source_migrations(release_dir: &Path, target: u32) -> Result<BTreeMap<u32, PathBuf>> {
+    let root = release_dir.join("migrations");
+    if !root.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let mut migrations = BTreeMap::new();
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        anyhow::ensure!(entry.file_type()?.is_file(), "App migration is not a file");
+        let name = entry
+            .file_name()
+            .to_str()
+            .ok_or_else(|| anyhow!("App migration name is not UTF-8"))?
+            .to_owned();
+        let version = name
+            .strip_suffix(".sql")
+            .ok_or_else(|| anyhow!("invalid App migration: {name}"))?
+            .parse::<u32>()
+            .with_context(|| format!("invalid App migration: {name}"))?;
+        anyhow::ensure!(
+            version >= 2 && version <= target && name == format!("{version}.sql"),
+            "invalid App migration: {name}"
+        );
+        anyhow::ensure!(
+            migrations.insert(version, entry.path()).is_none(),
+            "duplicate App migration for schema {version}"
+        );
+    }
+    Ok(migrations)
 }
 
 fn load_source_resources(
@@ -1986,7 +2071,12 @@ impl AppSupervisor {
         self.services.busy() || self.action_runner.busy()
     }
 
-    pub fn activate_app(
+    pub fn review_app(&self, staged: &StagedApp) -> Result<AppInstallReview> {
+        let candidate = load_source_release(&staged.release_dir, &staged.descriptor.id)?;
+        self.validate_app_change(&candidate, &staged.credentials)
+    }
+
+    pub fn apply_app(
         &mut self,
         staging_release: &Path,
         credentials: BTreeMap<String, String>,
@@ -2006,19 +2096,19 @@ impl AppSupervisor {
             descriptor.id != ROOT_APP_ID,
             "the Pi Agent System App is built into Firmware"
         );
+        let candidate = load_source_release(staging_release, &descriptor.id)?;
+        let review = self.validate_app_change(&candidate, &credentials)?;
         let app_root = self.workspace.join("apps").join(&descriptor.id);
-        anyhow::ensure!(
-            self.catalog.app(&descriptor.id).is_none(),
-            "App {} is already installed",
-            descriptor.id
-        );
+        if review.update {
+            return self.update_app(staging_release, candidate, &app_root);
+        }
         if app_root.exists() {
             std::fs::remove_dir_all(&app_root)
                 .with_context(|| format!("clear incomplete App {}", descriptor.id))?;
         }
 
         let credential_ids = credentials.keys().cloned().collect::<Vec<_>>();
-        let result = self.activate_new_app(staging_release, descriptor, credentials, &app_root);
+        let result = self.install_new_app(staging_release, candidate, credentials, &app_root);
         if result.is_err() {
             if let Some(app_id) = app_root.file_name().and_then(|value| value.to_str()) {
                 self.action_runner.unregister(app_id);
@@ -2029,52 +2119,55 @@ impl AppSupervisor {
         result
     }
 
-    fn activate_new_app(
+    fn validate_app_change(
+        &self,
+        candidate: &InstalledApp,
+        credentials: &BTreeMap<String, String>,
+    ) -> Result<AppInstallReview> {
+        let Some(installed) = self.catalog.app(&candidate.descriptor.id) else {
+            validate_package_credentials(&candidate.descriptor, credentials)?;
+            self.catalog.validate_insert(candidate)?;
+            return Ok(AppInstallReview {
+                update: false,
+                current_version: None,
+                current_schema_version: None,
+            });
+        };
+        anyhow::ensure!(
+            credentials.is_empty(),
+            "App updates preserve installed credentials and must not include credentials.json"
+        );
+        let database = self
+            .databases
+            .get(&candidate.descriptor.id)
+            .ok_or_else(|| anyhow!("App {} has no database", candidate.descriptor.id))?;
+        let current_schema = database_schema_version(database, &candidate.descriptor.id)?;
+        validate_update_contract(&installed, candidate, current_schema)?;
+        self.catalog.validate_replace(candidate)?;
+        Ok(AppInstallReview {
+            update: true,
+            current_version: Some(installed.descriptor.version),
+            current_schema_version: Some(current_schema),
+        })
+    }
+
+    fn install_new_app(
         &mut self,
         staging_release: &Path,
-        descriptor: AppDescriptor,
+        mut app: InstalledApp,
         credentials: BTreeMap<String, String>,
         app_root: &Path,
     ) -> Result<AppDescriptor> {
-        let mut app = load_source_release(staging_release, &descriptor.id)?;
-        validate_package_credentials(&app.descriptor, &credentials)?;
-        self.catalog.validate_insert(&app)?;
+        let descriptor = app.descriptor.clone();
 
-        let (fs_root, db_root, tmp_root) = data_paths(&self.workspace, &descriptor.id);
+        let (_, db_root, tmp_root) = data_paths(&self.workspace, &descriptor.id);
         std::fs::create_dir_all(&db_root)?;
         std::fs::create_dir_all(&tmp_root)?;
         let database = Arc::new(Mutex::new(DbModule::new(DbStorage::Dir(db_root))));
         prepare_source_database(&app, &database)?;
         let revision = Arc::new(AtomicU32::new(0));
-        let net = app
-            .descriptor
-            .capabilities
-            .iter()
-            .any(|capability| capability == "net.http");
-        let has_actions = {
-            let staged_action = staging_release.join("actions.js");
-            let candidate = ActionConfig {
-                app_id: descriptor.id.clone(),
-                source_path: staged_action,
-                framework: self.assets.framework.clone(),
-                net_sdk: net.then(|| self.assets.net_sdk.clone()),
-                resources: app.resources.clone(),
-                database: database.clone(),
-                revision: revision.clone(),
-                net,
-            };
-            let runtime = ActionRuntime::load(&candidate, self.services.clone())?;
-            validate_action_contract(&app.descriptor, &runtime)?;
-            !runtime.action_names()?.is_empty()
-        };
-        let runtime = ViewRuntime::load(
-            &app,
-            &self.assets,
-            &fs_root,
-            &tmp_root,
-            database.clone(),
-            revision.clone(),
-        )?;
+        let (has_actions, runtime) =
+            self.load_candidate_runtime(&app, database.clone(), revision.clone())?;
 
         let schedules = new_schedules(&app.descriptor);
         let schedule_path = app_root.join("data/.system/schedules.json");
@@ -2086,16 +2179,11 @@ impl AppSupervisor {
         app.release_dir = release_dir.clone();
 
         if has_actions {
-            self.action_runner.register(ActionConfig {
-                app_id: descriptor.id.clone(),
-                source_path: release_dir.join("actions.js"),
-                framework: self.assets.framework.clone(),
-                net_sdk: net.then(|| self.assets.net_sdk.clone()),
-                resources: app.resources.clone(),
-                database: database.clone(),
-                revision: revision.clone(),
-                net,
-            })?;
+            self.action_runner.register(self.action_config(
+                &app,
+                database.clone(),
+                revision.clone(),
+            ))?;
         }
         self.services
             .store_credentials(&credentials)
@@ -2120,6 +2208,175 @@ impl AppSupervisor {
         self.schedules
             .register(descriptor.id.clone(), schedule_path, schedules);
         Ok(descriptor)
+    }
+
+    fn update_app(
+        &mut self,
+        staging_release: &Path,
+        mut candidate: InstalledApp,
+        app_root: &Path,
+    ) -> Result<AppDescriptor> {
+        let app_id = candidate.descriptor.id.clone();
+        let installed = self
+            .catalog
+            .app(&app_id)
+            .expect("validated update targets an installed App");
+        let database = self
+            .databases
+            .get(&app_id)
+            .cloned()
+            .expect("installed App has a database");
+        let revision = self
+            .revisions
+            .get(&app_id)
+            .cloned()
+            .expect("installed App has a revision");
+
+        let rehearsal_root = staging_release.with_extension("rehearsal");
+        if rehearsal_root.exists() {
+            std::fs::remove_dir_all(&rehearsal_root)?;
+        }
+        let rehearsal = (|| -> Result<()> {
+            std::fs::create_dir_all(&rehearsal_root)?;
+            // Existing Guests cache this handle and must keep working if the
+            // rehearsal fails. apply_app already guarantees the App is idle.
+            let (_, db_root, _) = data_paths(&self.workspace, &app_id);
+            std::fs::copy(
+                db_root.join(format!("{app_id}.sqlite")),
+                rehearsal_root.join(format!("{app_id}.sqlite")),
+            )
+            .context("copy App database for migration rehearsal")?;
+            let rehearsal_database = Arc::new(Mutex::new(DbModule::new(DbStorage::Dir(
+                rehearsal_root.clone(),
+            ))));
+            migrate_source_database(&candidate, &rehearsal_database)?;
+            let rehearsal_revision = Arc::new(AtomicU32::new(0));
+            let _ =
+                self.load_candidate_runtime(&candidate, rehearsal_database, rehearsal_revision)?;
+            Ok(())
+        })();
+        let cleanup = std::fs::remove_dir_all(&rehearsal_root);
+        rehearsal?;
+        cleanup?;
+
+        let update_root = app_root.join(".update");
+        anyhow::ensure!(!update_root.exists(), "App update is already in progress");
+        std::fs::create_dir_all(&update_root)?;
+        let candidate_release = update_root.join("release");
+        std::fs::rename(staging_release, &candidate_release).context("move staged App update")?;
+        candidate = load_source_release(&candidate_release, &app_id)?;
+        if let Err(error) = migrate_source_database(&candidate, &database) {
+            let _ = std::fs::remove_dir_all(&update_root);
+            return Err(error);
+        }
+
+        self.action_runner.remove_app(&app_id)?;
+        let was_active = self.active_app.as_deref() == Some(&app_id);
+        if was_active {
+            self.active_app = None;
+        }
+        self.runtimes
+            .retain(|(runtime_app_id, _)| runtime_app_id != &app_id);
+
+        let old_release = update_root.join("old-release");
+        std::fs::rename(app_root.join("release"), &old_release)
+            .context("preserve current App release")?;
+        std::fs::rename(&candidate_release, app_root.join("release"))
+            .context("activate updated App release")?;
+        candidate = load_source_release(&app_root.join("release"), &app_id)?;
+
+        let (has_actions, runtime) =
+            self.load_candidate_runtime(&candidate, database.clone(), revision.clone())?;
+        if has_actions {
+            self.action_runner.register(self.action_config(
+                &candidate,
+                database.clone(),
+                revision,
+            ))?;
+        }
+
+        let old_tools = installed
+            .descriptor
+            .tools
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect::<BTreeSet<_>>();
+        if let (Some(agent), Some(tools)) = (&self.agent, &self.agent_tools) {
+            let mut next = tools
+                .definitions()
+                .into_iter()
+                .filter(|tool| {
+                    tool.get("name")
+                        .and_then(Value::as_str)
+                        .is_none_or(|name| !old_tools.contains(name))
+                })
+                .collect::<Vec<_>>();
+            next.extend(
+                candidate
+                    .descriptor
+                    .tools
+                    .iter()
+                    .map(public_tool_definition),
+            );
+            agent
+                .replace_tools(&self.system.guest, next)
+                .map_err(anyhow::Error::msg)?;
+        }
+
+        let schedule_path = app_root.join("data/.system/schedules.json");
+        self.schedules
+            .replace(&candidate.descriptor, schedule_path)?;
+        self.catalog.replace_validated(candidate.clone());
+        make_runtime_room(
+            &mut self.runtimes,
+            VIEW_RUNTIME_LIMIT,
+            self.active_app.as_deref(),
+        );
+        self.runtimes.push((app_id.clone(), runtime));
+        if was_active {
+            self.active_app = Some(app_id);
+        }
+        std::fs::remove_dir_all(&update_root).context("clean completed App update")?;
+        Ok(candidate.descriptor)
+    }
+
+    fn action_config(
+        &self,
+        app: &InstalledApp,
+        database: SharedDb,
+        revision: AppRevision,
+    ) -> ActionConfig {
+        let net = app
+            .descriptor
+            .capabilities
+            .iter()
+            .any(|capability| capability == "net.http");
+        ActionConfig {
+            app_id: app.descriptor.id.clone(),
+            source_path: app.release_dir.join("actions.js"),
+            framework: self.assets.framework.clone(),
+            net_sdk: net.then(|| self.assets.net_sdk.clone()),
+            resources: app.resources.clone(),
+            database,
+            revision,
+            net,
+        }
+    }
+
+    fn load_candidate_runtime(
+        &self,
+        app: &InstalledApp,
+        database: SharedDb,
+        revision: AppRevision,
+    ) -> Result<(bool, ViewRuntime)> {
+        let action = self.action_config(app, database.clone(), revision.clone());
+        let action_runtime = ActionRuntime::load(&action, self.services.clone())?;
+        validate_action_contract(&app.descriptor, &action_runtime)?;
+        let has_actions = !action_runtime.action_names()?.is_empty();
+        let (fs_root, _, tmp_root) = data_paths(&self.workspace, &app.descriptor.id);
+        let runtime =
+            ViewRuntime::load(app, &self.assets, &fs_root, &tmp_root, database, revision)?;
+        Ok((has_actions, runtime))
     }
 
     pub fn uninstall_app(&mut self, app_id: &str) -> Result<AppDescriptor> {
@@ -2464,30 +2721,19 @@ fn data_paths(workspace: &Path, app_id: &str) -> (PathBuf, PathBuf, PathBuf) {
 }
 
 fn prepare_source_database(app: &InstalledApp, database: &SharedDb) -> Result<()> {
+    let current = database_schema_version(database, &app.descriptor.id)?;
+    if current == app.descriptor.schema_version {
+        return Ok(());
+    }
+    if current > 0 {
+        return migrate_source_database(app, database);
+    }
+
     let mut database = database
         .lock()
         .map_err(|_| anyhow!("App database lock was poisoned"))?;
     let handle = database.open(&app.descriptor.id);
     anyhow::ensure!(handle >= 0, "open {}.sqlite", app.descriptor.id);
-    let version: Value =
-        serde_json::from_str(&database.query(handle, "PRAGMA user_version", "[]"))?;
-    anyhow::ensure!(
-        version.get("error").is_none(),
-        "read {} schema version",
-        app.descriptor.id
-    );
-    let current = version["rows"][0][0]
-        .as_u64()
-        .ok_or_else(|| anyhow!("invalid {} schema version", app.descriptor.id))?;
-    let expected = u64::from(app.descriptor.schema_version);
-    if current == expected {
-        return Ok(());
-    }
-    anyhow::ensure!(
-        current == 0,
-        "App {} data schema is {current}; source requires {expected}",
-        app.descriptor.id
-    );
     let schema = std::fs::read_to_string(app.release_dir.join("schema.sql"))
         .context("read source schema.sql")?;
     anyhow::ensure!(
@@ -2503,6 +2749,171 @@ fn prepare_source_database(app: &InstalledApp, database: &SharedDb) -> Result<()
         let error = database.last_error(handle);
         let _ = database.exec(handle, "ROLLBACK");
         anyhow::bail!("initialize {} schema: {error}", app.descriptor.id);
+    }
+    Ok(())
+}
+
+fn database_schema_version(database: &SharedDb, app_id: &str) -> Result<u32> {
+    let mut database = database
+        .lock()
+        .map_err(|_| anyhow!("App database lock was poisoned"))?;
+    let handle = database.open(app_id);
+    anyhow::ensure!(handle >= 0, "open {app_id}.sqlite");
+    let version: Value =
+        serde_json::from_str(&database.query(handle, "PRAGMA user_version", "[]"))?;
+    anyhow::ensure!(
+        version.get("error").is_none(),
+        "read {app_id} schema version"
+    );
+    let version = version["rows"][0][0]
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| anyhow!("invalid {app_id} schema version"))?;
+    Ok(version)
+}
+
+fn validate_migration_path(app: &InstalledApp, current: u32) -> Result<()> {
+    let target = app.descriptor.schema_version;
+    anyhow::ensure!(
+        current <= target,
+        "App {} data schema is {current}; package requires {target}",
+        app.descriptor.id
+    );
+    for version in current.saturating_add(1)..=target {
+        anyhow::ensure!(
+            app.migrations.contains_key(&version),
+            "App {} is missing migrations/{version}.sql",
+            app.descriptor.id
+        );
+    }
+    Ok(())
+}
+
+fn migrate_source_database(app: &InstalledApp, database: &SharedDb) -> Result<()> {
+    let current = database_schema_version(database, &app.descriptor.id)?;
+    validate_migration_path(app, current)?;
+    if current == app.descriptor.schema_version {
+        return Ok(());
+    }
+
+    let mut sql = String::from("BEGIN IMMEDIATE;\n");
+    for version in current + 1..=app.descriptor.schema_version {
+        let migration = std::fs::read_to_string(&app.migrations[&version])
+            .with_context(|| format!("read migrations/{version}.sql"))?;
+        anyhow::ensure!(
+            !migration.trim().is_empty(),
+            "App {} migration {version} is empty",
+            app.descriptor.id
+        );
+        sql.push_str(&migration);
+        sql.push('\n');
+    }
+    sql.push_str(&format!(
+        "PRAGMA user_version={};\nCOMMIT;",
+        app.descriptor.schema_version
+    ));
+
+    let mut database = database
+        .lock()
+        .map_err(|_| anyhow!("App database lock was poisoned"))?;
+    let handle = database.open(&app.descriptor.id);
+    if database.exec(handle, &sql) != 0 {
+        let error = database.last_error(handle);
+        let _ = database.exec(handle, "ROLLBACK");
+        anyhow::bail!("migrate {} schema: {error}", app.descriptor.id);
+    }
+    Ok(())
+}
+
+fn validate_update_contract(
+    installed: &InstalledApp,
+    candidate: &InstalledApp,
+    current_schema: u32,
+) -> Result<()> {
+    anyhow::ensure!(
+        candidate.descriptor.schema_version >= installed.descriptor.schema_version,
+        "App {} cannot downgrade schema {} to {}",
+        candidate.descriptor.id,
+        installed.descriptor.schema_version,
+        candidate.descriptor.schema_version
+    );
+    anyhow::ensure!(
+        installed.descriptor.native_services == candidate.descriptor.native_services
+            && installed
+                .descriptor
+                .capabilities
+                .iter()
+                .collect::<BTreeSet<_>>()
+                == candidate
+                    .descriptor
+                    .capabilities
+                    .iter()
+                    .collect::<BTreeSet<_>>()
+            && installed
+                .descriptor
+                .provider_operations
+                .iter()
+                .collect::<BTreeSet<_>>()
+                == candidate
+                    .descriptor
+                    .provider_operations
+                    .iter()
+                    .collect::<BTreeSet<_>>(),
+        "App {} update changes native permissions",
+        candidate.descriptor.id
+    );
+    validate_migration_path(candidate, current_schema)
+}
+
+fn recover_app_updates(workspace: &Path) -> Result<()> {
+    let apps_root = workspace.join("apps");
+    let Ok(entries) = std::fs::read_dir(&apps_root) else {
+        return Ok(());
+    };
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let app_root = entry.path();
+        let update_root = app_root.join(".update");
+        if !update_root.is_dir() {
+            continue;
+        }
+        let release = app_root.join("release");
+        let candidate_release = update_root.join("release");
+        let old_release = update_root.join("old-release");
+        if old_release.is_dir() {
+            if !release.is_dir() {
+                anyhow::ensure!(
+                    candidate_release.is_dir(),
+                    "App update is missing both current and candidate releases"
+                );
+                std::fs::rename(&candidate_release, &release)
+                    .context("complete App release swap")?;
+            }
+            std::fs::remove_dir_all(&update_root).context("clean completed App update")?;
+            continue;
+        }
+        if !candidate_release.is_dir() {
+            std::fs::remove_dir_all(&update_root).context("clean empty App update")?;
+            continue;
+        }
+        let app_id = entry
+            .file_name()
+            .to_str()
+            .ok_or_else(|| anyhow!("installed App id is not UTF-8"))?
+            .to_owned();
+        let installed = load_source_release(&release, &app_id)?;
+        let candidate = load_source_release(&candidate_release, &app_id)?;
+        let (_, db_root, _) = data_paths(workspace, &app_id);
+        let database = Arc::new(Mutex::new(DbModule::new(DbStorage::Dir(db_root))));
+        let current_schema = database_schema_version(&database, &app_id)?;
+        validate_update_contract(&installed, &candidate, current_schema)?;
+        migrate_source_database(&candidate, &database)?;
+        std::fs::rename(&release, &old_release).context("preserve current App release")?;
+        std::fs::rename(&candidate_release, &release).context("activate updated App release")?;
+        std::fs::remove_dir_all(&update_root).context("clean completed App update")?;
     }
     Ok(())
 }
@@ -2719,7 +3130,9 @@ impl AppScheduleStore {
                         if item.action == declaration.action
                             && item.every_seconds == every_seconds =>
                     {
-                        item.clone()
+                        let mut item = item.clone();
+                        item.args = declaration.args.clone();
+                        item
                     }
                     _ => StoredSchedule {
                         app_id: app.id.clone(),
@@ -2759,6 +3172,47 @@ impl AppScheduleStore {
     fn register(&mut self, app_id: String, path: PathBuf, schedules: Vec<StoredSchedule>) {
         self.paths.insert(app_id, path);
         self.schedules.extend(schedules);
+    }
+
+    fn replace(&mut self, descriptor: &AppDescriptor, path: PathBuf) -> Result<()> {
+        let prior = self
+            .schedules
+            .iter()
+            .filter(|schedule| schedule.app_id == descriptor.id)
+            .cloned()
+            .collect::<Vec<_>>();
+        self.remove(&descriptor.id);
+        let now = unix_seconds();
+        let schedules = descriptor
+            .schedules
+            .iter()
+            .map(|declaration| {
+                let every_seconds = declaration.every_minutes.saturating_mul(60).max(60);
+                prior
+                    .iter()
+                    .find(|schedule| {
+                        schedule.schedule_id == declaration.id
+                            && schedule.action == declaration.action
+                            && schedule.every_seconds == every_seconds
+                    })
+                    .cloned()
+                    .map(|mut schedule| {
+                        schedule.args = declaration.args.clone();
+                        schedule
+                    })
+                    .unwrap_or_else(|| StoredSchedule {
+                        app_id: descriptor.id.clone(),
+                        schedule_id: declaration.id.clone(),
+                        action: declaration.action.clone(),
+                        args: declaration.args.clone(),
+                        every_seconds,
+                        next_run_at: now.saturating_add(every_seconds),
+                        last_ok: None,
+                    })
+            })
+            .collect();
+        self.register(descriptor.id.clone(), path, schedules);
+        self.persist()
     }
 
     fn remove(&mut self, app_id: &str) {
@@ -3311,7 +3765,7 @@ mod tests {
         let catalog = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
         let mut supervisor = AppSupervisor::new(&workspace, catalog, Arc::new(NoServices)).unwrap();
         supervisor
-            .activate_app(&staged.release_dir, staged.credentials)
+            .apply_app(&staged.release_dir, staged.credentials)
             .unwrap();
         supervisor.open("source").unwrap();
         supervisor.frame_render(true).unwrap();
@@ -3390,7 +3844,7 @@ mod tests {
         let mut supervisor = AppSupervisor::new(&workspace, catalog, Arc::new(NoServices)).unwrap();
 
         supervisor
-            .activate_app(&staged.release_dir, staged.credentials)
+            .apply_app(&staged.release_dir, staged.credentials)
             .unwrap();
         supervisor.open("view-only").unwrap();
         supervisor.frame_render(true).unwrap();
@@ -3422,6 +3876,30 @@ mod tests {
         assert!(stage_pocketapp_bytes(&package, &staging).is_err());
         assert!(!staging.exists());
         assert!(package_file_path("assets/../outside.json").is_err());
+    }
+
+    #[test]
+    fn source_package_carries_conventional_migrations() {
+        let temp = tempfile::tempdir().unwrap();
+        let package = source_package(&[
+            (
+                "app.json",
+                br#"{"format":1,"frameworkApi":1,"id":"notes","title":"Notes","description":"Notes","version":"2","schemaVersion":2,"capabilities":["data.sqlite"],"resources":{},"tools":[],"schedules":[]}"#,
+            ),
+            (
+                "schema.sql",
+                b"CREATE TABLE notes(body TEXT, migrated INTEGER);",
+            ),
+            ("actions.js", b"PocketPi.defineActions({});"),
+            ("view.js", b"View.mount(() => View.Text('NOTES'));"),
+            (
+                "migrations/2.sql",
+                b"ALTER TABLE notes ADD COLUMN migrated INTEGER;",
+            ),
+        ]);
+        let staged = stage_pocketapp_bytes(&package, &temp.path().join("staged")).unwrap();
+        let app = load_source_release(&staged.release_dir, "notes").unwrap();
+        assert_eq!(app.migrations.keys().copied().collect::<Vec<_>>(), [2]);
     }
 
     #[test]
@@ -3571,9 +4049,7 @@ mod tests {
 
         let index = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
         let mut supervisor = AppSupervisor::new(&workspace, index, Arc::new(NoServices)).unwrap();
-        supervisor
-            .activate_app(&staging, BTreeMap::new())
-            .unwrap_err();
+        supervisor.apply_app(&staging, BTreeMap::new()).unwrap_err();
         assert!(!workspace.join("apps/broken").exists());
     }
 
@@ -3588,7 +4064,7 @@ mod tests {
                 .unwrap();
 
         let installed = supervisor
-            .activate_app(
+            .apply_app(
                 &staging,
                 BTreeMap::from([("exa.api-key".to_owned(), "secret".to_owned())]),
             )
@@ -3604,25 +4080,192 @@ mod tests {
     }
 
     #[test]
-    fn installing_an_existing_app_fails_without_changing_it() {
+    fn updating_an_existing_app_preserves_data_and_credentials() {
         let temp = tempfile::tempdir().unwrap();
-        install_checked_in_app(temp.path(), "exa");
+        let services = Arc::new(TrackingServices::default());
         let catalog = InstalledAppIndex::load(temp.path(), system_app_bundle()).unwrap();
-        let mut supervisor =
-            AppSupervisor::new(temp.path(), catalog, Arc::new(NoServices)).unwrap();
-        let staging = temp.path().join("duplicate-exa");
+        let mut supervisor = AppSupervisor::new(temp.path(), catalog, services.clone()).unwrap();
+        let initial = temp.path().join("initial-exa");
+        stage_checked_in_app(&initial, "exa");
+        let credentials = BTreeMap::from([("exa.api-key".to_owned(), "test-secret".to_owned())]);
+        supervisor.apply_app(&initial, credentials.clone()).unwrap();
+        {
+            let mut database = supervisor.databases["exa"].lock().unwrap();
+            let handle = database.open("exa");
+            assert_eq!(
+                database.exec(
+                    handle,
+                    "INSERT INTO searches(query,searched_at,status) VALUES('keep me',1,'done')"
+                ),
+                0
+            );
+        }
+
+        let staging = temp.path().join("updated-exa");
         stage_checked_in_app(&staging, "exa");
+        let mut descriptor: Value =
+            serde_json::from_slice(&std::fs::read(staging.join("app.json")).unwrap()).unwrap();
+        descriptor["version"] = json!("1.2.0");
+        std::fs::write(
+            staging.join("app.json"),
+            serde_json::to_vec_pretty(&descriptor).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            staging.join("view.js"),
+            format!(
+                "{}\n// code-only update",
+                std::fs::read_to_string(staging.join("view.js")).unwrap()
+            ),
+        )
+        .unwrap();
+        let staged_app = StagedApp {
+            descriptor: serde_json::from_value(descriptor).unwrap(),
+            release_dir: staging.clone(),
+            credentials: BTreeMap::new(),
+        };
+        let review = supervisor.review_app(&staged_app).unwrap();
+        assert!(review.update);
+        assert_eq!(review.current_version.as_deref(), Some("1.1.0"));
+        assert_eq!(review.current_schema_version, Some(5));
 
-        let error = supervisor
-            .activate_app(&staging, BTreeMap::new())
-            .unwrap_err();
+        let updated = supervisor.apply_app(&staging, BTreeMap::new()).unwrap();
 
-        assert!(error.to_string().contains("already installed"));
-        assert_eq!(
-            supervisor.catalog().descriptor("exa").unwrap().version,
-            "1.1.0"
-        );
+        assert_eq!(updated.version, "1.2.0");
+        assert_eq!(*services.credentials.lock().unwrap(), credentials);
+        let mut database = supervisor.databases["exa"].lock().unwrap();
+        let handle = database.open("exa");
+        let rows: Value =
+            serde_json::from_str(&database.query(handle, "SELECT query FROM searches", "[]"))
+                .unwrap();
+        assert_eq!(rows["rows"][0][0], "keep me");
         assert!(temp.path().join("apps/exa/release").is_dir());
+        assert!(!temp.path().join("apps/exa/.update").exists());
+    }
+
+    #[test]
+    fn update_requires_and_runs_the_schema_migration() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("device");
+        let catalog = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
+        let mut supervisor = AppSupervisor::new(&workspace, catalog, Arc::new(NoServices)).unwrap();
+        let initial = temp.path().join("notes-v1");
+        stage_notes_app(&initial, "1.0.0", 1, false);
+        supervisor.apply_app(&initial, BTreeMap::new()).unwrap();
+        {
+            let mut database = supervisor.databases["notes"].lock().unwrap();
+            let handle = database.open("notes");
+            assert_eq!(
+                database.exec(handle, "INSERT INTO notes(body) VALUES('keep me')"),
+                0
+            );
+        }
+
+        let missing = temp.path().join("notes-v2-missing");
+        stage_notes_app(&missing, "2.0.0", 2, false);
+        let error = supervisor.apply_app(&missing, BTreeMap::new()).unwrap_err();
+        assert!(error.to_string().contains("migrations/2.sql"));
+        assert_eq!(
+            supervisor.catalog().descriptor("notes").unwrap().version,
+            "1.0.0"
+        );
+
+        let failing = temp.path().join("notes-v2-failing");
+        stage_notes_app(&failing, "2.0.0", 2, true);
+        std::fs::write(
+            failing.join("migrations/2.sql"),
+            "ALTER TABLE notes ADD COLUMN migrated INTEGER; INSERT INTO missing VALUES(1);",
+        )
+        .unwrap();
+        let read_note = |supervisor: &AppSupervisor| {
+            let (response, result) = mpsc::channel();
+            supervisor
+                .action_runner
+                .enqueue(
+                    "notes",
+                    ActionSource::Ui,
+                    "read",
+                    Value::Null,
+                    new_action_deadline(),
+                    ActionCompletion::Response(response),
+                )
+                .unwrap();
+            result.recv_timeout(Duration::from_secs(2)).unwrap()
+        };
+        assert_eq!(read_note(&supervisor).text, "keep me");
+        assert!(supervisor.apply_app(&failing, BTreeMap::new()).is_err());
+        let result = read_note(&supervisor);
+        assert!(!result.is_error, "{}", result.text);
+        assert_eq!(result.text, "keep me");
+        {
+            let mut database = supervisor.databases["notes"].lock().unwrap();
+            let handle = database.open("notes");
+            let columns: Value = serde_json::from_str(&database.query(
+                handle,
+                "SELECT name FROM pragma_table_info('notes')",
+                "[]",
+            ))
+            .unwrap();
+            assert_eq!(columns["rows"], json!([["body"]]));
+        }
+
+        let update = temp.path().join("notes-v2");
+        stage_notes_app(&update, "2.0.0", 2, true);
+        supervisor.apply_app(&update, BTreeMap::new()).unwrap();
+        let mut database = supervisor.databases["notes"].lock().unwrap();
+        let handle = database.open("notes");
+        let result: Value =
+            serde_json::from_str(&database.query(handle, "SELECT body, migrated FROM notes", "[]"))
+                .unwrap();
+        assert_eq!(result["rows"][0], json!(["keep me", 1]));
+        let version: Value =
+            serde_json::from_str(&database.query(handle, "PRAGMA user_version", "[]")).unwrap();
+        assert_eq!(version["rows"][0][0], 2);
+        drop(database);
+
+        let downgrade = temp.path().join("notes-v1-downgrade");
+        stage_notes_app(&downgrade, "1.0.0", 1, false);
+        let error = supervisor
+            .apply_app(&downgrade, BTreeMap::new())
+            .unwrap_err();
+        assert!(error.to_string().contains("cannot downgrade schema 2 to 1"));
+    }
+
+    #[test]
+    fn boot_finishes_an_approved_update() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("device");
+        let catalog = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
+        let mut supervisor = AppSupervisor::new(&workspace, catalog, Arc::new(NoServices)).unwrap();
+        let initial = temp.path().join("notes-v1");
+        stage_notes_app(&initial, "1.0.0", 1, false);
+        supervisor.apply_app(&initial, BTreeMap::new()).unwrap();
+        {
+            let mut database = supervisor.databases["notes"].lock().unwrap();
+            let handle = database.open("notes");
+            assert_eq!(
+                database.exec(handle, "INSERT INTO notes(body) VALUES('keep me')"),
+                0
+            );
+        }
+        drop(supervisor);
+
+        let staged = temp.path().join("notes-v2");
+        stage_notes_app(&staged, "2.0.0", 2, true);
+        let update_root = workspace.join("apps/notes/.update");
+        std::fs::create_dir_all(&update_root).unwrap();
+        std::fs::rename(&staged, update_root.join("release")).unwrap();
+
+        let catalog = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
+        assert_eq!(catalog.descriptor("notes").unwrap().version, "2.0.0");
+        assert!(!update_root.exists());
+        let supervisor = AppSupervisor::new(&workspace, catalog, Arc::new(NoServices)).unwrap();
+        let mut database = supervisor.databases["notes"].lock().unwrap();
+        let handle = database.open("notes");
+        let result: Value =
+            serde_json::from_str(&database.query(handle, "SELECT body, migrated FROM notes", "[]"))
+                .unwrap();
+        assert_eq!(result["rows"][0], json!(["keep me", 1]));
     }
 
     #[test]
@@ -3641,7 +4284,7 @@ mod tests {
             AppSupervisor::new(&workspace, catalog, Arc::new(TrackingServices::default())).unwrap();
 
         supervisor
-            .activate_app(
+            .apply_app(
                 &staging,
                 BTreeMap::from([("exa.api-key".to_owned(), "secret".to_owned())]),
             )
@@ -3675,9 +4318,7 @@ mod tests {
             "robinhood.oauth-access-token".to_owned(),
             "secret".to_owned(),
         )]);
-        supervisor
-            .activate_app(&staging, credentials.clone())
-            .unwrap();
+        supervisor.apply_app(&staging, credentials.clone()).unwrap();
         supervisor.open("robinhood").unwrap();
         std::fs::write(
             workspace.join("apps/robinhood/data/user-state"),
@@ -3771,7 +4412,7 @@ mod tests {
 
         let staging = temp.path().join("reinstall-robinhood");
         stage_checked_in_app(&staging, "robinhood");
-        supervisor.activate_app(&staging, credentials).unwrap();
+        supervisor.apply_app(&staging, credentials).unwrap();
         assert!(supervisor.catalog().descriptor("robinhood").is_some());
     }
 
@@ -4045,6 +4686,52 @@ PocketPi.defineActions({ run() { return "ok"; } });
         result["rows"][0][0].as_u64().unwrap()
     }
 
+    fn stage_notes_app(release: &Path, version: &str, schema_version: u32, migration: bool) {
+        std::fs::create_dir_all(release).unwrap();
+        std::fs::write(
+            release.join("app.json"),
+            serde_json::to_vec_pretty(&json!({
+                "format":1,
+                "frameworkApi":1,
+                "id":"notes",
+                "title":"Notes",
+                "description":"Update fixture",
+                "version":version,
+                "schemaVersion":schema_version,
+                "capabilities":["data.sqlite"],
+                "resources":{},
+                "tools":[],
+                "schedules":[]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let schema = if schema_version == 1 {
+            "CREATE TABLE notes(body TEXT NOT NULL);"
+        } else {
+            "CREATE TABLE notes(body TEXT NOT NULL, migrated INTEGER NOT NULL DEFAULT 1);"
+        };
+        std::fs::write(release.join("schema.sql"), schema).unwrap();
+        std::fs::write(
+            release.join("actions.js"),
+            "PocketPi.defineActions({ read() { return PocketPi.data.query('SELECT body FROM notes ORDER BY rowid')[0]?.body || ''; } });",
+        )
+        .unwrap();
+        std::fs::write(
+            release.join("view.js"),
+            "View.mount(() => View.Text({ text: 'NOTES' }));",
+        )
+        .unwrap();
+        if migration {
+            std::fs::create_dir_all(release.join("migrations")).unwrap();
+            std::fs::write(
+                release.join("migrations/2.sql"),
+                "ALTER TABLE notes ADD COLUMN migrated INTEGER NOT NULL DEFAULT 1;",
+            )
+            .unwrap();
+        }
+    }
+
     fn install_view_fixture(workspace: &Path, app_id: &str) {
         let release = workspace.join("apps").join(app_id).join("release");
         std::fs::create_dir_all(&release).unwrap();
@@ -4130,7 +4817,7 @@ PocketPi.defineActions({ run() { return "ok"; } });
             )]),
             _ => BTreeMap::new(),
         };
-        supervisor.activate_app(&staging, credentials).unwrap();
+        supervisor.apply_app(&staging, credentials).unwrap();
     }
 
     fn stage_checked_in_app(release: &Path, app_id: &str) {

@@ -23,5 +23,16 @@ cargo xtask package app robinhood path/to/robinhood-credentials.json
 ```
 
 The result is `target/pocketapps/<id>.pocketapp`. HTTP and UART are only transport
-ingress. Installation is create-only: an existing App id must be uninstalled
-before it can be installed again.
+ingress. Uploading a package for an existing App updates its source while
+preserving its SQLite data and native credentials. Package an update without a
+credentials file:
+
+```sh
+cargo xtask package app exa
+```
+
+`version` identifies the App release shown to the user. `schemaVersion` changes
+only when the SQLite shape changes. A package that raises `schemaVersion` from
+N to N+1 must contain `migrations/<N+1>.sql`; fresh installs always create the
+final shape from `schema.sql`. Migration files contain only schema/data SQL;
+Pocket Pi owns their transaction and `PRAGMA user_version`.

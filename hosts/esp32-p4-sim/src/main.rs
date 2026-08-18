@@ -353,6 +353,9 @@ struct Product {
 struct InstallUi {
     state: &'static str,
     descriptor: AppDescriptor,
+    update: bool,
+    current_version: Option<String>,
+    current_schema_version: Option<u32>,
     error: Option<String>,
 }
 
@@ -554,7 +557,7 @@ impl Product {
         let cleanup = staged.release_dir.parent().map(Path::to_path_buf);
         let result = self
             .supervisor
-            .activate_app(&staged.release_dir, staged.credentials);
+            .apply_app(&staged.release_dir, staged.credentials);
         if let Some(path) = cleanup {
             let _ = std::fs::remove_dir_all(path);
         }
@@ -587,12 +590,33 @@ impl Product {
             && !self.supervisor.services_busy()
         {
             if let Ok(staged) = self.install_rx.try_recv() {
-                self.install_ui = Some(InstallUi {
-                    state: "review",
-                    descriptor: staged.descriptor.clone(),
-                    error: None,
-                });
-                self.pending_install = Some(staged);
+                match self.supervisor.review_app(&staged) {
+                    Ok(review) => {
+                        self.install_ui = Some(InstallUi {
+                            state: "review",
+                            descriptor: staged.descriptor.clone(),
+                            update: review.update,
+                            current_version: review.current_version,
+                            current_schema_version: review.current_schema_version,
+                            error: None,
+                        });
+                        self.pending_install = Some(staged);
+                    }
+                    Err(error) => {
+                        let current = self.supervisor.catalog().descriptor(&staged.descriptor.id);
+                        if let Some(path) = staged.release_dir.parent() {
+                            let _ = std::fs::remove_dir_all(path);
+                        }
+                        self.install_ui = Some(InstallUi {
+                            state: "failed",
+                            update: current.is_some(),
+                            descriptor: staged.descriptor,
+                            current_version: current.as_ref().map(|app| app.version.clone()),
+                            current_schema_version: current.map(|app| app.schema_version),
+                            error: Some(format!("{error:#}")),
+                        });
+                    }
+                }
                 self.supervisor.open(ROOT_APP_ID)?;
                 self.system_dirty = true;
             }
@@ -688,8 +712,12 @@ impl Product {
                 .collect::<Vec<_>>();
             json!({
                 "state":install.state,
+                "update":install.update,
                 "name":install.descriptor.title,
                 "version":install.descriptor.version,
+                "currentVersion":install.current_version,
+                "schemaVersion":install.descriptor.schema_version,
+                "currentSchemaVersion":install.current_schema_version,
                 "tools":install.descriptor.tools.len(),
                 "network":network,
                 "credentials":credentials,
@@ -752,7 +780,7 @@ fn start_install_server(workspace: &Path) -> Result<(Receiver<StagedApp>, Arc<At
         .spawn(move || {
             for mut request in server.incoming_requests() {
                 if request.method() == &tiny_http::Method::Get {
-                    let page = "<form method=post action=/install enctype=application/octet-stream><h1>Pocket Pi App Install</h1><input type=file id=f><button type=button onclick=send()>Upload</button><script>function send(){fetch('/install',{method:'POST',body:f.files[0]}).then(r=>r.text()).then(alert)}</script></form>";
+                    let page = "<form method=post action=/install enctype=application/octet-stream><h1>Pocket Pi App Package</h1><input type=file id=f><button type=button onclick=send()>Upload</button><script>function send(){fetch('/install',{method:'POST',body:f.files[0]}).then(r=>r.text()).then(alert)}</script></form>";
                     let _ = request.respond(tiny_http::Response::from_string(page));
                     continue;
                 }
@@ -786,7 +814,7 @@ fn start_install_server(workspace: &Path) -> Result<(Receiver<StagedApp>, Arc<At
                     Ok(staged) => {
                         match tx.try_send(staged) {
                             Ok(()) => {
-                                let _ = request.respond(tiny_http::Response::from_string("uploaded; confirm installation on Pocket Pi").with_status_code(202));
+                                let _ = request.respond(tiny_http::Response::from_string("uploaded; confirm on Pocket Pi").with_status_code(202));
                             }
                             Err(mpsc::TrySendError::Full(staged)
                             | mpsc::TrySendError::Disconnected(staged)) => {
@@ -1205,7 +1233,7 @@ mod tests {
                 "exa" => BTreeMap::from([("exa.api-key".to_owned(), "test-secret".to_owned())]),
                 _ => unreachable!(),
             };
-            supervisor.activate_app(&staging, credentials).unwrap();
+            supervisor.apply_app(&staging, credentials).unwrap();
         }
         supervisor
     }
@@ -1248,7 +1276,7 @@ mod tests {
             AppSupervisor::new(&workspace, index, Arc::new(SimAppServices)).unwrap();
         assert!(supervisor.catalog().descriptor("exa").is_none());
         supervisor
-            .activate_app(&staged.release_dir, staged.credentials)
+            .apply_app(&staged.release_dir, staged.credentials)
             .unwrap();
         assert!(supervisor.catalog().descriptor("exa").is_some());
         let result = route_tool(

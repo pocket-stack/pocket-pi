@@ -50,6 +50,9 @@ struct Message {
 struct InstallUi {
     state: &'static str,
     descriptor: AppDescriptor,
+    update: bool,
+    current_version: Option<String>,
+    current_schema_version: Option<u32>,
     error: Option<String>,
 }
 
@@ -359,12 +362,35 @@ pub fn run() -> anyhow::Result<()> {
             && !supervisor.services_busy()
         {
             if let Ok(staged) = install_rx.try_recv() {
-                install_ui = Some(InstallUi {
-                    state: "review",
-                    descriptor: staged.descriptor.clone(),
-                    error: None,
-                });
-                pending_install = Some(staged);
+                match supervisor.review_app(&staged) {
+                    Ok(review) => {
+                        install_ui = Some(InstallUi {
+                            state: "review",
+                            descriptor: staged.descriptor.clone(),
+                            update: review.update,
+                            current_version: review.current_version,
+                            current_schema_version: review.current_schema_version,
+                            error: None,
+                        });
+                        pending_install = Some(staged);
+                    }
+                    Err(error) => {
+                        let current = supervisor
+                            .catalog()
+                            .descriptor(&staged.descriptor.id);
+                        if let Some(path) = staged.release_dir.parent() {
+                            let _ = std::fs::remove_dir_all(path);
+                        }
+                        install_ui = Some(InstallUi {
+                            state: "failed",
+                            update: current.is_some(),
+                            descriptor: staged.descriptor,
+                            current_version: current.as_ref().map(|app| app.version.clone()),
+                            current_schema_version: current.map(|app| app.schema_version),
+                            error: Some(format!("{error:#}")),
+                        });
+                    }
+                }
                 supervisor.open(pocket_pi_agentos::ROOT_APP_ID)?;
                 system_dirty = true;
                 redraw = true;
@@ -710,22 +736,27 @@ pub fn run() -> anyhow::Result<()> {
         if install_requested {
             install_requested = false;
             if let Some(staged) = pending_install.take() {
+                let operation = if install_ui.as_ref().is_some_and(|ui| ui.update) {
+                    "update"
+                } else {
+                    "install"
+                };
                 let cleanup = staged
                     .release_dir
                     .parent()
                     .map(std::path::Path::to_path_buf);
                 let result = with_psram_pthread_config(ACTION_STACK_BYTES, || {
-                    supervisor.activate_app(&staged.release_dir, staged.credentials)
+                    supervisor.apply_app(&staged.release_dir, staged.credentials)
                 });
                 match &result {
                     Ok(descriptor) => {
                         log::info!(
-                            "App install succeeded: {} {}",
+                            "App {operation} succeeded: {} {}",
                             descriptor.id,
                             descriptor.version
                         )
                     }
-                    Err(error) => log::error!("App install failed: {error:#}"),
+                    Err(error) => log::error!("App {operation} failed: {error:#}"),
                 }
                 if let Some(path) = cleanup {
                     let _ = std::fs::remove_dir_all(path);
@@ -815,7 +846,7 @@ fn start_install_server(
     })?;
     server.fn_handler::<anyhow::Error, _>("/", Method::Get, |request| {
         request.into_ok_response()?.write_all(
-            b"<form><h1>Pocket Pi App Install</h1><input type=file id=f><button type=button onclick=send()>Upload</button><script>function send(){fetch('/install',{method:'POST',body:f.files[0]}).then(r=>r.text()).then(alert)}</script></form>",
+            b"<form><h1>Pocket Pi App Package</h1><input type=file id=f><button type=button onclick=send()>Upload</button><script>function send(){fetch('/install',{method:'POST',body:f.files[0]}).then(r=>r.text()).then(alert)}</script></form>",
         )?;
         Ok(())
     })?;
@@ -850,7 +881,7 @@ fn start_install_server(
                 Ok(()) => {
                     request
                         .into_status_response(202)?
-                        .write_all(b"uploaded; confirm installation on Pocket Pi")?;
+                        .write_all(b"uploaded; confirm on Pocket Pi")?;
                 }
                 Err(
                     mpsc::TrySendError::Full(staged) | mpsc::TrySendError::Disconnected(staged),
@@ -1059,8 +1090,12 @@ fn system_facts(
             .collect::<Vec<_>>();
         json!({
             "state":install.state,
+            "update":install.update,
             "name":install.descriptor.title,
             "version":install.descriptor.version,
+            "currentVersion":install.current_version,
+            "schemaVersion":install.descriptor.schema_version,
+            "currentSchemaVersion":install.current_schema_version,
             "tools":install.descriptor.tools.len(),
             "network":network,
             "credentials":credentials,
