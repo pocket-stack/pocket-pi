@@ -6,8 +6,9 @@ product-contract simulator, not a second product.
 
 Ordinary Apps are installed and executed as raw JavaScript source. The device
 does not compile them, and changing an App does not rebuild or flash Firmware.
-An App id can be installed only once; uninstall is required before reinstalling
-it. The Pi Agent is the one firmware-embedded System Bundle.
+Uploading the same App id updates that App's source while preserving its SQLite
+data and native credentials. The Pi Agent is the one firmware-embedded System
+Bundle.
 
 ## Core model
 
@@ -39,7 +40,7 @@ Three principles govern the implementation:
 Hardware
 └── ESP-IDF Firmware host                         Rust
     ├── hardware, transport, credentials, limits
-    ├── AppSupervisor and install/uninstall lifecycle
+    ├── AppSupervisor and install/update/uninstall lifecycle
     └── PocketJS runtime platform                 Rust + QuickJS C
         ├── Pocket Pi System Framework            raw JavaScript
         ├── resident Pi Agent System Guest
@@ -84,7 +85,7 @@ drops it.
 | AppSupervisor mechanisms | `crates/pocket-pi-agentos`, Rust | Firmware lifetime | Firmware build/flash |
 | System Framework v1 | `system/framework.js`, JavaScript | evaluated per Guest | Firmware build/flash |
 | Pi Agent System App | `apps/pi-agent`, raw View JavaScript + bundled Agent loop | resident | Firmware build/flash |
-| Ordinary App | `apps/<id>`, raw JavaScript + SQL | LRU Guests | package + install |
+| Ordinary App | `apps/<id>`, raw JavaScript + SQL | LRU Guests | package + install/update |
 | App Data | per-App SQLite + files | survives Guest eviction and restart | Action transaction |
 
 Firmware contains the Pi Agent System App so a blank device can boot. System App
@@ -175,6 +176,7 @@ schema.sql
 actions.js
 view.js
 assets/              optional JSON resources declared by app.json
+migrations/N.sql     optional schema N-1 to N migration
 credentials.json     initial-install transport input, removed before activation
 ```
 
@@ -186,11 +188,15 @@ App uses the same shared View SDK with `app.json`, `view.js` and its local
 seed adds `plan.json`. These System files are not accepted in an ordinary
 `.pocketapp`.
 
-## Install and uninstall
+App `version` identifies the source release shown to the user. Integer
+`schemaVersion` identifies only the SQLite shape and changes only when that
+shape changes. The two versions deliberately do not advance together.
+
+## Install, update and uninstall
 
 Before activation the Installer validates paths, size, manifest identity,
 capabilities, credential declarations, resources and Framework API.
-`AppSupervisor` rejects an already-installed App id, then:
+For a new App, `AppSupervisor`:
 
 1. initializes `schema.sql`, loads `actions.js` against the App's SQLite owner
    and verifies every Tool/Schedule Action name;
@@ -200,9 +206,27 @@ capabilities, credential declarations, resources and Framework API.
 4. registers credentials, Tools, Schedules and the two LRU configurations.
 
 Any failure removes the incomplete App. There are no release pointers, retained
-versions, replacement, rollback, credential reuse or migration semantics. A
-user may explicitly uninstall an ordinary App, which removes all App-owned
-state, then install it again as a new App.
+versions or rollback. For an existing App id, the same review UI applies an
+update through the same supervisor path:
+
+1. rejects credentials, native-permission changes, schema downgrades and missing
+   `migrations/N.sql` steps;
+2. copies the quiescent SQLite database and rehearses the migrations plus
+   candidate Actions/View against that copy;
+3. runs the same migrations in one live SQLite transaction;
+4. swaps the single source release and replaces Tools, Schedules and cached
+   Action/View runtimes;
+5. removes the temporary old source after the new App is active.
+
+`.update/release` exists only after physical confirmation and is the complete
+recovery signal. If power is lost, boot reruns any uncommitted SQLite migration
+and finishes the source swap. There is no persistent installation record,
+release history or rollback mechanism. Explicit uninstall still removes all
+App-owned state.
+
+Migration files contain only schema/data statements. The runtime owns the
+transaction and `PRAGMA user_version`; Apps must not put transaction control or
+set `user_version` inside `migrations/N.sql`.
 
 ## Minimal native capability surface
 
@@ -214,7 +238,7 @@ Native retains only boundaries that JavaScript cannot safely own:
 - per-App SQLite ownership, read/write enforcement and revision counters;
 - credentials, TLS, endpoint/operation allowlists and model/provider transport;
 - scheduler clock/cursor and Action queue admission;
-- package validation, create-only install, uninstall and recovery data;
+- package validation and install/update/uninstall recovery;
 - rendering of PocketJS draw output.
 
 Robinhood/Exa schema, provider mapping, Actions, Projection SQL and all product
@@ -225,13 +249,13 @@ Views remain App-owned source.
 - a general on-device ES module loader for multi-file App source trees;
 - on-device TypeScript, TSX or JSX transformation;
 - independent update or API migration of the System Framework itself;
-- ordinary or System App replacement, upgrade, rollback or live migration;
+- System App replacement or independent update, release history and rollback;
 - a package dependency graph, plugin framework or second JavaScript runtime.
 
 The contract stays deliberately small: one Actions entrypoint, one View
-entrypoint, one schema and optional declared JSON resources. Modules, JSX or a
-larger component system should be added only when a concrete App cannot be
-expressed cleanly with this boundary.
+entrypoint, one final schema, conventional forward SQL migrations and optional
+declared JSON resources. Modules, JSX or a larger component system should be
+added only when a concrete App cannot be expressed cleanly with this boundary.
 
 ## Evidence
 
@@ -240,7 +264,9 @@ The core contracts are exercised in `crates/pocket-pi-agentos/src/lib.rs`:
 - View and Action LRUs retain the three most recent Guests.
 - Tool routing uses each App's declared Action.
 - App revision commits coalesce at the foreground frame boundary.
-- duplicate App installation fails without changing the installed App.
+- code-only update preserves SQLite data and native credentials.
+- schema update rejects missing steps and preserves rows through migration.
+- boot completes an approved update interrupted before activation.
 - Schedule success is recorded only after its Action actually completes.
 - Projection and SQLite errors propagate instead of becoming an empty View.
 - uninstall removes App-owned routing, Guests, schedules, credentials and data.

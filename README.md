@@ -80,7 +80,13 @@ cargo xtask package app robinhood path/to/robinhood-credentials.json
 Packages are written to `target/pocketapps/<id>.pocketapp`. The firmware image
 contains Pi Agent and native device mechanisms, but no ordinary App. Ordinary
 Apps can be installed without rebuilding or flashing Firmware. Apps without
-declared credentials omit the final argument.
+declared credentials omit the final argument. To update an installed App,
+package it without credentials; Pocket Pi preserves the native values already
+stored for that App:
+
+```sh
+cargo xtask package app exa
+```
 
 ### 1. Pocket Pi on ESP32-P4
 
@@ -143,13 +149,15 @@ python3 tools/uart-install.py "$DEVICE_PORT" \
   target/pocketapps/exa.pocketapp
 ```
 
-Both transports stop at the same review screen; installation starts only after
+Both transports stop at the same review screen; installation or update starts only after
 confirmation on Pocket Pi. Confirm before opening `espflash monitor`; otherwise
 its control-line sequence can reset the board and discard the pending review.
-Installation fails if that App id is already present,
-and every install must carry each credential declared by the App. Installer
-removes initial values from the package and stores them in native
-NVS; they are not exposed through the App filesystem or Agent workspace.
+The first install must carry each credential declared by the App. An update
+must omit credentials and keep the same native permissions; installed values
+remain in native NVS and are not exposed through the App filesystem or Agent
+workspace. App `version` is release metadata. SQLite `schemaVersion` advances
+separately, using conventional `migrations/<target>.sql` files such as
+`migrations/6.sql` for schema 5 to 6. Downgrades and missing steps are rejected.
 Neither HTTP nor UART writes App storage, credentials or runtime state directly.
 UART upload does not reset the board or change its model configuration.
 The UART CLIs leave DTR/RTS inactive before closing the port so the USB serial
@@ -279,10 +287,22 @@ and [docs/esp32-p4-port.md](docs/esp32-p4-port.md) for board-specific details.
 
 ## Current validation
 
-On **2026-08-16**, the workspace completed 45 Rust tests and 3 App text behavior
+On **2026-08-18**, the workspace completed 51 Rust tests and 3 App text behavior
 tests with no failures, passed workspace Clippy with warnings denied, and built
-the simulator and ESP32-P4 release firmware. No new physical-board test was run
-for this refactor. On 2026-08-14, a simulator LAN smoke uploaded the generated Exa
+the Pi Agent assets, simulator and ESP32-P4 release firmware. The core tests
+cover code-only update, SQLite migration, credential/data preservation and boot
+completion of an interrupted approved update. `xtask` also produced a
+credential-free Exa update package. Temporary packages covering successful,
+missing and failing schema migrations were used only for physical acceptance
+and are not part of the repository.
+The current release firmware was then flashed to a physical ESP32-P4 without an
+erase. Existing NVS Wi-Fi state survived and DHCP restored `192.168.0.118`. The
+board completed an HTTP fresh install, a UART code-only update, an HTTP schema
+migration and a reset while preserving the App value and migration marker. A
+second cycle rejected schema downgrade and missing migration before mutation,
+rolled back an intentionally failing migration, preserved the v1 release and
+data, and finally accepted the valid v2 package over UART. On 2026-08-14, a
+simulator LAN smoke uploaded the generated Exa
 package through `POST /install` and received HTTP 202; the core install test
 proves activation, Tool routing, SQLite ownership and restart recovery for a
 previously absent App. The uninstall lifecycle test proves complete App-owned

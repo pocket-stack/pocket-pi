@@ -55,7 +55,7 @@ def main() -> int:
                     else:
                         print("Package transferred; device is validating it", flush=True)
                 elif line.startswith(UPLOADED):
-                    print("Upload complete; confirm installation on Pocket Pi", flush=True)
+                    print("Upload complete; confirm on Pocket Pi", flush=True)
                     print(
                         "Do not run espflash monitor before confirming; "
                         "it can reset the board and discard this review",

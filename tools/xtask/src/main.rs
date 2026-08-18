@@ -130,18 +130,16 @@ fn package_source_app(root: &Path, app: &str, credentials: Option<&Path>) -> Res
             && descriptor["id"] == app,
         "App does not target this source runtime"
     );
-    let credentials_map = credentials.map_or_else(
-        || Ok(BTreeMap::new()),
-        |path| {
+    if let Some(path) = credentials {
+        let credentials_map =
             serde_json::from_slice::<BTreeMap<String, String>>(&std::fs::read(path)?)
-                .context("parse credentials.json")
-        },
-    )?;
-    anyhow::ensure!(
-        credentials_map.keys().cloned().collect::<BTreeSet<_>>()
-            == descriptor_credential_ids(&descriptor),
-        "credentials.json ids do not match app.json"
-    );
+                .context("parse credentials.json")?;
+        anyhow::ensure!(
+            credentials_map.keys().cloned().collect::<BTreeSet<_>>()
+                == descriptor_credential_ids(&descriptor),
+            "credentials.json ids do not match app.json"
+        );
+    }
     let mut assets = BTreeSet::new();
     for resource in descriptor["resources"]
         .as_object()
@@ -158,6 +156,36 @@ fn package_source_app(root: &Path, app: &str, credentials: Option<&Path>) -> Res
         anyhow::ensure!(app_root.join(path).is_file(), "missing App resource {path}");
     }
 
+    let schema_version = descriptor["schemaVersion"]
+        .as_u64()
+        .context("App is missing schemaVersion")?;
+    let mut migrations = BTreeMap::new();
+    let migrations_root = app_root.join("migrations");
+    if migrations_root.exists() {
+        for entry in std::fs::read_dir(&migrations_root)? {
+            let entry = entry?;
+            anyhow::ensure!(entry.file_type()?.is_file(), "App migration is not a file");
+            let name = entry
+                .file_name()
+                .to_str()
+                .context("App migration name is not UTF-8")?
+                .to_owned();
+            let version = name
+                .strip_suffix(".sql")
+                .context("invalid App migration filename")?
+                .parse::<u64>()
+                .context("invalid App migration filename")?;
+            anyhow::ensure!(
+                version >= 2 && version <= schema_version && name == format!("{version}.sql"),
+                "invalid App migration: {name}"
+            );
+            anyhow::ensure!(
+                migrations.insert(version, entry.path()).is_none(),
+                "duplicate App migration for schema {version}"
+            );
+        }
+    }
+
     let output_dir = root.join("target/pocketapps");
     std::fs::create_dir_all(&output_dir)?;
     let output = output_dir.join(format!("{app}.pocketapp"));
@@ -168,6 +196,9 @@ fn package_source_app(root: &Path, app: &str, credentials: Option<&Path>) -> Res
     }
     for path in assets {
         archive.append_path_with_name(app_root.join(path), path)?;
+    }
+    for (version, path) in migrations {
+        archive.append_path_with_name(path, format!("migrations/{version}.sql"))?;
     }
     if let Some(credentials) = credentials {
         archive.append_path_with_name(credentials, "credentials.json")?;
