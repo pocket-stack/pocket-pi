@@ -30,6 +30,11 @@ adapters only receive a complete `.pocketapp` and hand it to the shared Installe
 in `pocket-pi-agentos`; neither writes App storage, credentials or runtime state
 itself.
 
+The resident Agent uses that same lifecycle: `app.checkout` creates the editable
+source under `apps/<id>/checkout`, and `app.submit` moves it into the shared
+Installer staging before opening physical confirmation. The host does not gain
+a second Agent-specific updater.
+
 ```sh
 cargo xtask build esp32-p4
 cargo xtask build esp32-s3

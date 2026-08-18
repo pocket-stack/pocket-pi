@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context as _, Result};
 use pocket3d::gpu::{Gpu, OffscreenTarget};
 use pocket_pi_agentos::{
-    stage_pocketapp_bytes, system_app_bundle, AppDescriptor, AppServiceHost, AppSupervisor,
-    AppToolRequest, HttpRequest, InstalledAppIndex, NetFailure, RoutedToolHost, StagedApp,
+    stage_pocketapp_bytes, system_app_bundle, AgentToolRequest, AppDescriptor, AppServiceHost,
+    AppSupervisor, HttpRequest, InstalledAppIndex, NetFailure, RoutedToolHost, StagedApp,
     TransportCompletion, Viewport, MAX_POCKETAPP_BYTES, ROOT_APP_ID,
 };
 use pocket_pi_embedded::{AgentEvent, ToolHost};
@@ -331,7 +331,7 @@ struct Product {
     agent_status: &'static str,
     model_label: String,
     native_tools: Arc<CoreToolHost>,
-    app_rx: Receiver<AppToolRequest>,
+    agent_rx: Receiver<AgentToolRequest>,
     supervisor: AppSupervisor,
     last_schedule_poll: Instant,
     busy: bool,
@@ -341,6 +341,7 @@ struct Product {
     wifi_networks: Vec<(&'static str, i32, bool)>,
     wifi_status: String,
     install_rx: Receiver<StagedApp>,
+    install_root: PathBuf,
     install_slot: Arc<AtomicBool>,
     pending_install: Option<StagedApp>,
     install_ui: Option<InstallUi>,
@@ -383,11 +384,12 @@ impl Product {
         let native_tools = Arc::new(CoreToolHost::new(workspace.clone(), Arc::new(SimPlatform)));
         let catalog = supervisor.catalog().clone();
         let native: Arc<dyn ToolHost> = native_tools.clone();
-        let (routed, app_rx) = RoutedToolHost::new(native, catalog);
+        let (routed, agent_rx) = RoutedToolHost::new(native, catalog);
         let config = backend.agent_config();
         let model = backend.build();
         supervisor.boot_agent(&config, model, Arc::new(routed))?;
         let (install_rx, install_slot) = start_install_server(&workspace)?;
+        let install_root = workspace.join(".system/install");
 
         Ok(Self {
             messages: vec![Message {
@@ -397,7 +399,7 @@ impl Product {
             agent_status: "IDLE",
             model_label,
             native_tools,
-            app_rx,
+            agent_rx,
             supervisor,
             last_schedule_poll: Instant::now(),
             busy: false,
@@ -407,6 +409,7 @@ impl Product {
             wifi_networks: Vec::new(),
             wifi_status: "SIMULATED NETWORK READY".into(),
             install_rx,
+            install_root,
             install_slot,
             pending_install: None,
             install_ui: None,
@@ -625,8 +628,48 @@ impl Product {
                 self.system_dirty = true;
             }
         }
-        while let Ok(request) = self.app_rx.try_recv() {
-            request.handle(&self.supervisor);
+        while let Ok(request) = self.agent_rx.try_recv() {
+            let pending_install = &mut self.pending_install;
+            let install_ui = &mut self.install_ui;
+            let pending_uninstall = &self.pending_uninstall;
+            let install_root = &self.install_root;
+            let install_slot = &self.install_slot;
+            request.handle(&mut self.supervisor, |supervisor, path| {
+                anyhow::ensure!(pending_install.is_none(), "another install is pending");
+                anyhow::ensure!(pending_uninstall.is_none(), "an App uninstall is pending");
+                anyhow::ensure!(!supervisor.services_busy(), "App services are busy");
+                anyhow::ensure!(
+                    install_slot
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok(),
+                    "another install is pending"
+                );
+                let result = (|| -> Result<Value> {
+                    let (staged, review) = supervisor.submit_app_checkout(path, install_root)?;
+                    supervisor
+                        .open(ROOT_APP_ID)
+                        .expect("resident Pi Agent remains available");
+                    let descriptor = staged.descriptor.clone();
+                    *install_ui = Some(InstallUi {
+                        state: "review",
+                        descriptor: descriptor.clone(),
+                        update: review.update,
+                        current_version: review.current_version,
+                        current_schema_version: review.current_schema_version,
+                        error: None,
+                    });
+                    *pending_install = Some(staged);
+                    Ok(json!({
+                        "status":"pending_confirmation",
+                        "app":descriptor.id,
+                        "version":descriptor.version
+                    }))
+                })();
+                if result.is_err() {
+                    install_slot.store(false, Ordering::Release);
+                }
+                result
+            });
             self.system_dirty = true;
         }
         if self.last_schedule_poll.elapsed() >= Duration::from_secs(1) {
@@ -1179,7 +1222,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         while !call.is_finished() {
             while let Ok(request) = requests.try_recv() {
-                request.handle(supervisor);
+                request.handle(supervisor, |_, _| anyhow::bail!("unexpected app.submit"));
             }
             supervisor.frame_render(true).unwrap();
             assert!(Instant::now() < deadline, "timed out routing App Tool");

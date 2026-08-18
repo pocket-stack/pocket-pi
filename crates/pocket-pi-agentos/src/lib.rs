@@ -4,7 +4,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex, RwLock};
@@ -26,6 +26,8 @@ pub const ROOT_APP_ID: &str = "pi-agent";
 pub const POCKETJS_REVISION: &str = "e12cf12f82cc60b636368119d49a06eb9ed2a3d5";
 pub const SYSTEM_FRAMEWORK_API: u32 = 1;
 pub const MAX_POCKETAPP_BYTES: usize = 2 * 1024 * 1024;
+const APP_CHECKOUT_TOOL: &str = "app.checkout";
+const APP_SUBMIT_TOOL: &str = "app.submit";
 const MAX_JSON_RESOURCE_BYTES: usize = 256 * 1024;
 const MAX_RESOURCE_BYTES: usize = 512 * 1024;
 const VIEW_RUNTIME_LIMIT: usize = 3;
@@ -720,6 +722,10 @@ fn validate_app_tools(app: &InstalledApp, routes: &BTreeMap<String, ToolRoute>) 
             .and_then(Value::as_str)
             .filter(|action| !action.is_empty())
             .ok_or_else(|| anyhow!("{name} tool is missing action"))?;
+        anyhow::ensure!(
+            !matches!(name, APP_CHECKOUT_TOOL | APP_SUBMIT_TOOL),
+            "App tool name is reserved: {name}"
+        );
         anyhow::ensure!(!routes.contains_key(name), "duplicate App tool: {name}");
         anyhow::ensure!(
             !action.contains('.'),
@@ -2125,6 +2131,112 @@ impl AppSupervisor {
         self.validate_app_change(&candidate, &staged.credentials)
     }
 
+    pub fn checkout_app(&self, app_id: &str) -> Result<String> {
+        ensure_safe_component(app_id, "App id")?;
+        anyhow::ensure!(app_id != ROOT_APP_ID, "cannot checkout the System App");
+        let app = self
+            .catalog
+            .app(app_id)
+            .ok_or_else(|| anyhow!("unknown App: {app_id}"))?;
+        let app_root = self.workspace.join("apps").join(app_id);
+        let checkout = app_root.join("checkout");
+        match checkout.symlink_metadata() {
+            Ok(metadata) => {
+                anyhow::ensure!(
+                    metadata.file_type().is_dir(),
+                    "App checkout is not a directory"
+                );
+                return Ok(format!("apps/{app_id}/checkout"));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+
+        let temporary = app_root.join(".checkout-tmp");
+        if temporary.exists() {
+            std::fs::remove_dir_all(&temporary)?;
+        }
+        let copied = copy_directory(&app.release_dir, &temporary);
+        if let Err(error) = copied {
+            let _ = std::fs::remove_dir_all(&temporary);
+            return Err(error);
+        }
+        std::fs::rename(&temporary, &checkout).context("publish App checkout")?;
+        Ok(format!("apps/{app_id}/checkout"))
+    }
+
+    pub fn submit_app_checkout(
+        &self,
+        requested_path: &str,
+        install_root: &Path,
+    ) -> Result<(StagedApp, AppInstallReview)> {
+        let (app_id, checkout) = self.resolve_checkout(requested_path)?;
+        anyhow::ensure!(
+            checkout.symlink_metadata()?.file_type().is_dir(),
+            "App checkout is not a directory"
+        );
+        let candidate = load_source_release(&checkout, &app_id)?;
+        let review = self.validate_app_change(&candidate, &BTreeMap::new())?;
+        let staged = StagedApp {
+            descriptor: candidate.descriptor,
+            release_dir: checkout.clone(),
+            credentials: BTreeMap::new(),
+        };
+
+        std::fs::create_dir_all(install_root)?;
+        let job = install_root.join(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default()
+                .to_string(),
+        );
+        std::fs::create_dir(&job)?;
+        let release_dir = job.join("release");
+        if let Err(error) = std::fs::rename(&checkout, &release_dir) {
+            let _ = std::fs::remove_dir(&job);
+            return Err(error).context("submit App checkout");
+        }
+        Ok((
+            StagedApp {
+                release_dir,
+                ..staged
+            },
+            review,
+        ))
+    }
+
+    fn resolve_checkout(&self, requested_path: &str) -> Result<(String, PathBuf)> {
+        let path = Path::new(requested_path);
+        let relative = if path.is_absolute() {
+            path.strip_prefix("/workspace")
+                .context("App checkout path must be under /workspace")?
+        } else {
+            path
+        };
+        let components = relative.components().collect::<Vec<_>>();
+        anyhow::ensure!(
+            matches!(components.as_slice(), [Component::Normal(apps), Component::Normal(_), Component::Normal(checkout)] if *apps == "apps" && *checkout == "checkout"),
+            "app.submit requires apps/<id>/checkout"
+        );
+        let Component::Normal(app_id) = components[1] else {
+            unreachable!()
+        };
+        let app_id = app_id
+            .to_str()
+            .ok_or_else(|| anyhow!("App id is not UTF-8"))?
+            .to_owned();
+        ensure_safe_component(&app_id, "App id")?;
+        anyhow::ensure!(
+            app_id != ROOT_APP_ID && self.catalog.app(&app_id).is_some(),
+            "unknown App: {app_id}"
+        );
+        Ok((
+            app_id.clone(),
+            self.workspace.join("apps").join(app_id).join("checkout"),
+        ))
+    }
+
     pub fn apply_app(
         &mut self,
         staging_release: &Path,
@@ -2901,6 +3013,12 @@ fn validate_update_contract(
     current_schema: u32,
 ) -> Result<()> {
     anyhow::ensure!(
+        candidate.descriptor.version != installed.descriptor.version,
+        "App {} update must change version {}",
+        candidate.descriptor.id,
+        installed.descriptor.version
+    );
+    anyhow::ensure!(
         candidate.descriptor.schema_version >= installed.descriptor.schema_version,
         "App {} cannot downgrade schema {} to {}",
         candidate.descriptor.id,
@@ -3065,7 +3183,23 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-pub struct AppToolRequest {
+fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
+    std::fs::create_dir(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let target = destination.join(entry.file_name());
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            copy_directory(&entry.path(), &target)?;
+        } else {
+            anyhow::ensure!(kind.is_file(), "App source contains a non-file entry");
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+pub struct AgentToolRequest {
     name: String,
     args_json: String,
     deadline: Instant,
@@ -3075,22 +3209,22 @@ pub struct AppToolRequest {
 pub struct RoutedToolHost {
     native: Arc<dyn ToolHost>,
     catalog: InstalledAppIndex,
-    app_tx: mpsc::Sender<AppToolRequest>,
+    agent_tx: mpsc::Sender<AgentToolRequest>,
 }
 
 impl RoutedToolHost {
     pub fn new(
         native: Arc<dyn ToolHost>,
         catalog: InstalledAppIndex,
-    ) -> (Self, mpsc::Receiver<AppToolRequest>) {
-        let (app_tx, app_rx) = mpsc::channel();
+    ) -> (Self, mpsc::Receiver<AgentToolRequest>) {
+        let (agent_tx, agent_rx) = mpsc::channel();
         (
             Self {
                 native,
                 catalog,
-                app_tx,
+                agent_tx,
             },
-            app_rx,
+            agent_rx,
         )
     }
 }
@@ -3098,19 +3232,22 @@ impl RoutedToolHost {
 impl ToolHost for RoutedToolHost {
     fn definitions(&self) -> Vec<Value> {
         let mut definitions = self.native.definitions();
+        definitions.extend(agent_app_tool_definitions());
         definitions.extend(self.catalog.tool_definitions());
         definitions
     }
 
     fn execute(&self, call_id: &str, name: &str, args_json: &str) -> ToolResult {
-        if self.catalog.route_for_tool(name).is_none() {
+        if !matches!(name, APP_CHECKOUT_TOOL | APP_SUBMIT_TOOL)
+            && self.catalog.route_for_tool(name).is_none()
+        {
             return self.native.execute(call_id, name, args_json);
         }
         let (response, response_rx) = mpsc::channel();
         let deadline = new_action_deadline();
         if self
-            .app_tx
-            .send(AppToolRequest {
+            .agent_tx
+            .send(AgentToolRequest {
                 name: name.to_owned(),
                 args_json: args_json.to_owned(),
                 deadline,
@@ -3135,9 +3272,71 @@ impl ToolHost for RoutedToolHost {
     }
 }
 
-impl AppToolRequest {
-    pub fn handle(self, supervisor: &AppSupervisor) {
-        supervisor.begin_agent_tool(&self.name, &self.args_json, self.deadline, self.response);
+impl AgentToolRequest {
+    pub fn handle(
+        self,
+        supervisor: &mut AppSupervisor,
+        submit: impl FnOnce(&mut AppSupervisor, &str) -> Result<Value>,
+    ) {
+        match self.name.as_str() {
+            APP_CHECKOUT_TOOL => {
+                let result = required_tool_string(&self.args_json, "id")
+                    .and_then(|app_id| supervisor.checkout_app(&app_id))
+                    .map(|path| json!({"status":"ready","path":path}));
+                let _ = self.response.send(tool_result(result));
+            }
+            APP_SUBMIT_TOOL => {
+                let result = required_tool_string(&self.args_json, "path")
+                    .and_then(|path| submit(supervisor, &path));
+                let mut result = tool_result(result);
+                if !result.is_error {
+                    result.terminate = true;
+                }
+                let _ = self.response.send(result);
+            }
+            _ => supervisor.begin_agent_tool(
+                &self.name,
+                &self.args_json,
+                self.deadline,
+                self.response,
+            ),
+        }
+    }
+}
+
+fn agent_app_tool_definitions() -> [Value; 2] {
+    [
+        json!({
+            "name":APP_CHECKOUT_TOOL,
+            "description":"Create or reopen an editable copy of an installed ordinary App at apps/<id>/checkout. Edit only the returned path with the normal read, write and edit tools; App data is not copied.",
+            "parameters":{"type":"object","properties":{"id":{"type":"string","description":"Installed ordinary App id"}},"required":["id"],"additionalProperties":false}
+        }),
+        json!({
+            "name":APP_SUBMIT_TOOL,
+            "description":"After all edits are complete, validate and submit the canonical apps/<id>/checkout directory for physical user confirmation. This ends the current Agent turn. Update app.json version before submitting. Change schemaVersion and add migrations/<n>.sql only when the SQLite schema changes.",
+            "parameters":{"type":"object","properties":{"path":{"type":"string","description":"The path returned by app.checkout"}},"required":["path"],"additionalProperties":false}
+        }),
+    ]
+}
+
+fn required_tool_string(args_json: &str, key: &str) -> Result<String> {
+    let args: Value = serde_json::from_str(args_json).with_context(|| "invalid tool arguments")?;
+    args.get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("{key} must be a non-empty string"))
+}
+
+fn tool_result(result: Result<Value>) -> ToolResult {
+    match result {
+        Ok(value) => ToolResult {
+            text: value.to_string(),
+            details: value,
+            is_error: false,
+            terminate: false,
+        },
+        Err(error) => tool_error(format!("{error:#}")),
     }
 }
 
@@ -3528,7 +3727,9 @@ mod tests {
         let call = std::thread::spawn(move || {
             tools.execute("call", "workspace.delete", r#"{"path":"agent-delete.txt"}"#)
         });
-        requests.recv().unwrap().handle(&supervisor);
+        requests.recv().unwrap().handle(&mut supervisor, |_, _| {
+            anyhow::bail!("unexpected app.submit")
+        });
         assert!(!call.join().unwrap().is_error);
         assert!(!agent_file.exists());
         assert!(supervisor.active_projection_is_stale());
@@ -4167,7 +4368,7 @@ mod tests {
     }
 
     #[test]
-    fn app_tool_request_carries_the_single_80_second_deadline() {
+    fn agent_tool_request_carries_the_single_80_second_deadline() {
         assert_eq!(APP_ACTION_TIMEOUT, Duration::from_secs(80));
         let temp = tempfile::tempdir().unwrap();
         install_fixture(
@@ -4376,6 +4577,81 @@ mod tests {
         assert_eq!(rows["rows"][0][0], "keep me");
         assert!(temp.path().join("apps/exa/release").is_dir());
         assert!(!temp.path().join("apps/exa/.update").exists());
+    }
+
+    #[test]
+    fn app_checkout_copies_source_once_without_copying_data() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("device");
+        let catalog = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
+        let mut supervisor =
+            AppSupervisor::new(&workspace, TEST_VIEWPORT, catalog, Arc::new(NoServices)).unwrap();
+        let initial = temp.path().join("notes-v1");
+        stage_notes_app(&initial, "1.0.0", 1, false);
+        supervisor.apply_app(&initial, BTreeMap::new()).unwrap();
+        std::fs::write(workspace.join("apps/notes/data/keep.txt"), "keep me").unwrap();
+
+        let path = supervisor.checkout_app("notes").unwrap();
+        assert_eq!(path, "apps/notes/checkout");
+        let checkout = workspace.join(&path);
+        assert!(checkout.join("app.json").is_file());
+        assert!(!checkout.join("data").exists());
+
+        std::fs::write(checkout.join("view.js"), "agent edit").unwrap();
+        supervisor.checkout_app("notes").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(checkout.join("view.js")).unwrap(),
+            "agent edit"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("apps/notes/data/keep.txt")).unwrap(),
+            "keep me"
+        );
+    }
+
+    #[test]
+    fn app_submit_moves_the_checkout_to_the_existing_installer() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("device");
+        let catalog = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
+        let mut supervisor =
+            AppSupervisor::new(&workspace, TEST_VIEWPORT, catalog, Arc::new(NoServices)).unwrap();
+        let initial = temp.path().join("notes-v1");
+        stage_notes_app(&initial, "1.0.0", 1, false);
+        supervisor.apply_app(&initial, BTreeMap::new()).unwrap();
+        let path = supervisor.checkout_app("notes").unwrap();
+        let checkout = workspace.join(&path);
+        let install_root = workspace.join(".system/install");
+        let error = supervisor
+            .submit_app_checkout(&path, &install_root)
+            .err()
+            .expect("unchanged App version must be rejected");
+        assert!(error.to_string().contains("must change version"));
+        assert!(checkout.is_dir());
+
+        let mut descriptor: Value =
+            serde_json::from_slice(&std::fs::read(checkout.join("app.json")).unwrap()).unwrap();
+        descriptor["version"] = json!("1.1.0");
+        std::fs::write(
+            checkout.join("app.json"),
+            serde_json::to_vec_pretty(&descriptor).unwrap(),
+        )
+        .unwrap();
+
+        let (staged, review) = supervisor
+            .submit_app_checkout(&path, &install_root)
+            .unwrap();
+
+        assert!(review.update);
+        assert_eq!(review.current_version.as_deref(), Some("1.0.0"));
+        assert_eq!(staged.descriptor.version, "1.1.0");
+        assert!(staged.release_dir.starts_with(&install_root));
+        assert!(staged.release_dir.join("app.json").is_file());
+        assert!(!checkout.exists());
+        assert_eq!(
+            supervisor.catalog().descriptor("notes").unwrap().version,
+            "1.0.0"
+        );
     }
 
     #[test]

@@ -273,12 +273,12 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
         EspPlatform::new(H::BOARD_ID),
     ));
     let native: Arc<dyn ToolHost> = native_tools.clone();
-    let (routed_tools, app_rx) = RoutedToolHost::new(native, supervisor.catalog().clone());
+    let (routed_tools, agent_rx) = RoutedToolHost::new(native, supervisor.catalog().clone());
     let config = json!({
         "provider":provider,
         "model":resolved_model,
         "thinkingLevel":model_settings.thinking_level.id(),
-        "systemPrompt":format!("You are Pi Agent, the first-class system App in Pocket Pi AgentOS on {}. You can manage the top-level /workspace and use installed App tools. Use /workspace for durable memory, notes, plans, and artifacts; read and update relevant files when continuity matters. Installed Apps own their Data, Actions, and Views. Be concise.", H::BOARD_NAME)
+        "systemPrompt":format!("You are Pi Agent, the first-class system App in Pocket Pi AgentOS on {}. You can manage the top-level /workspace and use installed App tools. Use /workspace for durable memory, notes, plans, and artifacts; read and update relevant files when continuity matters. Installed Apps own their Data, Actions, and Views. To iterate an installed ordinary App, call app.checkout, edit only its returned checkout with the normal file tools, update app.json version, then call app.submit after all edits are complete; it ends the turn and opens physical confirmation. Change schemaVersion and add the matching numbered migration only when the SQLite schema changes. Be concise.", H::BOARD_NAME)
     });
     with_psram_pthread_config(MODEL_WORKER_STACK_BYTES, H::MODEL_WORKER_CORE, || {
         supervisor
@@ -389,8 +389,44 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
                 redraw = true;
             }
         }
-        while let Ok(request) = app_rx.try_recv() {
-            request.handle(&mut supervisor);
+        while let Ok(request) = agent_rx.try_recv() {
+            request.handle(&mut supervisor, |supervisor, path| {
+                anyhow::ensure!(pending_install.is_none(), "another install is pending");
+                anyhow::ensure!(pending_uninstall.is_none(), "an App uninstall is pending");
+                anyhow::ensure!(!supervisor.services_busy(), "App services are busy");
+                anyhow::ensure!(
+                    install_slot
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok(),
+                    "another install is pending"
+                );
+                let result = (|| -> anyhow::Result<Value> {
+                    let (staged, review) =
+                        supervisor.submit_app_checkout(path, &install_root)?;
+                    supervisor
+                        .open(pocket_pi_agentos::ROOT_APP_ID)
+                        .expect("resident Pi Agent remains available");
+                    let descriptor = staged.descriptor.clone();
+                    install_ui = Some(InstallUi {
+                        state: "review",
+                        descriptor: descriptor.clone(),
+                        update: review.update,
+                        current_version: review.current_version,
+                        current_schema_version: review.current_schema_version,
+                        error: None,
+                    });
+                    pending_install = Some(staged);
+                    Ok(json!({
+                        "status":"pending_confirmation",
+                        "app":descriptor.id,
+                        "version":descriptor.version
+                    }))
+                })();
+                if result.is_err() {
+                    install_slot.store(false, Ordering::Release);
+                }
+                result
+            });
             redraw = true;
             system_dirty = true;
         }
