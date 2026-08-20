@@ -3425,16 +3425,20 @@ mod tests {
             .unwrap()
     }
 
-    fn guest_viewport(guest: &Guest) -> (u32, u32, String) {
+    fn guest_viewport(guest: &Guest) -> Value {
         guest
-            .with(|ctx| -> pocket_mod::qjs::Result<(u32, u32, String)> {
+            .with(|ctx| -> pocket_mod::qjs::Result<Value> {
                 let view: Object = ctx.globals().get("View")?;
                 let viewport: Object = view.get("viewport")?;
-                Ok((
-                    viewport.get("width")?,
-                    viewport.get("height")?,
-                    viewport.get("orientation")?,
-                ))
+                Ok(json!({
+                    "api": view.get::<_, u32>("api")?,
+                    "width": viewport.get::<_, u32>("width")?,
+                    "height": viewport.get::<_, u32>("height")?,
+                    "orientation": viewport.get::<_, String>("orientation")?,
+                    "scale": viewport.get::<_, f64>("scale")?,
+                    "layoutWidth": viewport.get::<_, f64>("layoutWidth")?,
+                    "layoutHeight": viewport.get::<_, f64>("layoutHeight")?,
+                }))
             })
             .unwrap()
     }
@@ -3560,9 +3564,22 @@ mod tests {
     #[test]
     fn supervisor_exposes_the_host_viewport_to_every_app() {
         let temp = tempfile::tempdir().unwrap();
-        for (name, viewport, orientation) in [
-            ("portrait", Viewport::new(720, 1280), "portrait"),
-            ("landscape", Viewport::new(800, 480), "landscape"),
+        for (name, viewport, expected) in [
+            (
+                "portrait",
+                Viewport::new(720, 1280),
+                json!({"api":2,"width":720,"height":1280,"orientation":"portrait","scale":1.0,"layoutWidth":720.0,"layoutHeight":1280.0}),
+            ),
+            (
+                "compact-portrait",
+                Viewport::new(480, 800),
+                json!({"api":2,"width":480,"height":800,"orientation":"portrait","scale":0.625,"layoutWidth":768.0,"layoutHeight":1280.0}),
+            ),
+            (
+                "landscape",
+                Viewport::new(800, 480),
+                json!({"api":2,"width":800,"height":480,"orientation":"landscape","scale":1.0,"layoutWidth":800.0,"layoutHeight":480.0}),
+            ),
         ] {
             let workspace = temp.path().join(name);
             install_view_fixture(&workspace, "notes");
@@ -3571,13 +3588,58 @@ mod tests {
                 AppSupervisor::new(&workspace, viewport, catalog, Arc::new(NoServices)).unwrap();
             supervisor.open("notes").unwrap();
 
-            let expected = (viewport.width, viewport.height, orientation.to_owned());
             assert_eq!(guest_viewport(&supervisor.system.guest), expected);
             assert_eq!(
                 guest_viewport(&supervisor.cached_view("notes").unwrap().guest),
                 expected
             );
         }
+    }
+
+    #[test]
+    fn compact_viewport_scales_geometry_without_shrinking_touch_targets() {
+        let guest = new_app_guest().unwrap();
+        let surface = UiSurface::new(Viewport::new(480, 800).logical_size());
+        surface.feed_pak(system_view_pak());
+        surface.mount(&guest).unwrap();
+        install_system_framework(&guest, "layout-test", system_framework(), "{}").unwrap();
+        guest.eval("pocket-pi-view-sdk", system_view_sdk()).unwrap();
+        guest
+            .eval(
+                "scaled-view",
+                r#"
+                  globalThis.__actionLabelWidth = View.measureText("REFRESH NOW", { fontSize: "lg", fontWeight: "bold" });
+                  View.mount(() => View.Screen({
+                    style: { align: "start", gap: 16 },
+                    children: [
+                      View.Pressable({
+                        style: { width: 112, height: 32, background: "accent" },
+                        onPress: () => "pressed",
+                      }),
+                      View.ActionButton({
+                        label: "REFRESH NOW",
+                        style: { width: 176, height: 32 },
+                        onPress: () => "refreshed",
+                      }),
+                    ],
+                  }));
+                "#,
+            )
+            .unwrap();
+
+        view_call(&guest, "tickView");
+        let (touch_layout, action_layout) = surface.with_ui(|ui| {
+            ui.tick();
+            let touch = ui.hit_test_bounds(10.0, 10.0);
+            let action = ui.hit_test_bounds(10.0, 60.0);
+            (ui.layout_of(touch).unwrap(), ui.layout_of(action).unwrap())
+        });
+        let label_width = guest
+            .with(|ctx| ctx.globals().get::<_, f64>("__actionLabelWidth"))
+            .unwrap() as f32;
+
+        assert_eq!(touch_layout, (0.0, 0.0, 70.0, 40.0));
+        assert_eq!(action_layout, (0.0, 50.0, label_width + 32.0, 48.0));
     }
 
     #[test]

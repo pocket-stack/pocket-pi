@@ -138,8 +138,11 @@
         style: { color: schedulePresent.get() ? "heading" : "muted", fontSize: "lg", fontWeight: schedulePresent.get() ? "bold" : "regular" },
       }),
     ] });
-    const action = View.Box({ style: { height: LANDSCAPE ? 56 : 80 }, children:
-      View.ActionButton({ label: "TYPE A MESSAGE", onPress: openPromptKeyboard }) });
+    const action = View.ActionButton({
+      label: "TYPE A MESSAGE",
+      onPress: openPromptKeyboard,
+      style: { width: "full", height: LANDSCAPE ? 56 : 80 },
+    });
     const content = LANDSCAPE
       ? View.Row({ style: { grow: 1, padding: 12, gap: 12 }, children: [
         View.Column({ style: { grow: 2, basis: 0 }, children: conversation }),
@@ -206,10 +209,11 @@
           ] }),
         ] }),
         uninstallMode.get()
-          ? View.Box({ style: { width: 68, height: 68 }, children: View.ActionButton({
+          ? View.ActionButton({
             label: busy === app.id ? "..." : "X", tone: "danger", disabled: Boolean(busy),
             onPress: () => PocketPi.command("apps.uninstall", { app: app.id }),
-          }) })
+            style: { width: 68, height: 68 },
+          })
           : View.Text({ text: "›", style: { color: "accent", fontSize: "title", fontWeight: "bold" } }),
       ],
     });
@@ -232,13 +236,13 @@
       : View.EmptyState({ compact: true, style: { height: "full" }, title: "NO OPTIONAL APPS INSTALLED" }) });
     const statusBox = View.Box({ style: { grow: LANDSCAPE ? 1 : 0, height: LANDSCAPE ? undefined : 112, paddingX: LANDSCAPE ? 16 : 24, background: "border" }, children:
       View.StatusBar({ text: status, tone: error ? "danger" : "neutral" }) });
-    const actionBox = View.Box({ style: { height: LANDSCAPE ? 56 : 80 }, children:
-      View.ActionButton({
-        label: uninstallMode.get() ? "DONE" : "UNINSTALL APP",
-        disabled: (!uninstallMode.get() && installed.length === 0) || Boolean(busy),
-        tone: uninstallMode.get() ? "neutral" : "danger",
-        onPress: () => uninstallMode.set(!uninstallMode.get()),
-      }) });
+    const actionBox = View.ActionButton({
+      label: uninstallMode.get() ? "DONE" : "UNINSTALL APP",
+      disabled: (!uninstallMode.get() && installed.length === 0) || Boolean(busy),
+      tone: uninstallMode.get() ? "neutral" : "danger",
+      onPress: () => uninstallMode.set(!uninstallMode.get()),
+      style: { width: "full", height: LANDSCAPE ? 56 : 80 },
+    });
     const content = LANDSCAPE
       ? View.Row({ style: { grow: 1, padding: 12, gap: 12 }, children: [
         View.Column({ style: { grow: 2, basis: 0, gap: 10 }, children: [
@@ -281,8 +285,12 @@
         View.Text({ text: wifiSsid.get, style: { color: "accent", fontSize: "lg", fontWeight: "bold" } }),
         View.Text({ text: wifiDetail.get, style: { color: "muted" } }),
       ] }),
-      View.Box({ style: { width: LANDSCAPE ? 120 : 196, height: LANDSCAPE ? 52 : 72 }, children:
-        View.ActionButton({ label: wifiScanning.get() ? "SCANNING" : "SCAN", disabled: wifiScanning.get(), onPress: () => PocketPi.command("device.wifi.scan") }) }),
+      View.ActionButton({
+        label: wifiScanning.get() ? "SCANNING" : "SCAN",
+        disabled: wifiScanning.get(),
+        onPress: () => PocketPi.command("device.wifi.scan"),
+        style: { width: LANDSCAPE ? 120 : 196, height: LANDSCAPE ? 52 : 72 },
+      }),
     ] });
     const networkList = View.Column({ style: { grow: 1 }, children: available.length
       ? View.Row({ style: { grow: 1, gap: LANDSCAPE ? 12 : 20 }, children: [
@@ -299,8 +307,8 @@
       }),
     ] });
     const deviceActions = View.Row({ style: { height: LANDSCAPE ? 56 : 80, gap: 16 }, children: [
-      View.Box({ style: { grow: 1, basis: 0, height: "full" }, children: View.ActionButton({ label: "FORGET WI-FI", tone: "neutral", onPress: () => PocketPi.command("device.wifi.forget") }) }),
-      View.Box({ style: { grow: 1, basis: 0, height: "full" }, children: View.ActionButton({ label: "RESTART DEVICE", tone: "danger", onPress: () => PocketPi.command("device.restart") }) }),
+      View.ActionButton({ label: "FORGET WI-FI", tone: "neutral", onPress: () => PocketPi.command("device.wifi.forget"), style: { grow: 1, basis: 0, height: "full" } }),
+      View.ActionButton({ label: "RESTART DEVICE", tone: "danger", onPress: () => PocketPi.command("device.restart"), style: { grow: 1, basis: 0, height: "full" } }),
     ] });
     const content = LANDSCAPE
       ? View.Row({ style: { grow: 1, padding: 12, gap: 12 }, children: [
@@ -340,8 +348,17 @@
         ] }),
       ] }),
       View.Keyboard({ layer: keyboardLayer.get(), onKey: handleKey }),
-      View.Box({ style: { height: LANDSCAPE ? 52 : 164, paddingX: LANDSCAPE ? 12 : 24, paddingY: LANDSCAPE ? 4 : 24 }, children:
-        View.ActionButton({ label: "CLOSE KEYBOARD", tone: "neutral", onPress: closeKeyboard }) }),
+      View.ActionButton({
+        label: "CLOSE KEYBOARD",
+        tone: "neutral",
+        onPress: closeKeyboard,
+        style: {
+          width: "full",
+          height: LANDSCAPE ? 44 : 116,
+          marginX: LANDSCAPE ? 12 : 24,
+          marginY: LANDSCAPE ? 4 : 24,
+        },
+      }),
     ] });
   }
 
@@ -414,12 +431,13 @@
       View.Text({ text: title, style: { color, fontSize: "xl", fontWeight: "bold" } }),
       View.Text({ text: message, style: { color: "muted" } }),
     ] });
-    const actionButton = View.Box({ style: { height: LANDSCAPE ? 56 : 120, paddingY: LANDSCAPE ? 0 : 20 }, children: View.ActionButton({
+    const actionButton = View.ActionButton({
       label: detail.state === "review" ? verb : detail.state === "installing" ? `${progress}...` : "DONE",
       disabled: detail.state === "installing",
       tone: detail.state === "review" ? "primary" : "neutral",
       onPress: () => PocketPi.command(detail.state === "review" ? "apps.install" : "apps.dismissInstall"),
-    }) });
+      style: { width: "full", height: LANDSCAPE ? 56 : 80, marginY: LANDSCAPE ? 0 : 20 },
+    });
     const content = LANDSCAPE
       ? View.Row({ style: { grow: 1, padding: 12, gap: 12 }, children: [
         View.Column({ style: { grow: 1, basis: 0 }, children: [intro, manifest] }),

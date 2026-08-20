@@ -389,7 +389,7 @@ function landscapeDashboard(state, accountLabel, pnl) {
         ] }),
         View.Row({ style: { grow: 1, gap: 8 }, children: [
           View.Box({ style: { grow: 1, basis: 0, height: "full" }, children: View.StatusBar({ text: status, tone: status.startsWith("REFRESH FAILED") ? "danger" : "neutral" }) }),
-          View.Box({ style: { grow: 1, basis: 0, height: "full" }, children: View.ActionButton({ label: state.refreshing ? "REFRESHING" : "REFRESH", disabled: state.refreshing, onPress: refreshPortfolio }) }),
+          View.ActionButton({ label: state.refreshing ? "REFRESHING" : "REFRESH", disabled: state.refreshing, onPress: refreshPortfolio, style: { grow: 1, basis: 0, height: "full" } }),
         ] }),
       ] }),
     ] }),
@@ -449,7 +449,7 @@ function dashboardScreen(state) {
       }),
       View.Row({ style: { height: 64, gap: 16 }, children: [
         View.Box({ style: { grow: 1, height: "full" }, children: View.StatusBar({ text: state.status, tone: state.status.startsWith("REFRESH FAILED") ? "danger" : "neutral" }) }),
-        View.Box({ style: { width: 176, height: 64 }, children: View.ActionButton({ label: state.refreshing ? "REFRESHING" : "REFRESH NOW", disabled: state.refreshing, onPress: refreshPortfolio }) }),
+        View.ActionButton({ label: state.refreshing ? "REFRESHING" : "REFRESH NOW", disabled: state.refreshing, onPress: refreshPortfolio, style: { width: 176, height: 64 } }),
       ] }),
     ] }),
   ] });

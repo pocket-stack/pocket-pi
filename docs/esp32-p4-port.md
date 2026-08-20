@@ -148,11 +148,13 @@ A new board port has three responsibilities:
    repeat boot, scanout, touch and memory checks on the physical board.
 
 The runtime reports that viewport to every View Guest, and the shared View SDK
-turns it into `View.viewport`. The current Apps use orientation to select a
-portrait stack or landscape columns and use viewport-derived visible row
-counts. Shared components own reusable geometry such as headers, navigation,
-keyboard and chart drawing. A board port must not add a board-specific App
-fork or a second Rust UI.
+turns it into `View.viewport`. The SDK derives one geometry scale from the
+720x1280 portrait or 800x480 landscape reference canvas, preserves physical
+font and interaction minimums, and passes the scaled geometry to PocketJS.
+Apps only select a portrait stack or landscape columns; they do not contain
+board or resolution branches. Shared components own reusable geometry such as
+headers, navigation, keyboard, buttons and chart drawing. A board port must not
+add a board-specific App fork or a second Rust UI.
 
 The exact ESP32-S3 firmware work still depends on the selected module, panel
 bus/controller, touch controller, PSRAM and flash layout. Those are host adapter

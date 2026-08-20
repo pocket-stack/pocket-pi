@@ -204,6 +204,7 @@ input:
 
 ```sh
 cargo xtask run esp32-p4-sim --viewport 800x480
+cargo xtask run esp32-p4-sim --viewport 480x800
 ```
 
 Generate a deterministic UI snapshot with:

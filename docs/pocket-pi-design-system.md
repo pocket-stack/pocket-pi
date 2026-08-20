@@ -1,6 +1,6 @@
 # Pi Design component inventory
 
-状态：v0.3。Pi Design 是 Pocket Pi Apps 的全局视觉语言；各 App 不再各自维护一套
+状态：v0.4。Pi Design 是 Pocket Pi Apps 的全局视觉语言；各 App 不再各自维护一套
 Header、按钮、空状态或字号层级。
 
 Pi Agent 与普通 Source App 都使用 `system/view-sdk.js` 中的同一套 `View.*`
@@ -13,7 +13,8 @@ components。Pi Agent 页面位于 `apps/pi-agent/view.js`，其动态文本分�
 | Foundation | 包含 | 当前规则 |
 | --- | --- | --- |
 | type hierarchy | app title、page title、heading、label、body、caption | 只保留 shared components 实际消费的 class recipe；ESP 主阅读文本由 14/16px 提升到 16/18px，24px title 保持不变 |
-| spacing | 24px screen gutter、card padding、stack gap | 直接写在当前 concrete component recipe 中，不导出无人消费的 token map |
+| geometry | 720x1280 portrait、800x480 landscape reference canvas | App 数字是 design unit，由 API 2 统一缩放；不导出断点或设备 profile |
+| spacing | 24 design-unit screen gutter、card padding、stack gap | 直接写在当前 concrete component recipe 中，不导出无人消费的 token map |
 | surfaces | card、selected card、row、muted、shell recipes | arbitrary children 的容器保持 literal View；当前没有单独的 unused surface registry |
 | status tones | neutral、info、success、warning、danger | 由 runtime View SDK 的 `Badge`/`StatusBar` 统一表达 |
 | dynamic glyphs | curly quotes、non-breaking/en/em dash、ellipsis、bullet | 进入现有 Inter subset atlas |
@@ -26,10 +27,10 @@ body 16→18px；不会引入 runtime font loader 或第二套字体。
 
 | Component | 包含什么 | 不包含什么 | 当前使用者 |
 | --- | --- | --- | --- |
-| `View.Header` | 112px shell header、back/status affordance、App title、两行 metadata | App data loading | Pi Agent / ordinary Apps |
+| `View.Header` | 112 design-unit shell header、64px physical minimum、back/status affordance、App title、两行 metadata | App data loading | Pi Agent / ordinary Apps |
 | `View.PageIntro` | eyebrow、page title、一行说明 | 页面 query、filter、scroll | Pi Agent / ordinary Apps |
 | `View.SectionHeading` | section title、optional detail、optional `VIEW ALL` affordance | list data | Pi Agent / ordinary Apps |
-| `View.ActionButton` | primary/neutral/danger/disabled visual state | action execution、loading state machine | Pi Agent / ordinary Apps |
+| `View.ActionButton` | primary/neutral/danger/disabled visual state、48px physical height minimum、label width + 32px minimum | action execution、loading state machine | Pi Agent / ordinary Apps |
 | `View.Badge` | 短 label 的 status surface + text | 长状态文案、业务判断 | ordinary Apps |
 | `View.EmptyState` | optional icon、title、detail、regular/compact layout | empty 条件、retry action | ordinary Apps |
 | `View.MetricCard` | metric label、formatted value、optional tone | 数值计算、currency formatting | ordinary Apps |
@@ -57,5 +58,5 @@ contract 上，才进入 Pi Design。
 2. 共享 component 是纯展示函数：props in，native View/Text tree out。
 3. App 自己决定数据、loading/error 条件、navigation 和 side effects；共享 SDK
    负责 node hit testing 和按压反馈。
-4. Pi Agent 与普通 App 都直接执行 `view.js` 并使用固定 View SDK API。Pi Agent
+4. Pi Agent 与普通 App 都直接执行 `view.js` 并使用同一个 View SDK API 2。Pi Agent
    仍随 firmware 内置；它的 Agent loop `agent.js` 继续在构建时生成。

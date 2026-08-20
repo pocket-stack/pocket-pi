@@ -175,15 +175,36 @@ the mounted size through its native `ui.__viewport` object, and the shared View
 SDK publishes the validated, immutable App-facing value:
 
 ```js
-View.viewport // { width, height, orientation }
+View.api // 2
+View.viewport // { width, height, orientation, scale, layoutWidth, layoutHeight }
 ```
 
-The same viewport is used for layout, rendering and touch coordinates. Rust
+`width` and `height` are physical viewport pixels. `layoutWidth` and
+`layoutHeight` are the current design-space extents. The SDK uses the existing
+720x1280 portrait composition and 800x480 landscape composition as its two
+reference canvases, then derives one continuous `scale` from the host viewport.
+Every numeric geometry value in App styles is a design unit and the SDK scales
+it exactly once before passing it to PocketJS. `full`, flex weights, opacity,
+rotation and other unitless values are unchanged.
+
+Fonts keep using the shared fixed atlas slots so text is never made unreadable
+by display scaling. Every `Pressable` keeps at least a 40x40 physical-pixel hit
+target. `ActionButton` additionally keeps at least 48 physical pixels of height
+and enough width for its measured label plus 16 physical pixels of padding on
+each side. These are shared component invariants, not App or board breakpoints.
+
+The same physical viewport is used for rendering and touch coordinates. Rust
 does not choose App page layouts. Apps compose semantic `Row`, `Column` and
 shared View SDK components, while PocketJS's Taffy layout engine resolves their
 actual bounds. Apps may choose a different composition from
 `View.viewport.orientation`; they do not receive a board name and should not
-encode panel-specific pixel coordinates.
+encode panel-specific pixel coordinates or multiply style values by `scale`.
+`measureText` returns physical pixels for the selected fixed font slot.
+
+The View SDK is installed once by the Runtime before any source App View is
+evaluated. Pi Agent and every installed ordinary App therefore use the same API
+2 implementation; the previous API 1 behavior is not retained or packaged per
+App.
 
 Reusable geometry belongs in the View SDK. For example, an App gives
 `View.Sparkline` values and labels; the SDK derives canvas points from the

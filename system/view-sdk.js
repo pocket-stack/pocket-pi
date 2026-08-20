@@ -44,10 +44,17 @@
   if (!hostViewport || !(hostViewport.w > 0) || !(hostViewport.h > 0)) {
     throw new Error("Pocket Pi View SDK: host viewport is unavailable");
   }
+  const orientation = hostViewport.w >= hostViewport.h ? "landscape" : "portrait";
+  const referenceWidth = orientation === "landscape" ? 800 : 720;
+  const referenceHeight = orientation === "landscape" ? 480 : 1280;
+  const geometryScale = Math.min(hostViewport.w / referenceWidth, hostViewport.h / referenceHeight);
   const viewport = Object.freeze({
     width: hostViewport.w,
     height: hostViewport.h,
-    orientation: hostViewport.w >= hostViewport.h ? "landscape" : "portrait",
+    orientation,
+    scale: geometryScale,
+    layoutWidth: hostViewport.w / geometryScale,
+    layoutHeight: hostViewport.h / geometryScale,
   });
   const landscape = viewport.orientation === "landscape";
 
@@ -127,7 +134,16 @@
 
   function Pressable(props = {}) {
     if (typeof props.onPress !== "function") fail("Pressable requires onPress");
-    return Box(props);
+    const style = props.style ?? {};
+    const touchMinimum = 40 / geometryScale;
+    return Box({
+      ...props,
+      style: {
+        ...style,
+        minWidth: Math.max(style.minWidth ?? 0, touchMinimum),
+        minHeight: Math.max(style.minHeight ?? 0, touchMinimum),
+      },
+    });
   }
 
   function state(initial) {
@@ -164,10 +180,14 @@
     fail(`unknown color ${String(value)}`);
   }
 
+  function length(value, minimum = 0) {
+    if (typeof value !== "number" || !Number.isFinite(value)) fail(`invalid length ${String(value)}`);
+    const scaled = value * geometryScale;
+    return value > 0 ? Math.max(scaled, minimum) : scaled;
+  }
+
   function dimension(value) {
-    if (value === "full") return FULL;
-    if (typeof value !== "number" || !Number.isFinite(value)) fail(`invalid dimension ${String(value)}`);
-    return value;
+    return value === "full" ? FULL : length(value);
   }
 
   function enumValue(kind, value) {
@@ -185,10 +205,11 @@
   }
 
   function edges(style, start, value) {
-    style[start] = value;
-    style[start + 1] = value;
-    style[start + 2] = value;
-    style[start + 3] = value;
+    const scaled = length(value);
+    style[start] = scaled;
+    style[start + 1] = scaled;
+    style[start + 2] = scaled;
+    style[start + 3] = scaled;
   }
 
   function nativeStyle(value) {
@@ -198,12 +219,14 @@
     for (const [name, item] of Object.entries(value ?? {})) {
       if (item === undefined || item === null) continue;
       if (name === "padding") edges(style, PROP.paddingTop, item);
-      else if (name === "paddingX") { style[PROP.paddingLeft] = item; style[PROP.paddingRight] = item; }
-      else if (name === "paddingY") { style[PROP.paddingTop] = item; style[PROP.paddingBottom] = item; }
+      else if (name === "paddingX") { style[PROP.paddingLeft] = length(item); style[PROP.paddingRight] = length(item); }
+      else if (name === "paddingY") { style[PROP.paddingTop] = length(item); style[PROP.paddingBottom] = length(item); }
       else if (name === "margin") edges(style, PROP.marginTop, item);
-      else if (name === "marginX") { style[PROP.marginLeft] = item; style[PROP.marginRight] = item; }
-      else if (name === "marginY") { style[PROP.marginTop] = item; style[PROP.marginBottom] = item; }
+      else if (name === "marginX") { style[PROP.marginLeft] = length(item); style[PROP.marginRight] = length(item); }
+      else if (name === "marginY") { style[PROP.marginTop] = length(item); style[PROP.marginBottom] = length(item); }
       else if (name === "width" || name === "height" || name === "minWidth" || name === "minHeight" || name === "maxWidth" || name === "maxHeight") style[PROP[name]] = dimension(item);
+      else if (["paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "marginTop", "marginRight", "marginBottom", "marginLeft", "gap", "basis", "top", "right", "bottom", "left", "radius", "translateX", "translateY", "arcWidth"].includes(name)) style[PROP[name]] = length(item);
+      else if (name === "borderWidth") style[PROP.borderWidth] = length(item, 1);
       else if (name === "background" || name === "color" || name === "borderColor") style[PROP[name]] = color(item);
       else if (["direction", "justify", "align", "position", "display", "overflow", "textAlign"].includes(name)) style[PROP[name]] = enumValue(name, item);
       else if (name === "wrap" || name === "hitPass") style[PROP[name]] = item ? 1 : 0;
@@ -459,7 +482,7 @@
       ? Pressable({ onPress: props.onBack, style: { width: 42, height: landscape ? 48 : 64, align: "center", justify: "center" }, children: Text({ text: "‹", style: { color: "white", fontSize: "title", fontWeight: "bold" } }) })
       : Box({ style: { width: landscape ? 28 : 34, height: landscape ? 28 : 34, radius: 8, background: props.accent === "busy" ? "warning" : props.accent === "danger" ? "danger" : props.accent === "none" ? "shellMuted" : "success" } });
     return Row({
-      style: { height: landscape ? 64 : 112, paddingX: landscape ? 16 : 24, align: "center", justify: "between", background: "shell" },
+      style: { height: landscape ? 64 : 112, minHeight: 64 / geometryScale, paddingX: landscape ? 16 : 24, align: "center", justify: "between", background: "shell" },
       children: [
         Row({ style: { grow: 1, align: "center", gap: 16 }, children: [leading, Text({ text: props.title, style: { color: "white", fontSize: "title", fontWeight: "bold" } })] }),
         Column({ style: { align: "end", gap: 8 }, children: [
@@ -489,8 +512,18 @@
   function ActionButton(props = {}) {
     const background = props.disabled ? "disabled" : props.tone === "danger" ? "dangerSoft" : props.tone === "neutral" ? "border" : "accent";
     const textColor = props.disabled ? "muted" : props.tone === "danger" ? "danger" : props.tone === "neutral" ? "heading" : "white";
-    const content = Text({ text: props.label, style: { color: textColor, fontSize: "lg", fontWeight: "bold" } });
-    const style = { width: "full", height: "full", align: "center", justify: "center", radius: 12, background };
+    const textStyle = { color: textColor, fontSize: "lg", fontWeight: "bold" };
+    const content = Text({ text: props.label, style: textStyle });
+    const requested = props.style ?? {};
+    const style = {
+      align: "center",
+      justify: "center",
+      radius: 12,
+      background,
+      ...requested,
+      minWidth: Math.max(requested.minWidth ?? 0, (measureText(props.label, textStyle) + 32) / geometryScale),
+      minHeight: Math.max(requested.minHeight ?? 0, 48 / geometryScale),
+    };
     return props.disabled ? Box({ style, children: content }) : Pressable({ onPress: props.onPress, style, children: content });
   }
 
@@ -521,7 +554,7 @@
 
   function NavigationBar(props = {}) {
     return Row({
-      style: { height: landscape ? 64 : 108, paddingX: landscape ? 8 : 10, paddingY: landscape ? 8 : 16, gap: landscape ? 8 : 10, background: "shell" },
+      style: { height: landscape ? 64 : 108, minHeight: 64 / geometryScale, paddingX: landscape ? 8 : 10, paddingY: landscape ? 8 : 16, gap: landscape ? 8 : 10, background: "shell" },
       children: (props.items ?? []).map((item) => Pressable({
         onPress: item.onPress,
         style: {
@@ -583,7 +616,7 @@
   function Sparkline(props = {}) {
     const values = (props.values ?? []).map((value) => value === null || value === undefined ? null : Number(value));
     const present = values.filter(Number.isFinite);
-    const width = landscape ? Math.floor(viewport.width / 2) : viewport.width - 88;
+    const width = landscape ? Math.floor(viewport.layoutWidth / 2) : viewport.layoutWidth - 88;
     const plotHeight = landscape ? 96 : 160;
     const low = present.length ? Math.min(...present) : 0;
     const high = present.length ? Math.max(...present) : 0;
@@ -618,7 +651,7 @@
   }
 
   globalThis.View = Object.freeze({
-    api: 1,
+    api: 2,
     viewport,
     colors,
     state,
