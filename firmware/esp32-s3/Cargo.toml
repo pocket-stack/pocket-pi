@@ -1,0 +1,40 @@
+[workspace]
+
+[package]
+name = "pocket-pi-s3"
+version = "0.1.0"
+edition = "2021"
+resolver = "2"
+rust-version = "1.82"
+publish = false
+
+[[bin]]
+name = "pocket-pi-s3"
+harness = false
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+
+[profile.dev]
+debug = true
+opt-level = "z"
+
+[dependencies]
+anyhow = "1"
+esp-idf-svc = { version = "0.52.1", features = ["critical-section"] }
+log = "0.4"
+pocket-pi-agentos = { path = "../../crates/pocket-pi-agentos" }
+pocket-pi-esp32-common = { path = "../esp32-common" }
+pocketjs-core = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "e12cf12f82cc60b636368119d49a06eb9ed2a3d5" }
+
+[build-dependencies]
+embuild = "0.33"
+
+[[package.metadata.esp-idf-sys.extra_components]]
+component_dirs = ["components/waveshare_esp32_s3_touch_lcd_4_3"]
+bindings_header = "src/waveshare_bindings.h"
+
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "joltwallet/littlefs", version = "1.14.*" }

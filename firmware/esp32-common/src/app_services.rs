@@ -18,7 +18,7 @@ use pocket_pi_agentos::{
 };
 use serde_json::{json, Value};
 
-use super::delay_current_task;
+use crate::delay_current_task;
 
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MAX_MCP_RESPONSE: usize = 160 * 1024;

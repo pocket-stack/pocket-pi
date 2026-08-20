@@ -79,8 +79,8 @@ pub fn persist_runtime_config(
     if let Some(model) = &config.model.model {
         value["model"] = Value::String(model.clone());
     }
-    let bytes = serde_json::to_vec(&value)
-        .map_err(|error| format!("encode model config: {error}"))?;
+    let bytes =
+        serde_json::to_vec(&value).map_err(|error| format!("encode model config: {error}"))?;
     let storage = EspDefaultNvs::new(partition, DEVICE_NVS_NAMESPACE, true)
         .map_err(|error| format!("open model config NVS: {error}"))?;
     storage
@@ -89,10 +89,10 @@ pub fn persist_runtime_config(
 }
 
 fn parse_runtime_config(value: &Value) -> Result<RuntimeConfig, String> {
-    let backend = text(value, "modelBackend", 16)?
-        .ok_or_else(|| "modelBackend is required".to_owned())?;
-    let provider = text(value, "modelProvider", 32)?
-        .ok_or_else(|| "modelProvider is required".to_owned())?;
+    let backend =
+        text(value, "modelBackend", 16)?.ok_or_else(|| "modelBackend is required".to_owned())?;
+    let provider =
+        text(value, "modelProvider", 32)?.ok_or_else(|| "modelProvider is required".to_owned())?;
     let model_api_key = secret(value, "modelApiKey", 512)?;
     let model_backend = match (backend.as_str(), provider.as_str()) {
         ("uart", "codex") => ModelBackendSettings::Uart {
@@ -150,11 +150,7 @@ fn parse_runtime_config(value: &Value) -> Result<RuntimeConfig, String> {
     })
 }
 
-fn text(
-    value: &Value,
-    field: &str,
-    max_bytes: usize,
-) -> Result<Option<String>, String> {
+fn text(value: &Value, field: &str, max_bytes: usize) -> Result<Option<String>, String> {
     let Some(value) = string(value, field)? else {
         return Ok(None);
     };
@@ -177,11 +173,7 @@ fn string<'a>(value: &'a Value, field: &str) -> Result<Option<&'a str>, String> 
     Ok(Some(value))
 }
 
-fn secret(
-    value: &Value,
-    field: &str,
-    max_bytes: usize,
-) -> Result<Option<String>, String> {
+fn secret(value: &Value, field: &str, max_bytes: usize) -> Result<Option<String>, String> {
     let value = text(value, field, max_bytes)?;
     if value.as_ref().is_some_and(|value| !value.is_ascii()) {
         return Err(format!("{field} must be ASCII"));
