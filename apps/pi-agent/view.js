@@ -9,7 +9,7 @@
   const READER_PAGE_LINES = LANDSCAPE ? 12 : 36;
   const FILE_PAGE_LINES = LANDSCAPE ? 12 : 39;
   const APP_VISIBLE_ROWS = LANDSCAPE ? 1 : 4;
-  const FILE_VISIBLE_ROWS = LANDSCAPE ? 2 : 8;
+  const FILE_VISIBLE_ROWS = LANDSCAPE ? 2 : 7;
   const WIFI_VISIBLE_ROWS = LANDSCAPE ? 2 : 5;
   const tabs = ["chat", "files", "apps", "settings"];
 
@@ -159,10 +159,10 @@
   function fileRow(entry) {
     return View.Pressable({
       onPress: () => openFileEntry(entry),
-      style: { width: "full", height: 92, paddingX: 18, direction: "row", align: "center", gap: 20, background: "surface" },
+      style: { width: "full", height: 120, paddingX: 18, direction: "row", align: "center", gap: 20, background: "surface" },
       children: [
         View.Box({
-          style: { width: 48, height: 48, align: "center", justify: "center", background: entry.kind === "dir" ? "infoSoft" : "successSoft" },
+          style: { width: 64, height: 64, align: "center", justify: "center", background: entry.kind === "dir" ? "infoSoft" : "successSoft" },
           children: View.Text({ text: entry.kind === "dir" ? "D" : "F", style: { color: entry.kind === "dir" ? "info" : "success", fontSize: "lg", fontWeight: "bold" } }),
         }),
         View.Column({ style: { grow: 1, gap: 8 }, children: [
