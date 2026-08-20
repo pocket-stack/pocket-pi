@@ -42,9 +42,10 @@ The authoritative detailed design is
 - Hosts own hardware, transport, credentials, and rendering adapters.
 
 There is no legacy Rust product UI or general-purpose desktop runtime. The
-simulator and ESP32-P4 render the same PocketJS Views at a 720x1280 logical
-viewport. Rust firmware supplies the
-display/touch driver and renders the selected App's DrawList.
+simulator and ESP32-P4 render the same PocketJS Views. Each host supplies one
+logical viewport to `AppSupervisor`; the shared View SDK exposes it to Apps as
+`View.viewport`. Rust firmware supplies the display/touch driver and renders
+the selected App's DrawList, but does not choose the App layout.
 
 ## Runtime lifecycle
 

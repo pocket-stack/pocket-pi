@@ -13,11 +13,13 @@ The repository also provides one companion development composition:
 | Product-contract simulator | `hosts/esp32-p4-sim` | macOS development host |
 
 The physical host and simulator use the same ordinary App source and
-`pocket-pi-agentos` supervisor at a 720x1280 logical viewport. Simulator mouse
-clicks and physical touch coordinates are both dispatched to the selected App
-View. The Pi Agent Root View displays Chat, Apps, Files and Settings; there is
-no parallel Rust product UI. The simulator is not a desktop Pocket Pi product,
-a generic Agent harness or a second supported target.
+`pocket-pi-agentos` supervisor. The ESP32-P4 host supplies its 720x1280 logical
+viewport; the simulator defaults to that value and accepts `--viewport
+WIDTHxHEIGHT` for another screen shape. Simulator mouse clicks and physical
+touch coordinates are both dispatched in the selected View's logical viewport.
+The Pi Agent Root View displays Chat, Apps, Files and Settings; there is no
+parallel Rust product UI. The simulator is not a desktop Pocket Pi product, a
+generic Agent harness or a second supported target.
 
 The physical host selects `UartBackend` for a Mac Codex/Claude Code bridge or
 `WirelessBackend` for direct OpenAI/OpenRouter/Anthropic/DeepSeek HTTPS. These remain
@@ -33,6 +35,12 @@ cargo xtask build esp32-p4
 cargo xtask build esp32-p4-sim
 cargo xtask run esp32-p4-sim
 cargo xtask snapshot esp32-p4-sim
+```
+
+Use the simulator to exercise another logical display without forking an App:
+
+```sh
+cargo xtask run esp32-p4-sim --viewport 800x480
 ```
 
 ## Simulator model backends
@@ -127,3 +135,25 @@ native time and persistent schedule implementation.
 `pocket-pi-agentos` selects the foreground View and keeps the Pi Agent System
 App resident. Each host supplies the mounted workspace, capabilities, model
 adapter, and renderer; product UI and domain logic do not live in Rust firmware.
+
+## Porting another display or board
+
+A new board port has three responsibilities:
+
+1. implement its display scanout, touch input and other board adapters in a new
+   firmware host;
+2. pass the same logical `Viewport` to `AppSupervisor`, the renderer/framebuffer
+   and touch-coordinate mapping;
+3. validate the existing App sources in the simulator at that viewport, then
+   repeat boot, scanout, touch and memory checks on the physical board.
+
+The runtime reports that viewport to every View Guest, and the shared View SDK
+turns it into `View.viewport`. The current Apps use orientation to select a
+portrait stack or landscape columns and use viewport-derived visible row
+counts. Shared components own reusable geometry such as headers, navigation,
+keyboard and chart drawing. A board port must not add a board-specific App
+fork or a second Rust UI.
+
+The exact ESP32-S3 firmware work still depends on the selected module, panel
+bus/controller, touch controller, PSRAM and flash layout. Those are host adapter
+inputs; they do not change the Viewport or App contract above.

@@ -2,11 +2,15 @@
   const FONT_BODY = { fontSize: "lg" };
   const FONT_CHAT = { fontSize: "xl" };
   const FONT_FILE = { fontSize: "body" };
-  const CHAT_TEXT_WIDTH = 536;
-  const READER_TEXT_WIDTH = 544;
-  const READER_PAGE_LINES = 36;
-  const FILE_PAGE_LINES = 39;
-  const APP_VISIBLE_ROWS = 4;
+  const LANDSCAPE = View.viewport.orientation === "landscape";
+  const CHAT_VISIBLE_TURNS = LANDSCAPE ? 1 : 2;
+  const CHAT_TEXT_WIDTH = View.viewport.width * (LANDSCAPE ? 0.42 : 0.74);
+  const READER_TEXT_WIDTH = View.viewport.width * (LANDSCAPE ? 0.82 : 0.76);
+  const READER_PAGE_LINES = LANDSCAPE ? 12 : 36;
+  const FILE_PAGE_LINES = LANDSCAPE ? 12 : 39;
+  const APP_VISIBLE_ROWS = LANDSCAPE ? 1 : 4;
+  const FILE_VISIBLE_ROWS = LANDSCAPE ? 2 : 8;
+  const WIFI_VISIBLE_ROWS = LANDSCAPE ? 2 : 5;
   const tabs = ["chat", "files", "apps", "settings"];
 
   const screen = View.state("chat");
@@ -44,7 +48,7 @@
   const deviceText = View.state("FIRMWARE 0.1.0  ·  WORKSPACE FREE --");
 
   const chatCount = View.state(1);
-  const chatSlots = [0, 1].map(() => ({
+  const chatSlots = Array.from({ length: CHAT_VISIBLE_TURNS }, () => ({
     user: View.state("TYPE A MESSAGE"),
     assistant: View.state("BOOTING PI AGENT..."),
   }));
@@ -76,26 +80,22 @@
   }
 
   function bottomBar() {
-    return View.Row({
-      style: { height: 108, paddingX: 10, paddingY: 16, gap: 10, background: "shell" },
-      children: tabs.map((name) => View.Pressable({
+    return View.NavigationBar({
+      items: tabs.map((name) => ({
+        label: name.toUpperCase(),
         onPress: () => openTab(name),
-        style: {
-          grow: 1, basis: 0, height: "full", align: "center", justify: "center",
-          background: activeTab.get() === name ? "accent" : "shellMuted",
-        },
-        children: View.Text({ text: name.toUpperCase(), style: { color: "white", fontWeight: "bold" } }),
+        active: activeTab.get() === name,
       })),
     });
   }
 
   function chatCard(slot) {
     return View.Card({
-      style: { width: "full", height: 318, paddingX: 24, paddingY: 20 },
+      style: { width: "full", height: LANDSCAPE ? "full" : 318, paddingX: LANDSCAPE ? 16 : 24, paddingY: LANDSCAPE ? 10 : 20 },
       children: [
         View.Pressable({
           onPress: () => openReader("YOU", slot.user.get()),
-          style: { height: 118, direction: "column" },
+          style: { grow: LANDSCAPE ? 1 : 0, height: LANDSCAPE ? undefined : 118, direction: "column" },
           children: [
             View.Row({ style: { height: 30, align: "center", gap: 12 }, children: [
               View.Box({ style: { width: 10, height: 10, radius: 5, background: "accent" } }),
@@ -103,14 +103,14 @@
             ] }),
             View.Text({
               text: () => PiText.wrapPreview(slot.user.get(), FONT_CHAT, CHAT_TEXT_WIDTH, 3),
-              style: { height: 84, paddingTop: 12, fontSize: "xl" },
+              style: { grow: LANDSCAPE ? 1 : 0, height: LANDSCAPE ? undefined : 84, paddingTop: LANDSCAPE ? 6 : 12, fontSize: "xl" },
             }),
           ],
         }),
         View.Box({ style: { height: 2, marginX: 4, marginY: 14, background: "border" } }),
         View.Pressable({
           onPress: () => openReader("PI", slot.assistant.get()),
-          style: { height: 118, direction: "column" },
+          style: { grow: LANDSCAPE ? 1 : 0, height: LANDSCAPE ? undefined : 118, direction: "column" },
           children: [
             View.Row({ style: { height: 30, align: "center", gap: 12 }, children: [
               View.Box({ style: { width: 10, height: 10, radius: 5, background: "success" } }),
@@ -118,7 +118,7 @@
             ] }),
             View.Text({
               text: () => PiText.wrapPreview(slot.assistant.get(), FONT_CHAT, CHAT_TEXT_WIDTH, 3),
-              style: { height: 84, paddingTop: 12, fontSize: "xl" },
+              style: { grow: LANDSCAPE ? 1 : 0, height: LANDSCAPE ? undefined : 84, paddingTop: LANDSCAPE ? 6 : 12, fontSize: "xl" },
             }),
           ],
         }),
@@ -127,23 +127,28 @@
   }
 
   function chatScreen() {
+    const conversation = View.Row({ style: { grow: 1, gap: LANDSCAPE ? 12 : 20 }, children: [
+      View.Column({ style: { grow: 1, gap: LANDSCAPE ? 12 : 22 }, children: chatSlots.slice(0, chatCount.get()).map(chatCard) }),
+      chatTurns.length > CHAT_VISIBLE_TURNS ? View.ScrollRail({ onUp: () => moveChat(CHAT_VISIBLE_TURNS), onDown: () => moveChat(-CHAT_VISIBLE_TURNS) }) : null,
+    ] });
+    const wake = View.Card({ style: { grow: LANDSCAPE ? 1 : 0, height: LANDSCAPE ? undefined : 204, paddingX: LANDSCAPE ? 16 : 24, paddingY: LANDSCAPE ? 12 : 20, gap: LANDSCAPE ? 12 : 24 }, children: [
+      View.Text({ text: "NEXT WAKE", style: { color: "muted", fontWeight: "bold" } }),
+      View.Text({
+        text: scheduleText.get,
+        style: { color: schedulePresent.get() ? "heading" : "muted", fontSize: "lg", fontWeight: schedulePresent.get() ? "bold" : "regular" },
+      }),
+    ] });
+    const action = View.Box({ style: { height: LANDSCAPE ? 56 : 80 }, children:
+      View.ActionButton({ label: "TYPE A MESSAGE", onPress: openPromptKeyboard }) });
+    const content = LANDSCAPE
+      ? View.Row({ style: { grow: 1, padding: 12, gap: 12 }, children: [
+        View.Column({ style: { grow: 2, basis: 0 }, children: conversation }),
+        View.Column({ style: { grow: 1, basis: 0, gap: 12 }, children: [wake, action] }),
+      ] })
+      : View.Column({ style: { grow: 1, padding: 24, gap: 24 }, children: [conversation, wake, action] });
     return View.Screen({ children: [
       systemHeader("ESP32 PI AGENT"),
-      View.Column({ style: { grow: 1, padding: 24, gap: 24 }, children: [
-        View.Column({ style: { grow: 1 }, children:
-          View.Row({ style: { gap: 20 }, children: [
-            View.Column({ style: { grow: 1, gap: 22 }, children: chatSlots.slice(0, chatCount.get()).map(chatCard) }),
-            chatTurns.length > 2 ? View.ScrollRail({ onUp: () => moveChat(2), onDown: () => moveChat(-2) }) : null,
-          ] }) }),
-        View.Card({ style: { height: 204, paddingX: 24, paddingY: 20, gap: 24 }, children: [
-          View.Text({ text: "NEXT WAKE", style: { color: "muted", fontWeight: "bold" } }),
-          View.Text({
-            text: scheduleText.get,
-            style: { color: schedulePresent.get() ? "heading" : "muted", fontSize: "lg", fontWeight: schedulePresent.get() ? "bold" : "regular" },
-          }),
-        ] }),
-        View.Box({ style: { height: 80 }, children: View.ActionButton({ label: "TYPE A MESSAGE", onPress: openPromptKeyboard }) }),
-      ] }),
+      content,
       bottomBar(),
     ] });
   }
@@ -176,8 +181,8 @@
           View.Text({ text: "/workspace" + (path ? "/" + path : ""), style: { color: "muted" } }) }),
         View.Column({ style: { grow: 1 }, children: entries.length
           ? View.Row({ style: { gap: 20 }, children: [
-            View.Column({ style: { grow: 1, gap: 12 }, children: entries.slice(offset, offset + 8).map(fileRow) }),
-            entries.length > 8 ? View.ScrollRail({ onUp: () => moveFiles(-4), onDown: () => moveFiles(4) }) : null,
+            View.Column({ style: { grow: 1, gap: LANDSCAPE ? 6 : 12 }, children: entries.slice(offset, offset + FILE_VISIBLE_ROWS).map(fileRow) }),
+            entries.length > FILE_VISIBLE_ROWS ? View.ScrollRail({ onUp: () => moveFiles(-FILE_VISIBLE_ROWS), onDown: () => moveFiles(FILE_VISIBLE_ROWS) }) : null,
           ] })
           : View.EmptyState({ compact: true, style: { height: "full" }, title: fileError.get }) }),
       ] }),
@@ -217,35 +222,44 @@
     const error = uninstallError.get();
     const status = error ? `UNINSTALL FAILED  ·  ${error}` : busy
       ? `UNINSTALLING ${busy.toUpperCase()}...`
-      : "APP DATA STAYS ISOLATED.  PI AGENT CAN USE EACH APP'S TOOLS.";
-    return View.Screen({ children: [
-      systemHeader("APPS"),
-      View.Column({ style: { grow: 1, padding: 24, gap: 16 }, children: [
+      : LANDSCAPE ? "APP DATA IS ISOLATED.  PI CAN USE APP TOOLS."
+        : "APP DATA STAYS ISOLATED.  PI AGENT CAN USE EACH APP'S TOOLS.";
+    const appList = View.Column({ style: { grow: 1 }, children: installed.length
+      ? View.Row({ style: { grow: 1, gap: LANDSCAPE ? 12 : 20 }, children: [
+        View.Column({ style: { grow: 1, gap: 16 }, children: installed.slice(offset, offset + APP_VISIBLE_ROWS).map(appRow) }),
+        installed.length > APP_VISIBLE_ROWS ? View.ScrollRail({ onUp: () => moveApps(-APP_VISIBLE_ROWS), onDown: () => moveApps(APP_VISIBLE_ROWS) }) : null,
+      ] })
+      : View.EmptyState({ compact: true, style: { height: "full" }, title: "NO OPTIONAL APPS INSTALLED" }) });
+    const statusBox = View.Box({ style: { grow: LANDSCAPE ? 1 : 0, height: LANDSCAPE ? undefined : 112, paddingX: LANDSCAPE ? 16 : 24, background: "border" }, children:
+      View.StatusBar({ text: status, tone: error ? "danger" : "neutral" }) });
+    const actionBox = View.Box({ style: { height: LANDSCAPE ? 56 : 80 }, children:
+      View.ActionButton({
+        label: uninstallMode.get() ? "DONE" : "UNINSTALL APP",
+        disabled: (!uninstallMode.get() && installed.length === 0) || Boolean(busy),
+        tone: uninstallMode.get() ? "neutral" : "danger",
+        onPress: () => uninstallMode.set(!uninstallMode.get()),
+      }) });
+    const content = LANDSCAPE
+      ? View.Row({ style: { grow: 1, padding: 12, gap: 12 }, children: [
+        View.Column({ style: { grow: 2, basis: 0, gap: 10 }, children: [
+          View.Text({ text: `${installed.length} INSTALLED APPS`, style: { color: "muted", fontWeight: "bold" } }),
+          appList,
+        ] }),
+        View.Column({ style: { grow: 1, basis: 0, gap: 12 }, children: [statusBox, actionBox] }),
+      ] })
+      : View.Column({ style: { grow: 1, padding: 24, gap: 16 }, children: [
         View.Text({ text: `${installed.length} INSTALLED APPS`, style: { color: "muted", fontWeight: "bold" } }),
-        View.Column({ style: { grow: 1 }, children: installed.length
-          ? View.Row({ style: { gap: 20 }, children: [
-            View.Column({ style: { grow: 1, gap: 16 }, children: installed.slice(offset, offset + APP_VISIBLE_ROWS).map(appRow) }),
-            installed.length > APP_VISIBLE_ROWS ? View.ScrollRail({ onUp: () => moveApps(-APP_VISIBLE_ROWS), onDown: () => moveApps(APP_VISIBLE_ROWS) }) : null,
-          ] })
-          : View.EmptyState({ compact: true, style: { height: "full" }, title: "NO OPTIONAL APPS INSTALLED" }) }),
-        View.Box({ style: { height: 112, paddingX: 24, background: "border" }, children:
-          View.StatusBar({ text: status, tone: error ? "danger" : "neutral" }) }),
-        View.Box({ style: { height: 80 }, children:
-          View.ActionButton({
-            label: uninstallMode.get() ? "DONE" : "UNINSTALL APP",
-            disabled: (!uninstallMode.get() && installed.length === 0) || Boolean(busy),
-            tone: uninstallMode.get() ? "neutral" : "danger",
-            onPress: () => uninstallMode.set(!uninstallMode.get()),
-          }) }),
-      ] }),
-      bottomBar(),
-    ] });
+        appList,
+        statusBox,
+        actionBox,
+      ] });
+    return View.Screen({ children: [systemHeader("APPS"), content, bottomBar()] });
   }
 
   function networkRow(network) {
     return View.Pressable({
       onPress: () => selectNetwork(network),
-      style: { width: "full", height: 84, paddingX: 20, direction: "row", align: "center", justify: "between", background: "surface" },
+      style: { width: "full", height: LANDSCAPE ? 72 : 84, paddingX: 20, direction: "row", align: "center", justify: "between", background: "surface" },
       children: [
         View.Text({ text: network.ssid, style: { fontSize: "lg", fontWeight: "bold" } }),
         View.Text({ text: `${network.rssiDbm} DBM  ${network.secured ? "LOCK" : "OPEN"}`, style: { color: "muted" } }),
@@ -256,42 +270,56 @@
   function settingsScreen() {
     const available = networks.get();
     const offset = wifiOffset.get();
-    return View.Screen({ children: [
-      systemHeader("SETTINGS"),
-      View.Column({ style: { grow: 1, padding: 24, gap: 12 }, children: [
-        View.Row({ style: { height: 64, paddingX: 20, align: "center", justify: "between", background: "shell" }, children: [
-          View.Text({ text: "SYSTEM", style: { color: "white", fontWeight: "bold" } }),
-          View.Text({ text: cpuText.get, style: { color: "accent", fontWeight: "bold" } }),
-          View.Text({ text: psramText.get, style: { color: "subtle", fontWeight: "bold" } }),
-        ] }),
-        View.Row({ style: { height: 154, paddingX: 20, align: "center", gap: 16, background: "surface" }, children: [
-          View.Column({ style: { grow: 1, gap: 12 }, children: [
-            View.Text({ text: "WI-FI", style: { fontSize: "lg", fontWeight: "bold" } }),
-            View.Text({ text: wifiSsid.get, style: { color: "accent", fontSize: "lg", fontWeight: "bold" } }),
-            View.Text({ text: wifiDetail.get, style: { color: "muted" } }),
-          ] }),
-          View.Box({ style: { width: 196, height: 72 }, children:
-            View.ActionButton({ label: wifiScanning.get() ? "SCANNING" : "SCAN", disabled: wifiScanning.get(), onPress: () => PocketPi.command("device.wifi.scan") }) }),
-        ] }),
-        View.Text({ text: "AVAILABLE NETWORKS", style: { color: "muted" } }),
-        View.Column({ style: { grow: 1 }, children: available.length
-          ? View.Row({ style: { gap: 20 }, children: [
-            View.Column({ style: { grow: 1, gap: 8 }, children: available.slice(offset, offset + 5).map(networkRow) }),
-            available.length > 5 ? View.ScrollRail({ onUp: () => moveWifi(-4), onDown: () => moveWifi(4) }) : null,
-          ] })
-          : View.EmptyState({ compact: true, style: { height: "full" }, title: "NO NETWORK LIST YET", detail: "TAP SCAN TO FIND WI-FI" }) }),
-        View.Column({ style: { height: 160, paddingX: 20, justify: "center", gap: 12, background: "surface" }, children: [
-          View.Text({ text: "MODEL BACKEND", style: { color: "muted" } }),
-          View.Text({ text: model.get, style: { fontSize: "lg", fontWeight: "bold" } }),
-          View.Text({ text: deviceText.get, style: { color: "muted" } }),
-        ] }),
-        View.Row({ style: { height: 80, gap: 16 }, children: [
-          View.Box({ style: { grow: 1, basis: 0, height: "full" }, children: View.ActionButton({ label: "FORGET WI-FI", tone: "neutral", onPress: () => PocketPi.command("device.wifi.forget") }) }),
-          View.Box({ style: { grow: 1, basis: 0, height: "full" }, children: View.ActionButton({ label: "RESTART DEVICE", tone: "danger", onPress: () => PocketPi.command("device.restart") }) }),
-        ] }),
-      ] }),
-      bottomBar(),
+    const systemSummary = View.Row({ style: { height: LANDSCAPE ? 52 : 64, paddingX: 20, align: "center", justify: "between", background: "shell" }, children: [
+      View.Text({ text: "SYSTEM", style: { color: "white", fontWeight: "bold" } }),
+      View.Text({ text: cpuText.get, style: { color: "accent", fontWeight: "bold" } }),
+      View.Text({ text: psramText.get, style: { color: "subtle", fontWeight: "bold" } }),
     ] });
+    const wifiSummary = View.Row({ style: { height: LANDSCAPE ? 132 : 154, paddingX: 20, align: "center", gap: 16, background: "surface" }, children: [
+      View.Column({ style: { grow: 1, gap: LANDSCAPE ? 8 : 12 }, children: [
+        View.Text({ text: "WI-FI", style: { fontSize: "lg", fontWeight: "bold" } }),
+        View.Text({ text: wifiSsid.get, style: { color: "accent", fontSize: "lg", fontWeight: "bold" } }),
+        View.Text({ text: wifiDetail.get, style: { color: "muted" } }),
+      ] }),
+      View.Box({ style: { width: LANDSCAPE ? 120 : 196, height: LANDSCAPE ? 52 : 72 }, children:
+        View.ActionButton({ label: wifiScanning.get() ? "SCANNING" : "SCAN", disabled: wifiScanning.get(), onPress: () => PocketPi.command("device.wifi.scan") }) }),
+    ] });
+    const networkList = View.Column({ style: { grow: 1 }, children: available.length
+      ? View.Row({ style: { grow: 1, gap: LANDSCAPE ? 12 : 20 }, children: [
+        View.Column({ style: { grow: 1, gap: 8 }, children: available.slice(offset, offset + WIFI_VISIBLE_ROWS).map(networkRow) }),
+        available.length > WIFI_VISIBLE_ROWS ? View.ScrollRail({ onUp: () => moveWifi(-WIFI_VISIBLE_ROWS), onDown: () => moveWifi(WIFI_VISIBLE_ROWS) }) : null,
+      ] })
+      : View.EmptyState({ compact: true, style: { height: "full" }, title: "NO NETWORK LIST YET", detail: "TAP SCAN TO FIND WI-FI" }) });
+    const backendSummary = View.Column({ style: { height: LANDSCAPE ? 80 : 160, paddingX: 20, justify: "center", gap: LANDSCAPE ? 6 : 12, background: "surface" }, children: [
+      View.Text({ text: "MODEL BACKEND", style: { color: "muted" } }),
+      View.Text({ text: model.get, style: { fontSize: "lg", fontWeight: "bold" } }),
+      View.Text({
+        text: () => PiText.wrapPreview(deviceText.get(), FONT_BODY, View.viewport.width * (LANDSCAPE ? 0.4 : 0.84), 1),
+        style: { color: "muted" },
+      }),
+    ] });
+    const deviceActions = View.Row({ style: { height: LANDSCAPE ? 56 : 80, gap: 16 }, children: [
+      View.Box({ style: { grow: 1, basis: 0, height: "full" }, children: View.ActionButton({ label: "FORGET WI-FI", tone: "neutral", onPress: () => PocketPi.command("device.wifi.forget") }) }),
+      View.Box({ style: { grow: 1, basis: 0, height: "full" }, children: View.ActionButton({ label: "RESTART DEVICE", tone: "danger", onPress: () => PocketPi.command("device.restart") }) }),
+    ] });
+    const content = LANDSCAPE
+      ? View.Row({ style: { grow: 1, padding: 12, gap: 12 }, children: [
+        View.Column({ style: { grow: 1, basis: 0, gap: 10 }, children: [systemSummary, wifiSummary, deviceActions] }),
+        View.Column({ style: { grow: 1, basis: 0, gap: 8 }, children: [
+          View.Text({ text: "AVAILABLE NETWORKS", style: { color: "muted" } }),
+          networkList,
+          backendSummary,
+        ] }),
+      ] })
+      : View.Column({ style: { grow: 1, padding: 24, gap: 12 }, children: [
+        systemSummary,
+        wifiSummary,
+        View.Text({ text: "AVAILABLE NETWORKS", style: { color: "muted" } }),
+        networkList,
+        backendSummary,
+        deviceActions,
+      ] });
+    return View.Screen({ children: [systemHeader("SETTINGS"), content, bottomBar()] });
   }
 
   function keyboardScreen() {
@@ -299,20 +327,20 @@
     const limit = purpose.type === "wifi" ? 63 : 256;
     return View.Screen({ children: [
       systemHeader(purpose.type === "wifi" ? "WIFI PASSWORD" : "NEW MESSAGE", closeKeyboard),
-      View.Column({ style: { grow: 1, paddingX: 24, paddingTop: 20 }, children: [
-        View.Box({ style: { grow: 1, paddingX: 22, paddingTop: 24, background: "surface" }, children:
+      View.Column({ style: { grow: 1, paddingX: LANDSCAPE ? 12 : 24, paddingTop: LANDSCAPE ? 8 : 20 }, children: [
+        View.Box({ style: { grow: 1, paddingX: LANDSCAPE ? 14 : 22, paddingTop: LANDSCAPE ? 10 : 24, background: "surface" }, children:
           View.Text({
             text: () => input.get() ? (purpose.type === "wifi" ? "*".repeat(input.get().length) : input.get()) : purpose.type === "wifi" ? "ENTER NETWORK PASSWORD..." : "TYPE YOUR MESSAGE...",
             style: { color: "heading", fontSize: "lg" },
           }) }),
-        View.Row({ style: { height: 86, paddingX: 4, align: "center", justify: "between" }, children: [
+        View.Row({ style: { height: LANDSCAPE ? 52 : 86, paddingX: 4, align: "center", justify: "between" }, children: [
           View.Text({ text: () => `${input.get().length} / ${limit} CHARACTERS`, style: { color: "muted" } }),
-          View.Pressable({ onPress: () => input.set(""), style: { width: 132, height: 58, align: "center", justify: "center", background: "border" }, children:
+          View.Pressable({ onPress: () => input.set(""), style: { width: LANDSCAPE ? 100 : 132, height: LANDSCAPE ? 42 : 58, align: "center", justify: "center", background: "border" }, children:
             View.Text({ text: "CLEAR", style: { fontWeight: "bold" } }) }),
         ] }),
       ] }),
       View.Keyboard({ layer: keyboardLayer.get(), onKey: handleKey }),
-      View.Box({ style: { height: 164, paddingX: 24, paddingY: 24 }, children:
+      View.Box({ style: { height: LANDSCAPE ? 52 : 164, paddingX: LANDSCAPE ? 12 : 24, paddingY: LANDSCAPE ? 4 : 24 }, children:
         View.ActionButton({ label: "CLOSE KEYBOARD", tone: "neutral", onPress: closeKeyboard }) }),
     ] });
   }
@@ -368,33 +396,43 @@
     const tone = detail.state === "failed" ? "danger" : detail.state === "success" ? "success" : detail.state === "installing" ? "warning" : "accent";
     const surface = tone === "danger" ? "dangerSoft" : tone === "success" ? "successSoft" : tone === "warning" ? "warningSoft" : "accentSoft";
     const color = tone === "danger" ? "danger" : tone === "success" ? "success" : tone === "warning" ? "warningText" : "accent";
+    const intro = View.PageIntro({ eyebrow: "APP PACKAGE", title: detail.name, description: `VERSION ${version}  |  ${schema}` });
+    const manifest = View.Column({ style: { grow: 1, gap: LANDSCAPE ? 6 : 16 }, children: [
+      View.SectionHeading({ title: "REQUESTED ACCESS", detail: "PACKAGE MANIFEST" }),
+      View.Card({ style: { grow: 1, paddingX: LANDSCAPE ? 16 : 24, paddingY: LANDSCAPE ? 12 : 24, gap: LANDSCAPE ? 8 : 20 }, children: [
+        View.Text({ text: "NETWORK", style: { color: "muted", fontWeight: "bold" } }),
+        View.Text({ text: detail.network.length ? detail.network.slice(0, 2).join("\n") : "NO NETWORK ACCESS", style: { fontSize: "lg" } }),
+        View.Box({ style: { height: 2, background: "border" } }),
+        View.Text({ text: "CREDENTIALS", style: { color: "muted", fontWeight: "bold" } }),
+        View.Text({ text: detail.update ? "PRESERVE INSTALLED CREDENTIALS" : detail.credentials.length ? detail.credentials.slice(0, 3).join(", ") : "NONE", style: { fontSize: "lg" } }),
+        View.Box({ style: { height: 2, background: "border" } }),
+        View.Text({ text: "CAPABILITIES", style: { color: "muted", fontWeight: "bold" } }),
+        View.Text({ text: `${detail.tools} TOOLS  |  ${detail.schedules} SCHEDULES`, style: { fontSize: "lg" } }),
+      ] }),
+    ] });
+    const result = View.Column({ style: { grow: LANDSCAPE ? 1 : 0, height: LANDSCAPE ? undefined : 150, paddingX: 24, justify: "center", gap: 12, radius: 12, background: surface }, children: [
+      View.Text({ text: title, style: { color, fontSize: "xl", fontWeight: "bold" } }),
+      View.Text({ text: message, style: { color: "muted" } }),
+    ] });
+    const actionButton = View.Box({ style: { height: LANDSCAPE ? 56 : 120, paddingY: LANDSCAPE ? 0 : 20 }, children: View.ActionButton({
+      label: detail.state === "review" ? verb : detail.state === "installing" ? `${progress}...` : "DONE",
+      disabled: detail.state === "installing",
+      tone: detail.state === "review" ? "primary" : "neutral",
+      onPress: () => PocketPi.command(detail.state === "review" ? "apps.install" : "apps.dismissInstall"),
+    }) });
+    const content = LANDSCAPE
+      ? View.Row({ style: { grow: 1, padding: 12, gap: 12 }, children: [
+        View.Column({ style: { grow: 1, basis: 0 }, children: [intro, manifest] }),
+        View.Column({ style: { grow: 1, basis: 0, gap: 12 }, children: [result, actionButton] }),
+      ] })
+      : [
+        intro,
+        View.Column({ style: { grow: 1, paddingX: 24, gap: 16 }, children: [manifest, result, actionButton] }),
+      ];
     return View.Screen({ children: [
       View.Header({ title: status, accent: detail.state === "failed" ? "danger" : detail.state === "success" ? "ready" : "busy", metaTop: `LOCAL ${verb}`, metaBottom: "PHYSICAL CONFIRMATION" }),
-      View.PageIntro({ eyebrow: "APP PACKAGE", title: detail.name, description: `VERSION ${version}  |  ${schema}` }),
-      View.Column({ style: { grow: 1, paddingX: 24, gap: 16 }, children: [
-        View.SectionHeading({ title: "REQUESTED ACCESS", detail: "PACKAGE MANIFEST" }),
-        View.Card({ style: { grow: 1, paddingX: 24, paddingY: 24, gap: 20 }, children: [
-          View.Text({ text: "NETWORK", style: { color: "muted", fontWeight: "bold" } }),
-          View.Text({ text: detail.network.length ? detail.network.slice(0, 2).join("\n") : "NO NETWORK ACCESS", style: { fontSize: "lg" } }),
-          View.Box({ style: { height: 2, background: "border" } }),
-          View.Text({ text: "CREDENTIALS", style: { color: "muted", fontWeight: "bold" } }),
-          View.Text({ text: detail.update ? "PRESERVE INSTALLED CREDENTIALS" : detail.credentials.length ? detail.credentials.slice(0, 3).join(", ") : "NONE", style: { fontSize: "lg" } }),
-          View.Box({ style: { height: 2, background: "border" } }),
-          View.Text({ text: "CAPABILITIES", style: { color: "muted", fontWeight: "bold" } }),
-          View.Text({ text: `${detail.tools} TOOLS  |  ${detail.schedules} SCHEDULES`, style: { fontSize: "lg" } }),
-        ] }),
-        View.Column({ style: { height: 150, paddingX: 24, justify: "center", gap: 12, radius: 12, background: surface }, children: [
-          View.Text({ text: title, style: { color, fontSize: "xl", fontWeight: "bold" } }),
-          View.Text({ text: message, style: { color: "muted" } }),
-        ] }),
-        View.Box({ style: { height: 120, paddingY: 20 }, children: View.ActionButton({
-          label: detail.state === "review" ? verb : detail.state === "installing" ? `${progress}...` : "DONE",
-          disabled: detail.state === "installing",
-          tone: detail.state === "review" ? "primary" : "neutral",
-          onPress: () => PocketPi.command(detail.state === "review" ? "apps.install" : "apps.dismissInstall"),
-        }) }),
-      ] }),
-      View.Box({ style: { height: 66 }, children: View.StatusBar({ text: "Package received over your local network", dark: true }) }),
+      content,
+      View.Box({ style: { height: LANDSCAPE ? 48 : 66 }, children: View.StatusBar({ text: "Package received over your local network", dark: true }) }),
     ] });
   }
 
@@ -426,13 +464,13 @@
       else turns[turns.length - 1].assistant = message.text || "THINKING...";
     }
     chatTurns = turns.length ? turns : [{ user: "TYPE A MESSAGE", assistant: "BOOTING PI AGENT..." }];
-    chatScroll = Math.min(chatScroll, Math.max(0, chatTurns.length - 2));
+    chatScroll = Math.min(chatScroll, Math.max(0, chatTurns.length - CHAT_VISIBLE_TURNS));
     syncChat();
   }
 
   function syncChat() {
     const end = chatTurns.length - chatScroll;
-    const visible = chatTurns.slice(Math.max(0, end - 2), end);
+    const visible = chatTurns.slice(Math.max(0, end - CHAT_VISIBLE_TURNS), end);
     chatCount.set(visible.length);
     for (let index = 0; index < visible.length; index += 1) {
       chatSlots[index].user.set(visible[index].user);
@@ -441,7 +479,7 @@
   }
 
   function moveChat(delta) {
-    chatScroll = Math.max(0, Math.min(Math.max(0, chatTurns.length - 2), chatScroll + delta));
+    chatScroll = Math.max(0, Math.min(Math.max(0, chatTurns.length - CHAT_VISIBLE_TURNS), chatScroll + delta));
     syncChat();
     return "";
   }

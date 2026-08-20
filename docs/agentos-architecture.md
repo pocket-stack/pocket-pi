@@ -166,6 +166,30 @@ state. Those facts are not called Projection: UI/page policy remains in the JS
 System App, while native supplies only facts and executes narrow commands such
 as Wi-Fi connect, App install/uninstall and restart.
 
+### Viewport contract
+
+The host owns the physical display, touch controller and logical viewport. It
+passes one positive `Viewport { width, height }` to `AppSupervisor`; the
+supervisor creates every PocketJS `UiSurface` with that size. PocketJS exposes
+the mounted size through its native `ui.__viewport` object, and the shared View
+SDK publishes the validated, immutable App-facing value:
+
+```js
+View.viewport // { width, height, orientation }
+```
+
+The same viewport is used for layout, rendering and touch coordinates. Rust
+does not choose App page layouts. Apps compose semantic `Row`, `Column` and
+shared View SDK components, while PocketJS's Taffy layout engine resolves their
+actual bounds. Apps may choose a different composition from
+`View.viewport.orientation`; they do not receive a board name and should not
+encode panel-specific pixel coordinates.
+
+Reusable geometry belongs in the View SDK. For example, an App gives
+`View.Sparkline` values and labels; the SDK derives canvas points from the
+current viewport. This keeps raw drawing coordinates out of domain Apps without
+turning the runtime into a general responsive-layout system.
+
 ## Ordinary Source App contract
 
 An ordinary `.pocketapp` contains:

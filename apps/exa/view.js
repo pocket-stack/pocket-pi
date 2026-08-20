@@ -1,6 +1,7 @@
 const HISTORY_PAGE_SIZE = 10;
 const HISTORY_MAX_ROWS = 50;
-const HISTORY_VISIBLE_ROWS = 6;
+const LANDSCAPE = View.viewport.orientation === "landscape";
+const HISTORY_VISIBLE_ROWS = LANDSCAPE ? 1 : 6;
 
 const model = View.state({
   history: [],
@@ -86,7 +87,7 @@ function render() {
       description: "Every research.search call is saved here automatically.",
       tone: "info",
     }),
-    View.Column({ style: { grow: 1, paddingX: 24, paddingY: 16 }, children: state.history.length === 0
+    View.Column({ style: { grow: 1, paddingX: LANDSCAPE ? 16 : 24, paddingY: LANDSCAPE ? 8 : 16 }, children: state.history.length === 0
       ? View.EmptyState({
         style: { height: "full" },
         icon: "E",
@@ -98,7 +99,7 @@ function render() {
         View.Column({ style: { grow: 1, gap: 12 }, children: visible.map(historyCard) }),
         scrollable ? View.ScrollRail({ onUp: () => scrollHistory(-1), onDown: () => scrollHistory(1) }) : null,
       ] }) }),
-    View.Box({ style: { height: 96 }, children: View.StatusBar({
+    View.Box({ style: { height: LANDSCAPE ? 52 : 96 }, children: View.StatusBar({
       text: state.status,
       tone: state.status.includes("FAILED") ? "danger" : "neutral",
       dark: true,

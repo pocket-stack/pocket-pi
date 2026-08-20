@@ -26,7 +26,7 @@ use super::{
     backend,
     device_state::{SettingsFacts, WifiSettingsFacts},
     esp_result, init_wifi, storage, transport, transport::LineTransport as _, DisplayProbe,
-    EspPlatform, BOARD_NAME, PANEL_HEIGHT, PANEL_WIDTH,
+    EspPlatform, BOARD_NAME, DISPLAY_VIEWPORT,
 };
 
 const AGENTOS_FREERTOS_HZ: u32 = 100;
@@ -266,7 +266,7 @@ pub fn run() -> anyhow::Result<()> {
         Some(nvs),
     ));
     let mut supervisor = with_psram_pthread_config(ACTION_STACK_BYTES, || {
-        AppSupervisor::new(storage::WORKSPACE_ROOT, catalog, services)
+        AppSupervisor::new(storage::WORKSPACE_ROOT, DISPLAY_VIEWPORT, catalog, services)
     })?;
     let mut telemetry = SystemTelemetry::new();
     supervisor.frame()?;
@@ -1180,7 +1180,7 @@ fn init_display(
 
         let pixels = core::slice::from_raw_parts_mut(
             framebuffers[0].cast::<u16>(),
-            PANEL_WIDTH as usize * PANEL_HEIGHT as usize,
+            DISPLAY_VIEWPORT.width as usize * DISPLAY_VIEWPORT.height as usize,
         );
         let mut render_states = [
             RenderTargetState::new(),
@@ -1195,8 +1195,8 @@ fn init_display(
                     ui,
                     &words,
                     pixels,
-                    PANEL_WIDTH,
-                    PANEL_HEIGHT,
+                    DISPLAY_VIEWPORT.width,
+                    DISPLAY_VIEWPORT.height,
                     ppa,
                 )
                 .ok_or_else(|| anyhow::anyhow!("PocketJS rejected the App framebuffer geometry"))
@@ -1218,8 +1218,8 @@ fn init_display(
                 panel,
                 0,
                 0,
-                PANEL_WIDTH as i32,
-                PANEL_HEIGHT as i32,
+                DISPLAY_VIEWPORT.width as i32,
+                DISPLAY_VIEWPORT.height as i32,
                 framebuffers[0],
             )
         })?;
@@ -1254,7 +1254,7 @@ impl DisplayProbe {
         let pixels = unsafe {
             core::slice::from_raw_parts_mut(
                 framebuffer,
-                PANEL_WIDTH as usize * PANEL_HEIGHT as usize,
+                DISPLAY_VIEWPORT.width as usize * DISPLAY_VIEWPORT.height as usize,
             )
         };
         supervisor.with_ui(|ui| {
@@ -1265,8 +1265,8 @@ impl DisplayProbe {
                     ui,
                     &words,
                     pixels,
-                    PANEL_WIDTH,
-                    PANEL_HEIGHT,
+                    DISPLAY_VIEWPORT.width,
+                    DISPLAY_VIEWPORT.height,
                     ppa,
                 )
                 .ok_or_else(|| anyhow::anyhow!("PocketJS rejected the App framebuffer geometry"))
@@ -1276,8 +1276,8 @@ impl DisplayProbe {
                 self.panel,
                 0,
                 0,
-                PANEL_WIDTH as i32,
-                PANEL_HEIGHT as i32,
+                DISPLAY_VIEWPORT.width as i32,
+                DISPLAY_VIEWPORT.height as i32,
                 framebuffer.cast(),
             )
         })?;

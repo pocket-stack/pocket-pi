@@ -18,10 +18,10 @@ mod storage;
 mod transport;
 
 use device_state::{SettingsFacts, WifiNetworkFacts};
+use pocket_pi_agentos::Viewport;
 
 const BOARD_NAME: &str = "Waveshare ESP32-P4-WIFI6-Touch-LCD-5";
-const PANEL_WIDTH: u32 = 720;
-const PANEL_HEIGHT: u32 = 1280;
+const DISPLAY_VIEWPORT: Viewport = Viewport::new(720, 1280);
 const DEVICE_NVS_NAMESPACE: &str = "pocket_pi";
 const WIFI_NVS_SSID_KEY: &str = "wifi_ssid";
 const WIFI_NVS_PASSWORD_KEY: &str = "wifi_pass";

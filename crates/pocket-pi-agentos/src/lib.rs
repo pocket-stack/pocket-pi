@@ -25,12 +25,27 @@ use serde_json::{json, Value};
 pub const ROOT_APP_ID: &str = "pi-agent";
 pub const POCKETJS_REVISION: &str = "e12cf12f82cc60b636368119d49a06eb9ed2a3d5";
 pub const SYSTEM_FRAMEWORK_API: u32 = 1;
-const VIEWPORT: (f32, f32) = (720.0, 1280.0);
 pub const MAX_POCKETAPP_BYTES: usize = 2 * 1024 * 1024;
 const MAX_JSON_RESOURCE_BYTES: usize = 256 * 1024;
 const MAX_RESOURCE_BYTES: usize = 512 * 1024;
 const VIEW_RUNTIME_LIMIT: usize = 3;
 const ACTION_RUNTIME_LIMIT: usize = 3;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Viewport {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Viewport {
+    pub const fn new(width: u32, height: u32) -> Self {
+        Self { width, height }
+    }
+
+    fn logical_size(self) -> (f32, f32) {
+        (self.width as f32, self.height as f32)
+    }
+}
 
 fn take_runtime<T>(runtimes: &mut Vec<(String, T)>, app_id: &str) -> Option<T> {
     runtimes
@@ -1633,6 +1648,7 @@ impl ViewRuntime {
     fn load(
         app: &InstalledApp,
         assets: &AppRuntimeAssets,
+        viewport: Viewport,
         fs_root: &Path,
         tmp_root: &Path,
         db: SharedDb,
@@ -1640,7 +1656,7 @@ impl ViewRuntime {
     ) -> Result<Self> {
         std::fs::create_dir_all(fs_root)?;
         let guest = new_app_guest().context("create App View Guest")?;
-        let surface = UiSurface::new(VIEWPORT);
+        let surface = UiSurface::new(viewport.logical_size());
         let system = app.descriptor.id == ROOT_APP_ID;
         let pak = std::fs::read(&assets.view_pak).context("read Pocket Pi View resources")?;
         surface.feed_pak(&pak);
@@ -1953,6 +1969,7 @@ fn mount_data_lifecycle(
 
 pub struct AppSupervisor {
     workspace: PathBuf,
+    viewport: Viewport,
     catalog: InstalledAppIndex,
     services: Arc<dyn AppServiceHost>,
     assets: AppRuntimeAssets,
@@ -1973,9 +1990,14 @@ pub struct AppSupervisor {
 impl AppSupervisor {
     pub fn new(
         workspace: impl Into<PathBuf>,
+        viewport: Viewport,
         catalog: InstalledAppIndex,
         services: Arc<dyn AppServiceHost>,
     ) -> Result<Self> {
+        anyhow::ensure!(
+            viewport.width > 0 && viewport.height > 0,
+            "viewport dimensions must be positive"
+        );
         let workspace = workspace.into();
         let assets = AppRuntimeAssets {
             framework: std::fs::read_to_string(workspace.join("system/framework.js"))
@@ -2043,11 +2065,13 @@ impl AppSupervisor {
             &databases,
             &revisions,
             &assets,
+            viewport,
             ROOT_APP_ID,
         )?;
         log::info!("Pi Agent System App loaded");
         Ok(Self {
             workspace,
+            viewport,
             catalog,
             services,
             assets,
@@ -2374,8 +2398,15 @@ impl AppSupervisor {
         validate_action_contract(&app.descriptor, &action_runtime)?;
         let has_actions = !action_runtime.action_names()?.is_empty();
         let (fs_root, _, tmp_root) = data_paths(&self.workspace, &app.descriptor.id);
-        let runtime =
-            ViewRuntime::load(app, &self.assets, &fs_root, &tmp_root, database, revision)?;
+        let runtime = ViewRuntime::load(
+            app,
+            &self.assets,
+            self.viewport,
+            &fs_root,
+            &tmp_root,
+            database,
+            revision,
+        )?;
         Ok((has_actions, runtime))
     }
 
@@ -2460,6 +2491,7 @@ impl AppSupervisor {
                     &self.databases,
                     &self.revisions,
                     &self.assets,
+                    self.viewport,
                     app_id,
                 )?
             }
@@ -2689,6 +2721,7 @@ fn load_runtime(
     databases: &BTreeMap<String, SharedDb>,
     revisions: &BTreeMap<String, AppRevision>,
     assets: &AppRuntimeAssets,
+    viewport: Viewport,
     app_id: &str,
 ) -> Result<ViewRuntime> {
     let app = catalog
@@ -2703,7 +2736,7 @@ fn load_runtime(
         .get(app_id)
         .cloned()
         .ok_or_else(|| anyhow!("App {app_id} has no revision owner"))?;
-    ViewRuntime::load(&app, assets, &fs_root, &tmp_root, db, revision)
+    ViewRuntime::load(&app, assets, viewport, &fs_root, &tmp_root, db, revision)
         .with_context(|| format!("load App {app_id}"))
 }
 
@@ -3282,6 +3315,8 @@ fn next_schedule_run(current: u64, interval: u64, now: u64) -> u64 {
 mod tests {
     use super::*;
 
+    const TEST_VIEWPORT: Viewport = Viewport::new(720, 1280);
+
     struct NoServices;
 
     impl AppServiceHost for NoServices {
@@ -3386,6 +3421,20 @@ mod tests {
             .with(|ctx| {
                 let system: Object = ctx.globals().get("PocketPiSystem")?;
                 system.get::<_, Function>(method)?.call::<_, String>((x, y))
+            })
+            .unwrap()
+    }
+
+    fn guest_viewport(guest: &Guest) -> (u32, u32, String) {
+        guest
+            .with(|ctx| -> pocket_mod::qjs::Result<(u32, u32, String)> {
+                let view: Object = ctx.globals().get("View")?;
+                let viewport: Object = view.get("viewport")?;
+                Ok((
+                    viewport.get("width")?,
+                    viewport.get("height")?,
+                    viewport.get("orientation")?,
+                ))
             })
             .unwrap()
     }
@@ -3509,6 +3558,29 @@ mod tests {
     }
 
     #[test]
+    fn supervisor_exposes_the_host_viewport_to_every_app() {
+        let temp = tempfile::tempdir().unwrap();
+        for (name, viewport, orientation) in [
+            ("portrait", Viewport::new(720, 1280), "portrait"),
+            ("landscape", Viewport::new(800, 480), "landscape"),
+        ] {
+            let workspace = temp.path().join(name);
+            install_view_fixture(&workspace, "notes");
+            let catalog = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
+            let mut supervisor =
+                AppSupervisor::new(&workspace, viewport, catalog, Arc::new(NoServices)).unwrap();
+            supervisor.open("notes").unwrap();
+
+            let expected = (viewport.width, viewport.height, orientation.to_owned());
+            assert_eq!(guest_viewport(&supervisor.system.guest), expected);
+            assert_eq!(
+                guest_viewport(&supervisor.cached_view("notes").unwrap().guest),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn projection_errors_propagate_to_the_view_runtime() {
         let guest = new_app_guest().unwrap();
         let database = Arc::new(Mutex::new(DbModule::new(DbStorage::Memory)));
@@ -3528,7 +3600,7 @@ mod tests {
     #[test]
     fn raw_view_updates_only_bound_text_and_changed_props() {
         let guest = new_app_guest().unwrap();
-        let surface = UiSurface::new(VIEWPORT);
+        let surface = UiSurface::new(TEST_VIEWPORT.logical_size());
         surface.feed_pak(system_view_pak());
         surface.mount(&guest).unwrap();
         install_system_framework(&guest, "raw-view-test", system_framework(), "{}").unwrap();
@@ -3631,7 +3703,7 @@ mod tests {
     #[test]
     fn raw_keyboard_routes_keys_and_releases_pressed_feedback() {
         let guest = new_app_guest().unwrap();
-        let surface = UiSurface::new(VIEWPORT);
+        let surface = UiSurface::new(TEST_VIEWPORT.logical_size());
         surface.feed_pak(system_view_pak());
         surface.mount(&guest).unwrap();
         install_system_framework(&guest, "keyboard-test", system_framework(), "{}").unwrap();
@@ -3684,7 +3756,7 @@ mod tests {
     #[test]
     fn projection_refresh_renders_the_new_sqlite_state() {
         let guest = new_app_guest().unwrap();
-        let surface = UiSurface::new(VIEWPORT);
+        let surface = UiSurface::new(TEST_VIEWPORT.logical_size());
         surface.feed_pak(system_view_pak());
         surface.mount(&guest).unwrap();
         let database = Arc::new(Mutex::new(DbModule::new(DbStorage::Memory)));
@@ -3763,7 +3835,8 @@ mod tests {
         ]);
         let staged = stage_pocketapp_bytes(&package, &temp.path().join("staged")).unwrap();
         let catalog = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
-        let mut supervisor = AppSupervisor::new(&workspace, catalog, Arc::new(NoServices)).unwrap();
+        let mut supervisor =
+            AppSupervisor::new(&workspace, TEST_VIEWPORT, catalog, Arc::new(NoServices)).unwrap();
         supervisor
             .apply_app(&staged.release_dir, staged.credentials)
             .unwrap();
@@ -3808,7 +3881,8 @@ mod tests {
 
         drop(supervisor);
         let catalog = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
-        let restored = AppSupervisor::new(&workspace, catalog, Arc::new(NoServices)).unwrap();
+        let restored =
+            AppSupervisor::new(&workspace, TEST_VIEWPORT, catalog, Arc::new(NoServices)).unwrap();
         assert_eq!(source_rows(&restored), 4);
     }
 
@@ -3841,7 +3915,8 @@ mod tests {
         ]);
         let staged = stage_pocketapp_bytes(&package, &temp.path().join("staged")).unwrap();
         let catalog = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
-        let mut supervisor = AppSupervisor::new(&workspace, catalog, Arc::new(NoServices)).unwrap();
+        let mut supervisor =
+            AppSupervisor::new(&workspace, TEST_VIEWPORT, catalog, Arc::new(NoServices)).unwrap();
 
         supervisor
             .apply_app(&staged.release_dir, staged.credentials)
@@ -4048,7 +4123,8 @@ mod tests {
         std::fs::write(staging.join("view.js"), "").unwrap();
 
         let index = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
-        let mut supervisor = AppSupervisor::new(&workspace, index, Arc::new(NoServices)).unwrap();
+        let mut supervisor =
+            AppSupervisor::new(&workspace, TEST_VIEWPORT, index, Arc::new(NoServices)).unwrap();
         supervisor.apply_app(&staging, BTreeMap::new()).unwrap_err();
         assert!(!workspace.join("apps/broken").exists());
     }
@@ -4059,9 +4135,13 @@ mod tests {
         let staging = temp.path().join("staged-exa");
         stage_checked_in_app(&staging, "exa");
         let catalog = InstalledAppIndex::load(temp.path(), system_app_bundle()).unwrap();
-        let mut supervisor =
-            AppSupervisor::new(temp.path(), catalog, Arc::new(TrackingServices::default()))
-                .unwrap();
+        let mut supervisor = AppSupervisor::new(
+            temp.path(),
+            TEST_VIEWPORT,
+            catalog,
+            Arc::new(TrackingServices::default()),
+        )
+        .unwrap();
 
         let installed = supervisor
             .apply_app(
@@ -4084,7 +4164,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let services = Arc::new(TrackingServices::default());
         let catalog = InstalledAppIndex::load(temp.path(), system_app_bundle()).unwrap();
-        let mut supervisor = AppSupervisor::new(temp.path(), catalog, services.clone()).unwrap();
+        let mut supervisor =
+            AppSupervisor::new(temp.path(), TEST_VIEWPORT, catalog, services.clone()).unwrap();
         let initial = temp.path().join("initial-exa");
         stage_checked_in_app(&initial, "exa");
         let credentials = BTreeMap::from([("exa.api-key".to_owned(), "test-secret".to_owned())]);
@@ -4148,7 +4229,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("device");
         let catalog = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
-        let mut supervisor = AppSupervisor::new(&workspace, catalog, Arc::new(NoServices)).unwrap();
+        let mut supervisor =
+            AppSupervisor::new(&workspace, TEST_VIEWPORT, catalog, Arc::new(NoServices)).unwrap();
         let initial = temp.path().join("notes-v1");
         stage_notes_app(&initial, "1.0.0", 1, false);
         supervisor.apply_app(&initial, BTreeMap::new()).unwrap();
@@ -4236,7 +4318,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("device");
         let catalog = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
-        let mut supervisor = AppSupervisor::new(&workspace, catalog, Arc::new(NoServices)).unwrap();
+        let mut supervisor =
+            AppSupervisor::new(&workspace, TEST_VIEWPORT, catalog, Arc::new(NoServices)).unwrap();
         let initial = temp.path().join("notes-v1");
         stage_notes_app(&initial, "1.0.0", 1, false);
         supervisor.apply_app(&initial, BTreeMap::new()).unwrap();
@@ -4259,7 +4342,8 @@ mod tests {
         let catalog = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
         assert_eq!(catalog.descriptor("notes").unwrap().version, "2.0.0");
         assert!(!update_root.exists());
-        let supervisor = AppSupervisor::new(&workspace, catalog, Arc::new(NoServices)).unwrap();
+        let supervisor =
+            AppSupervisor::new(&workspace, TEST_VIEWPORT, catalog, Arc::new(NoServices)).unwrap();
         let mut database = supervisor.databases["notes"].lock().unwrap();
         let handle = database.open("notes");
         let result: Value =
@@ -4280,8 +4364,13 @@ mod tests {
         stage_checked_in_app(&staging, "exa");
         let catalog = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
         assert!(catalog.descriptor("exa").is_none());
-        let mut supervisor =
-            AppSupervisor::new(&workspace, catalog, Arc::new(TrackingServices::default())).unwrap();
+        let mut supervisor = AppSupervisor::new(
+            &workspace,
+            TEST_VIEWPORT,
+            catalog,
+            Arc::new(TrackingServices::default()),
+        )
+        .unwrap();
 
         supervisor
             .apply_app(
@@ -4301,7 +4390,8 @@ mod tests {
         let services = Arc::new(TrackingServices::default());
         let catalog = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
         let mut supervisor =
-            AppSupervisor::new(&workspace, catalog.clone(), services.clone()).unwrap();
+            AppSupervisor::new(&workspace, TEST_VIEWPORT, catalog.clone(), services.clone())
+                .unwrap();
         let (tools, _requests) = RoutedToolHost::new(Arc::new(NoTools), catalog);
         let model_requests = Arc::new(Mutex::new(Vec::new()));
         supervisor
@@ -4422,7 +4512,7 @@ mod tests {
         install_checked_in_app(temp.path(), "exa");
         let catalog = InstalledAppIndex::load(temp.path(), system_app_bundle()).unwrap();
         let mut supervisor =
-            AppSupervisor::new(temp.path(), catalog, Arc::new(NoServices)).unwrap();
+            AppSupervisor::new(temp.path(), TEST_VIEWPORT, catalog, Arc::new(NoServices)).unwrap();
         supervisor.open("exa").unwrap();
 
         let revision = supervisor.cached_view("exa").unwrap().revision.clone();
@@ -4528,7 +4618,7 @@ mod tests {
         }
         let catalog = InstalledAppIndex::load(temp.path(), system_app_bundle()).unwrap();
         let mut supervisor =
-            AppSupervisor::new(temp.path(), catalog, Arc::new(NoServices)).unwrap();
+            AppSupervisor::new(temp.path(), TEST_VIEWPORT, catalog, Arc::new(NoServices)).unwrap();
         assert!(supervisor.runtimes.is_empty());
 
         for app_id in ["one", "two", "three"] {
@@ -4807,8 +4897,13 @@ PocketPi.defineActions({ run() { return "ok"; } });
         let staging = workspace.join(format!(".staged-{app_id}"));
         stage_checked_in_app(&staging, app_id);
         let catalog = InstalledAppIndex::load(workspace, system_app_bundle()).unwrap();
-        let mut supervisor =
-            AppSupervisor::new(workspace, catalog, Arc::new(TrackingServices::default())).unwrap();
+        let mut supervisor = AppSupervisor::new(
+            workspace,
+            TEST_VIEWPORT,
+            catalog,
+            Arc::new(TrackingServices::default()),
+        )
+        .unwrap();
         let credentials = match app_id {
             "exa" => BTreeMap::from([("exa.api-key".to_owned(), "test-secret".to_owned())]),
             "robinhood" => BTreeMap::from([(

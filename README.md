@@ -197,9 +197,16 @@ DEEPSEEK_API_KEY=... DEEPSEEK_THINKING_LEVEL=xhigh \
   cargo xtask run esp32-p4-sim --backend deepseek
 ```
 
-The window uses the ESP32-P4 product's 720x1280 coordinate system. Mouse input
-is mapped through the same hit-testing code as physical touch input. Generate a
-deterministic UI snapshot with:
+The window defaults to the ESP32-P4 product's 720x1280 logical viewport. Pass a
+different viewport to exercise the same App source on another screen shape;
+mouse input is mapped through the same hit-testing code as physical touch
+input:
+
+```sh
+cargo xtask run esp32-p4-sim --viewport 800x480
+```
+
+Generate a deterministic UI snapshot with:
 
 ```sh
 cargo xtask snapshot esp32-p4-sim

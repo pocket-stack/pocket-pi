@@ -40,6 +40,16 @@
     regular: Object.freeze({ body: 2, lg: 3, xl: 4 }),
     bold: Object.freeze({ body: 9, lg: 10, xl: 11, title: 12 }),
   });
+  const hostViewport = ui.__viewport;
+  if (!hostViewport || !(hostViewport.w > 0) || !(hostViewport.h > 0)) {
+    throw new Error("Pocket Pi View SDK: host viewport is unavailable");
+  }
+  const viewport = Object.freeze({
+    width: hostViewport.w,
+    height: hostViewport.h,
+    orientation: hostViewport.w >= hostViewport.h ? "landscape" : "portrait",
+  });
+  const landscape = viewport.orientation === "landscape";
 
   let rootNode = null;
   let renderView = null;
@@ -446,10 +456,10 @@
 
   function Header(props = {}) {
     const leading = props.onBack
-      ? Pressable({ onPress: props.onBack, style: { width: 42, height: 64, align: "center", justify: "center" }, children: Text({ text: "‹", style: { color: "white", fontSize: "title", fontWeight: "bold" } }) })
-      : Box({ style: { width: 34, height: 34, radius: 8, background: props.accent === "busy" ? "warning" : props.accent === "danger" ? "danger" : props.accent === "none" ? "shellMuted" : "success" } });
+      ? Pressable({ onPress: props.onBack, style: { width: 42, height: landscape ? 48 : 64, align: "center", justify: "center" }, children: Text({ text: "‹", style: { color: "white", fontSize: "title", fontWeight: "bold" } }) })
+      : Box({ style: { width: landscape ? 28 : 34, height: landscape ? 28 : 34, radius: 8, background: props.accent === "busy" ? "warning" : props.accent === "danger" ? "danger" : props.accent === "none" ? "shellMuted" : "success" } });
     return Row({
-      style: { height: 112, paddingX: 24, align: "center", justify: "between", background: "shell" },
+      style: { height: landscape ? 64 : 112, paddingX: landscape ? 16 : 24, align: "center", justify: "between", background: "shell" },
       children: [
         Row({ style: { grow: 1, align: "center", gap: 16 }, children: [leading, Text({ text: props.title, style: { color: "white", fontSize: "title", fontWeight: "bold" } })] }),
         Column({ style: { align: "end", gap: 8 }, children: [
@@ -461,7 +471,7 @@
   }
 
   function PageIntro(props = {}) {
-    return Column({ style: { height: 166, paddingX: 24, paddingTop: 24, gap: 12 }, children: [
+    return Column({ style: { height: landscape ? 92 : 166, paddingX: landscape ? 16 : 24, paddingTop: landscape ? 12 : 24, gap: landscape ? 6 : 12 }, children: [
       Text({ text: props.eyebrow, style: { color: props.tone === "info" ? "info" : "accent", fontWeight: "bold" } }),
       Text({ text: props.title, style: { fontSize: "title", fontWeight: "bold" } }),
       Text({ text: props.description, style: { color: "muted", fontSize: "lg" } }),
@@ -470,7 +480,7 @@
 
   function SectionHeading(props = {}) {
     const detail = props.action ? (props.detail ? `${props.detail}  ·  VIEW ALL  ›` : "VIEW ALL  ›") : props.detail ?? "";
-    return Row({ style: { height: 44, paddingX: 4, align: "center", justify: "between" }, children: [
+    return Row({ style: { height: landscape ? 32 : 44, paddingX: 4, align: "center", justify: "between" }, children: [
       Text({ text: props.title, style: { fontSize: "xl", fontWeight: "bold", color: "heading" } }),
       Text({ text: detail, style: { color: "muted", fontWeight: "bold" } }),
     ] });
@@ -490,8 +500,8 @@
   }
 
   function EmptyState(props = {}) {
-    return Card({ style: { width: "full", height: props.compact ? 150 : 430, paddingX: props.compact ? 20 : 48, align: "center", justify: "center", ...props.style }, children: [
-      props.icon ? Box({ style: { width: 88, height: 88, align: "center", justify: "center", radius: 12, background: props.tone === "info" ? "infoSoft" : "border" }, children: Text({ text: props.icon, style: { color: props.tone === "info" ? "info" : "muted", fontSize: "title", fontWeight: "bold" } }) }) : null,
+    return Card({ style: { width: "full", height: props.compact || landscape ? 150 : 430, paddingX: props.compact || landscape ? 20 : 48, align: "center", justify: "center", ...props.style }, children: [
+      props.icon ? Box({ style: { width: landscape ? 56 : 88, height: landscape ? 56 : 88, align: "center", justify: "center", radius: 12, background: props.tone === "info" ? "infoSoft" : "border" }, children: Text({ text: props.icon, style: { color: props.tone === "info" ? "info" : "muted", fontSize: "title", fontWeight: "bold" } }) }) : null,
       Text({ text: props.title, style: { marginTop: props.icon ? 28 : 0, color: props.icon ? "heading" : "muted", fontSize: props.icon ? "title" : "lg", fontWeight: "bold" } }),
       props.detail ? Text({ text: props.detail, style: { marginTop: 16, color: "muted", fontSize: "lg" } }) : null,
     ] });
@@ -509,14 +519,28 @@
       Text({ text: props.text, style: { color: props.tone === "danger" ? (props.dark ? "dangerOnDark" : "danger") : (props.dark ? "subtle" : "muted") } }) });
   }
 
+  function NavigationBar(props = {}) {
+    return Row({
+      style: { height: landscape ? 64 : 108, paddingX: landscape ? 8 : 10, paddingY: landscape ? 8 : 16, gap: landscape ? 8 : 10, background: "shell" },
+      children: (props.items ?? []).map((item) => Pressable({
+        onPress: item.onPress,
+        style: {
+          grow: 1, basis: 0, height: "full", align: "center", justify: "center",
+          background: item.active ? "accent" : "shellMuted",
+        },
+        children: Text({ text: item.label, style: { color: "white", fontWeight: "bold" } }),
+      })),
+    });
+  }
+
   function ScrollButton(props = {}) {
-    return Pressable({ ...props, style: { width: 68, height: 132, align: "center", justify: "center", radius: 12, background: "accentSoft", ...props.style }, children:
+    return Pressable({ ...props, style: { width: landscape ? 56 : 68, height: landscape ? 64 : 132, align: "center", justify: "center", radius: 12, background: "accentSoft", ...props.style }, children:
       Text({ text: props.direction === "up" ? "UP" : "DN", style: { color: "accent", fontWeight: "bold" } }) });
   }
 
   function ScrollRail(props = {}) {
     if (typeof props.onUp !== "function" || typeof props.onDown !== "function") fail("ScrollRail requires onUp and onDown");
-    return Column({ style: { width: 68, justify: "between", ...props.style }, children: [
+    return Column({ style: { width: landscape ? 56 : 68, justify: "between", ...props.style }, children: [
       ScrollButton({ direction: "up", onPress: props.onUp }),
       ScrollButton({ direction: "down", onPress: props.onDown }),
     ] });
@@ -533,30 +557,69 @@
     if (typeof props.onKey !== "function") fail("Keyboard requires onKey");
     const key = (label, value, style) => Pressable({
       onPress: () => props.onKey(value),
-      style: { height: 120, align: "center", justify: "center", background: "surface", ...style },
+      style: { height: landscape ? 52 : 120, align: "center", justify: "center", background: "surface", ...style },
       children: Text({ text: label, style: { color: "heading", fontSize: "xl", fontWeight: "bold" } }),
     });
     const rows = keyboardLayers[props.layer].map((row, index) => Row({
-      style: { height: 140, gap: 8 },
+      style: { height: landscape ? 60 : 140, gap: 8 },
       children: [
         ...[...row].map((character) => key(character, character, { grow: 1 })),
         index === 2 ? key("DEL", "Backspace", { width: 104, background: "border" }) : null,
       ],
     }));
-    const mode = key(props.layer === "symbols" ? "ABC" : "123", "Mode", { width: 92, height: 156, background: "border" });
-    const space = key("SPACE", " ", { width: 300, height: 156, background: "border" });
-    const enter = key("ENTER", "Enter", { width: 112, height: 156, background: "success" });
+    const finalKeyHeight = landscape ? 64 : 156;
+    const mode = key(props.layer === "symbols" ? "ABC" : "123", "Mode", { width: 92, height: finalKeyHeight, background: "border" });
+    const space = key("SPACE", " ", { width: 300, height: finalKeyHeight, background: "border" });
+    const enter = key("ENTER", "Enter", { width: 112, height: finalKeyHeight, background: "success" });
     const trailing = props.layer === "symbols"
-      ? [key(".", ".", { width: 68, height: 156, background: "border" }), key("?", "?", { width: 68, height: 156, background: "border" })]
-      : [key("SHIFT", "Shift", { width: 144, height: 156, background: "border" })];
-    return Column({ style: { width: "full", height: 596 }, children: [
+      ? [key(".", ".", { width: 68, height: finalKeyHeight, background: "border" }), key("?", "?", { width: 68, height: finalKeyHeight, background: "border" })]
+      : [key("SHIFT", "Shift", { width: 144, height: finalKeyHeight, background: "border" })];
+    return Column({ style: { width: "full", height: landscape ? 252 : 596 }, children: [
       ...rows,
-      Row({ style: { height: 176, gap: 8 }, children: [mode, space, ...trailing, enter] }),
+      Row({ style: { height: landscape ? 72 : 176, gap: 8 }, children: [mode, space, ...trailing, enter] }),
+    ] });
+  }
+
+  function Sparkline(props = {}) {
+    const values = (props.values ?? []).map((value) => value === null || value === undefined ? null : Number(value));
+    const present = values.filter(Number.isFinite);
+    const width = landscape ? Math.floor(viewport.width / 2) : viewport.width - 88;
+    const plotHeight = landscape ? 96 : 160;
+    const low = present.length ? Math.min(...present) : 0;
+    const high = present.length ? Math.max(...present) : 0;
+    const range = Math.max(0.01, high - low);
+    const points = values.flatMap((value, index) => Number.isFinite(value) ? [{
+      x: values.length < 2 ? 0 : index * (width - 10) / (values.length - 1),
+      y: present.length === 1 ? plotHeight / 2 : 8 + (high - value) * (plotHeight - 18) / range,
+    }] : []);
+    const segments = points.slice(1).map((point, index) => {
+      const previous = points[index];
+      const dx = point.x - previous.x;
+      const dy = point.y - previous.y;
+      return { x: previous.x, y: previous.y, width: Math.sqrt(dx * dx + dy * dy), angle: Math.atan2(dy, dx) * 180 / Math.PI };
+    });
+    const tone = props.tone ?? "success";
+    return Column({ style: { width, height: plotHeight + 36 }, children: [
+      Box({ style: { position: "relative", width, height: plotHeight, overflow: "hidden" }, children: [
+        Box({ style: { position: "absolute", left: 0, top: plotHeight - 2, width, height: 2, background: "disabled" } }),
+        points.length < 2 ? Box({ style: { position: "absolute", left: 0, top: 0, width: "full", height: "full", align: "center", justify: "center" }, children:
+          Text({ text: props.empty ?? "COLLECTING DATA", style: { color: "muted", fontWeight: "bold" } }) }) : null,
+        segments.map((item) => Box({ style: {
+          position: "absolute", left: item.x, top: item.y - 1, width: item.width, height: 2,
+          radius: 8, background: tone, rotate: item.angle, originX: -0.5, originY: 0,
+        } })),
+        points.map((item) => Box({ style: {
+          position: "absolute", left: item.x - 3, top: item.y - 3, width: 6, height: 6, radius: 8, background: tone,
+        } })),
+      ] }),
+      Row({ style: { height: 36, paddingX: 4, align: "center", justify: "between" }, children:
+        (props.labels ?? []).map((label) => Text({ text: label || "", style: { color: "muted" } })) }),
     ] });
   }
 
   globalThis.View = Object.freeze({
     api: 1,
+    viewport,
     colors,
     state,
     measureText,
@@ -576,8 +639,10 @@
     EmptyState,
     MetricCard,
     StatusBar,
+    NavigationBar,
     ScrollButton,
     ScrollRail,
     Keyboard,
+    Sparkline,
   });
 })();
