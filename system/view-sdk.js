@@ -651,7 +651,6 @@
   }
 
   globalThis.View = Object.freeze({
-    api: 2,
     viewport,
     colors,
     state,

@@ -10,7 +10,6 @@
 #include "driver/gpio.h"
 #include "driver/i2c.h"
 #include "esp_check.h"
-#include "esp_cpu.h"
 #include "esp_flash_dispatcher.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_rgb.h"
@@ -36,49 +35,11 @@ static portMUX_TYPE frame_lock = portMUX_INITIALIZER_UNLOCKED;
 static StaticSemaphore_t frame_semaphore_storage;
 static SemaphoreHandle_t frame_semaphore;
 static volatile uint32_t completed_frames;
-static volatile uint32_t vsync_count;
-static volatile uint32_t frame_count;
-static volatile uint32_t max_vsync_cycles;
-static volatile uint32_t max_frame_cycles;
-static volatile uint32_t last_vsync_cycle;
-static volatile uint32_t last_frame_cycle;
 
 esp_err_t pi_s3_flash_dispatcher_init(void)
 {
     const esp_flash_dispatcher_config_t config = ESP_FLASH_DISPATCHER_DEFAULT_CONFIG;
     return esp_flash_dispatcher_init(&config);
-}
-
-static void IRAM_ATTR record_scan_event(
-    volatile uint32_t *count,
-    volatile uint32_t *last_cycle,
-    volatile uint32_t *max_cycles
-)
-{
-    const uint32_t now = esp_cpu_get_cycle_count();
-    if (*last_cycle != 0) {
-        const uint32_t elapsed = now - *last_cycle;
-        if (elapsed > *max_cycles) {
-            *max_cycles = elapsed;
-        }
-    }
-    *last_cycle = now;
-    (*count)++;
-}
-
-static bool IRAM_ATTR on_vsync(
-    esp_lcd_panel_handle_t panel,
-    const esp_lcd_rgb_panel_event_data_t *event_data,
-    void *user_context
-)
-{
-    (void)panel;
-    (void)event_data;
-    (void)user_context;
-    portENTER_CRITICAL_ISR(&frame_lock);
-    record_scan_event(&vsync_count, &last_vsync_cycle, &max_vsync_cycles);
-    portEXIT_CRITICAL_ISR(&frame_lock);
-    return false;
 }
 
 static bool IRAM_ATTR on_frame_complete(
@@ -91,7 +52,6 @@ static bool IRAM_ATTR on_frame_complete(
     (void)event_data;
     (void)user_context;
     portENTER_CRITICAL_ISR(&frame_lock);
-    record_scan_event(&frame_count, &last_frame_cycle, &max_frame_cycles);
     completed_frames++;
     portEXIT_CRITICAL_ISR(&frame_lock);
     BaseType_t task_woken = pdFALSE;
@@ -207,7 +167,6 @@ esp_err_t pi_s3_board_init(
     frame_semaphore = xSemaphoreCreateBinaryStatic(&frame_semaphore_storage);
     ESP_RETURN_ON_FALSE(frame_semaphore, ESP_ERR_NO_MEM, TAG, "create frame semaphore");
     const esp_lcd_rgb_panel_event_callbacks_t callbacks = {
-        .on_vsync = on_vsync,
         .on_frame_buf_complete = on_frame_complete,
     };
     ESP_RETURN_ON_ERROR(
@@ -299,24 +258,6 @@ esp_err_t pi_s3_present(esp_lcd_panel_handle_t panel, const uint16_t *framebuffe
             );
         }
     }
-}
-
-bool pi_s3_take_scan_stats(pi_s3_scan_stats_t *stats)
-{
-    if (!stats) {
-        return false;
-    }
-    portENTER_CRITICAL(&frame_lock);
-    stats->vsync_count = vsync_count;
-    stats->frame_count = frame_count;
-    stats->max_vsync_cycles = max_vsync_cycles;
-    stats->max_frame_cycles = max_frame_cycles;
-    vsync_count = 0;
-    frame_count = 0;
-    max_vsync_cycles = 0;
-    max_frame_cycles = 0;
-    portEXIT_CRITICAL(&frame_lock);
-    return stats->vsync_count != 0 || stats->frame_count != 0;
 }
 
 bool pi_s3_touch_read(esp_lcd_touch_handle_t touch, uint16_t *x, uint16_t *y)

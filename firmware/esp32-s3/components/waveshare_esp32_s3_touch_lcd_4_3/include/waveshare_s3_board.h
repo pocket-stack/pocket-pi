@@ -23,15 +23,6 @@ esp_err_t pi_s3_present(
     const uint16_t *framebuffer
 );
 
-typedef struct {
-    uint32_t vsync_count;
-    uint32_t frame_count;
-    uint32_t max_vsync_cycles;
-    uint32_t max_frame_cycles;
-} pi_s3_scan_stats_t;
-
-bool pi_s3_take_scan_stats(pi_s3_scan_stats_t *stats);
-
 bool pi_s3_touch_read(
     esp_lcd_touch_handle_t touch,
     uint16_t *x,

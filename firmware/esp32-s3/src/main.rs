@@ -10,7 +10,6 @@ use pocket_pi_esp32_common::{
 };
 use pocketjs_core::damage::{DamagePolicy, DamageRect, DamageTarget, DamageTracker};
 use pocketjs_core::raster::render_scaled_rgb565_window_over;
-use std::time::Instant;
 
 const LOGICAL_WIDTH: usize = 480;
 const LOGICAL_HEIGHT: usize = 800;
@@ -21,8 +20,6 @@ const ROTATION_TILE_SIZE: usize = 8;
 const DISPLAY_VIEWPORT: Viewport = Viewport::new(LOGICAL_WIDTH as u32, LOGICAL_HEIGHT as u32);
 const AGENTOS_LAUNCHER_STACK_BYTES: u32 = 4 * 1024;
 const AGENTOS_TASK_STACK_BYTES: u32 = 48 * 1024;
-const CPU_CYCLES_PER_MICROSECOND: u32 = 240;
-const SCAN_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 fn main() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();
@@ -125,9 +122,6 @@ struct S3Display {
     damage: [DamageTracker; 2],
     next_framebuffer: usize,
     render_buffer: *mut u16,
-    touch_down: bool,
-    touch_started: Option<Instant>,
-    last_scan_log: Instant,
 }
 
 impl S3Display {
@@ -149,8 +143,6 @@ impl S3Display {
 
             let internal_caps =
                 esp_idf_svc::sys::MALLOC_CAP_INTERNAL | esp_idf_svc::sys::MALLOC_CAP_8BIT;
-            let largest_internal_before =
-                esp_idf_svc::sys::heap_caps_get_largest_free_block(internal_caps);
             let render_buffer = esp_idf_svc::sys::heap_caps_malloc(
                 LOGICAL_WIDTH * RENDER_STRIPE_HEIGHT * core::mem::size_of::<u16>(),
                 internal_caps,
@@ -159,13 +151,6 @@ impl S3Display {
             if render_buffer.is_null() {
                 anyhow::bail!("could not allocate the RGB565 render stripe in internal RAM")
             }
-            log::info!(
-                "S3 render stripe={}x{} internal largest_before={} largest_after={}",
-                LOGICAL_WIDTH,
-                RENDER_STRIPE_HEIGHT,
-                largest_internal_before,
-                esp_idf_svc::sys::heap_caps_get_largest_free_block(internal_caps),
-            );
 
             let mut display = Self {
                 panel,
@@ -174,9 +159,6 @@ impl S3Display {
                 damage: [DamageTracker::new(), DamageTracker::new()],
                 next_framebuffer: 1,
                 render_buffer,
-                touch_down: false,
-                touch_started: None,
-                last_scan_log: Instant::now(),
             };
             display.render(supervisor)?;
             core::ptr::copy_nonoverlapping(
@@ -196,75 +178,24 @@ impl S3Display {
 
 impl DisplayHost for S3Display {
     fn read_touch(&mut self) -> Option<(u16, u16)> {
-        if self.last_scan_log.elapsed() >= SCAN_LOG_INTERVAL {
-            let mut stats = unsafe { core::mem::zeroed() };
-            if unsafe { esp_idf_svc::sys::pi_s3_take_scan_stats(&mut stats) } {
-                let internal_caps =
-                    esp_idf_svc::sys::MALLOC_CAP_INTERNAL | esp_idf_svc::sys::MALLOC_CAP_8BIT;
-                log::info!(
-                    "S3 scan vsync={} frames={} max_vsync={}us max_frame={}us internal_free={} internal_largest={} agentos_stack_free={} psram_free={} psram_largest={}",
-                    stats.vsync_count,
-                    stats.frame_count,
-                    stats.max_vsync_cycles / CPU_CYCLES_PER_MICROSECOND,
-                    stats.max_frame_cycles / CPU_CYCLES_PER_MICROSECOND,
-                    unsafe { esp_idf_svc::sys::heap_caps_get_free_size(internal_caps) },
-                    unsafe {
-                        esp_idf_svc::sys::heap_caps_get_largest_free_block(internal_caps)
-                    },
-                    unsafe {
-                        esp_idf_svc::sys::uxTaskGetStackHighWaterMark2(core::ptr::null_mut())
-                    },
-                    unsafe {
-                        esp_idf_svc::sys::heap_caps_get_free_size(
-                            esp_idf_svc::sys::MALLOC_CAP_SPIRAM,
-                        )
-                    },
-                    unsafe {
-                        esp_idf_svc::sys::heap_caps_get_largest_free_block(
-                            esp_idf_svc::sys::MALLOC_CAP_SPIRAM,
-                        )
-                    },
-                );
-            }
-            self.last_scan_log = Instant::now();
-        }
         let mut physical_x = 0u16;
         let mut physical_y = 0u16;
         let touched = unsafe {
             esp_idf_svc::sys::pi_s3_touch_read(self.touch, &mut physical_x, &mut physical_y)
         };
-        if touched && !self.touch_down {
-            self.touch_started = Some(Instant::now());
-        }
-        self.touch_down = touched;
         touched.then(|| physical_to_logical(physical_x, physical_y))
     }
 
     fn render(&mut self, supervisor: &AppSupervisor) -> anyhow::Result<()> {
-        let render_started = Instant::now();
-        let before_firmware_ms = self
-            .touch_started
-            .map(|started| render_started.duration_since(started).as_millis());
         let index = self.next_framebuffer;
         let framebuffer = self.framebuffers[index];
         let render_buffer = self.render_buffer;
-        let mut plan_ms = 0;
-        let mut raster_ms = 0;
-        let mut rotate_ms = 0;
-        let mut damage_regions = 0;
-        let mut damage_pixels = 0;
-        let mut full_redraw = false;
         let changed = supervisor.with_ui(|ui| {
             let words = ui.draw().words.clone();
-            let plan_started = Instant::now();
             let damage = self.damage[index]
                 .prepare(ui, &words, damage_target())
                 .and_then(|plan| plan.with_policy(DamagePolicy::default()))
                 .map_err(|error| anyhow::anyhow!("could not plan S3 display damage: {error:?}"))?;
-            plan_ms = plan_started.elapsed().as_millis();
-            damage_regions = damage.region_count();
-            damage_pixels = damage.area();
-            full_redraw = damage.is_full_redraw();
             if damage.is_empty() {
                 self.damage[index].commit(ui, &words, damage_target());
                 return Ok(false);
@@ -280,7 +211,6 @@ impl DisplayHost for S3Display {
                     let render_buffer =
                         unsafe { core::slice::from_raw_parts_mut(render_buffer, width * height) };
                     render_buffer.fill(0);
-                    let raster_started = Instant::now();
                     render_scaled_rgb565_window_over(
                         ui,
                         &words,
@@ -293,51 +223,17 @@ impl DisplayHost for S3Display {
                             (y + height) as i32,
                         ),
                     );
-                    raster_ms += raster_started.elapsed().as_millis();
-                    let rotate_started = Instant::now();
                     rotate_region(render_buffer, width, height, x, y, framebuffer);
-                    rotate_ms += rotate_started.elapsed().as_millis();
                 }
             }
             self.damage[index].commit(ui, &words, damage_target());
             Ok::<_, anyhow::Error>(true)
         })?;
-        let present_ms = if changed {
-            let present_started = Instant::now();
+        if changed {
             esp_result("present S3 framebuffer", unsafe {
                 esp_idf_svc::sys::pi_s3_present(self.panel, framebuffer)
             })?;
             self.next_framebuffer = 1 - index;
-            present_started.elapsed().as_millis()
-        } else {
-            0
-        };
-        if let Some(touch_started) = self.touch_started.take() {
-            log::info!(
-                "S3 input before_firmware={}ms regions={} pixels={} full={} plan={}ms raster={}ms rotate={}ms present={}ms total={}ms touch_to_frame={}ms changed={changed}",
-                before_firmware_ms.unwrap_or_default(),
-                damage_regions,
-                damage_pixels,
-                full_redraw,
-                plan_ms,
-                raster_ms,
-                rotate_ms,
-                present_ms,
-                render_started.elapsed().as_millis(),
-                touch_started.elapsed().as_millis(),
-            );
-        } else {
-            log::info!(
-                "S3 frame regions={} pixels={} full={} plan={}ms raster={}ms rotate={}ms present={}ms total={}ms changed={changed}",
-                damage_regions,
-                damage_pixels,
-                full_redraw,
-                plan_ms,
-                raster_ms,
-                rotate_ms,
-                present_ms,
-                render_started.elapsed().as_millis(),
-            );
         }
         Ok(())
     }

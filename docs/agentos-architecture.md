@@ -178,7 +178,6 @@ the mounted size through its native `ui.__viewport` object, and the shared View
 SDK publishes the validated, immutable App-facing value:
 
 ```js
-View.api // 2
 View.viewport // { width, height, orientation, scale, layoutWidth, layoutHeight }
 ```
 
@@ -209,8 +208,8 @@ style values by `scale`. `measureText` returns physical pixels for the selected
 fixed font slot.
 
 The View SDK is installed once by the Runtime before any source App View is
-evaluated. Pi Agent and every installed ordinary App use the same API 2
-implementation; per-App SDK versions are not supported.
+evaluated. Pi Agent and every installed ordinary App use that shared
+implementation.
 
 Reusable geometry belongs in the View SDK. For example, an App gives
 `View.Sparkline` values and labels; the SDK derives canvas points from the

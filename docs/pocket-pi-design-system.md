@@ -13,7 +13,7 @@ components。Pi Agent 页面位于 `apps/pi-agent/view.js`，其动态文本分�
 | Foundation | 包含 | 当前规则 |
 | --- | --- | --- |
 | type hierarchy | app title、page title、heading、label、body、caption | 只保留 shared components 实际消费的 class recipe；ESP 主阅读文本由 14/16px 提升到 16/18px，24px title 保持不变 |
-| geometry | 720x1280 portrait、800x480 landscape reference canvas | App 数字是 design unit，由 API 2 统一缩放；不导出断点或设备 profile |
+| geometry | 720x1280 portrait、800x480 landscape reference canvas | App 数字是 design unit，由共享 View SDK 统一缩放；不导出断点或设备 profile |
 | spacing | 24 design-unit screen gutter、card padding、stack gap | 直接写在当前 concrete component recipe 中，不导出无人消费的 token map |
 | surfaces | card、selected card、row、muted、shell recipes | arbitrary children 的容器保持 literal View；当前没有单独的 unused surface registry |
 | status tones | neutral、info、success、warning、danger | 由 runtime View SDK 的 `Badge`/`StatusBar` 统一表达 |
@@ -60,5 +60,5 @@ contract 上，才进入 Pi Design。
 2. 共享 component 是纯展示函数：props in，native View/Text tree out。
 3. App 自己决定数据、loading/error 条件、navigation 和 side effects；共享 SDK
    负责 node hit testing 和按压反馈。
-4. Pi Agent 与普通 App 都直接执行 `view.js` 并使用同一个 View SDK API 2。Pi Agent
-   仍随 firmware 内置；它的 Agent loop `agent.js` 继续在构建时生成。
+4. Pi Agent 与普通 App 都直接执行 `view.js` 并使用同一个 View SDK。Pi Agent 仍随
+   firmware 内置；它的 Agent loop `agent.js` 继续在构建时生成。

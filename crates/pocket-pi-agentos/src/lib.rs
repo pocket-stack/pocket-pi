@@ -3431,7 +3431,6 @@ mod tests {
                 let view: Object = ctx.globals().get("View")?;
                 let viewport: Object = view.get("viewport")?;
                 Ok(json!({
-                    "api": view.get::<_, u32>("api")?,
                     "width": viewport.get::<_, u32>("width")?,
                     "height": viewport.get::<_, u32>("height")?,
                     "orientation": viewport.get::<_, String>("orientation")?,
@@ -3568,17 +3567,17 @@ mod tests {
             (
                 "portrait",
                 Viewport::new(720, 1280),
-                json!({"api":2,"width":720,"height":1280,"orientation":"portrait","scale":1.0,"layoutWidth":720.0,"layoutHeight":1280.0}),
+                json!({"width":720,"height":1280,"orientation":"portrait","scale":1.0,"layoutWidth":720.0,"layoutHeight":1280.0}),
             ),
             (
                 "compact-portrait",
                 Viewport::new(480, 800),
-                json!({"api":2,"width":480,"height":800,"orientation":"portrait","scale":0.625,"layoutWidth":768.0,"layoutHeight":1280.0}),
+                json!({"width":480,"height":800,"orientation":"portrait","scale":0.625,"layoutWidth":768.0,"layoutHeight":1280.0}),
             ),
             (
                 "landscape",
                 Viewport::new(800, 480),
-                json!({"api":2,"width":800,"height":480,"orientation":"landscape","scale":1.0,"layoutWidth":800.0,"layoutHeight":480.0}),
+                json!({"width":800,"height":480,"orientation":"landscape","scale":1.0,"layoutWidth":800.0,"layoutHeight":480.0}),
             ),
         ] {
             let workspace = temp.path().join(name);
