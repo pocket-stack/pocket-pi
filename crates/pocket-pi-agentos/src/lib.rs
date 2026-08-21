@@ -1531,6 +1531,7 @@ impl ActionRunner {
                             tool_error(format!("{}: {error:#}", request.action))
                         }
                     };
+                    worker_pending.fetch_sub(1, Ordering::AcqRel);
                     match request.completion {
                         ActionCompletion::Schedule(schedule_id) => {
                             let _ = schedule_tx.send(ScheduleActionResult {
@@ -1544,7 +1545,6 @@ impl ActionRunner {
                         }
                         ActionCompletion::None => {}
                     }
-                    worker_pending.fetch_sub(1, Ordering::AcqRel);
                 }
             })
             .context("start App Action runner")?;
