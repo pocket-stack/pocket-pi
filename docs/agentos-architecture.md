@@ -1,8 +1,9 @@
 # Pocket Pi Agent-native Runtime
 
-Pocket Pi is a device runtime, not an App running on a general-purpose OS. The
-first supported host is ESP32-P4; `hosts/esp32-p4-sim` is a development and
-product-contract simulator, not a second product.
+Pocket Pi is a device runtime, not an App running on a general-purpose OS.
+ESP32-P4 is the reference hardware host, ESP32-S3 is a supported hardware host,
+and `hosts/esp32-p4-sim` is a development and product-contract simulator rather
+than a separate product.
 
 Ordinary Apps are installed and executed as raw JavaScript source. The device
 does not compile them, and changing an App does not rebuild or flash Firmware.
@@ -38,8 +39,10 @@ Three principles govern the implementation:
 
 ```text
 Hardware
-└── ESP-IDF Firmware host                         Rust
-    ├── hardware, transport, credentials, limits
+└── ESP-IDF Firmware                              Rust
+    ├── shared AgentOS host loop                  `firmware/esp32-common`
+    ├── P4 or S3 board host                       display, touch, Wi-Fi
+    ├── transport, credentials, limits
     ├── AppSupervisor and install/update/uninstall lifecycle
     └── PocketJS runtime platform                 Rust + QuickJS C
         ├── Pocket Pi System Framework            raw JavaScript
@@ -80,7 +83,7 @@ drops it.
 
 | Component | Owner/language | Lifetime | Changes require |
 |---|---|---|---|
-| ESP-IDF host | `firmware/esp32-p4`, Rust | device boot | Firmware build/flash |
+| ESP-IDF hosts | `firmware/esp32-common` + `firmware/esp32-p4` or `firmware/esp32-s3`, Rust/C | device boot | Firmware build/flash |
 | PocketJS platform | pinned PocketJS crates + QuickJS, Rust/C | Firmware lifetime | Firmware build/flash |
 | AppSupervisor mechanisms | `crates/pocket-pi-agentos`, Rust | Firmware lifetime | Firmware build/flash |
 | System Framework v1 | `system/framework.js`, JavaScript | evaluated per Guest | Firmware build/flash |
@@ -179,10 +182,12 @@ View.api // 2
 View.viewport // { width, height, orientation, scale, layoutWidth, layoutHeight }
 ```
 
-`width` and `height` are physical viewport pixels. `layoutWidth` and
-`layoutHeight` are the current design-space extents. The SDK uses the existing
-720x1280 portrait composition and 800x480 landscape composition as its two
-reference canvases, then derives one continuous `scale` from the host viewport.
+`width` and `height` are the host's logical viewport pixels; the current board
+hosts map them one-to-one to panel pixels after any board rotation.
+`layoutWidth` and `layoutHeight` are the current design-space extents. The SDK
+uses the existing 720x1280 portrait composition and 800x480 landscape
+composition as its two reference canvases, then derives one continuous `scale`
+from the host viewport.
 Every numeric geometry value in App styles is a design unit and the SDK scales
 it exactly once before passing it to PocketJS. `full`, flex weights, opacity,
 rotation and other unitless values are unchanged.
@@ -193,18 +198,19 @@ target. `ActionButton` additionally keeps at least 48 physical pixels of height
 and enough width for its measured label plus 16 physical pixels of padding on
 each side. These are shared component invariants, not App or board breakpoints.
 
-The same physical viewport is used for rendering and touch coordinates. Rust
-does not choose App page layouts. Apps compose semantic `Row`, `Column` and
-shared View SDK components, while PocketJS's Taffy layout engine resolves their
-actual bounds. Apps may choose a different composition from
-`View.viewport.orientation`; they do not receive a board name and should not
-encode panel-specific pixel coordinates or multiply style values by `scale`.
-`measureText` returns physical pixels for the selected fixed font slot.
+The same logical viewport coordinate system is used for rendering and touch.
+Rust does not choose App page layouts. Apps compose semantic `Row`, `Column`
+and shared View SDK components, while PocketJS's Taffy layout engine resolves
+their actual bounds. Apps may choose a different composition from
+`View.viewport.orientation` and may reduce repeated preview content when
+`View.viewport.scale` is below the reference canvas. They do not receive a
+board name and should not encode panel-specific pixel coordinates or multiply
+style values by `scale`. `measureText` returns physical pixels for the selected
+fixed font slot.
 
 The View SDK is installed once by the Runtime before any source App View is
-evaluated. Pi Agent and every installed ordinary App therefore use the same API
-2 implementation; the previous API 1 behavior is not retained or packaged per
-App.
+evaluated. Pi Agent and every installed ordinary App use the same API 2
+implementation; per-App SDK versions are not supported.
 
 Reusable geometry belongs in the View SDK. For example, an App gives
 `View.Sparkline` values and labels; the SDK derives canvas points from the

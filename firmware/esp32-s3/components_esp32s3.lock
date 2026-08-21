@@ -1,4 +1,14 @@
 dependencies:
+  espressif/esp_flash_dispatcher:
+    component_hash: caeb9663b23e1d8727760ad00388ba6465eb090a51ed3bd0b5eab4808f61f581
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.2'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.0.3
   espressif/esp_lcd_touch:
     component_hash: 3f85a7d95af876f1a6ecca8eb90a81614890d0f03a038390804e5a77e2caf862
     dependencies:
@@ -38,9 +48,10 @@ dependencies:
       type: service
     version: 1.14.8
 direct_dependencies:
+- espressif/esp_flash_dispatcher
 - espressif/esp_lcd_touch_gt911
 - idf
 - joltwallet/littlefs
-manifest_hash: 916ca1edbfaeed0c86d2239e49a3423423c0e418c0976239d178be69c7524f58
+manifest_hash: 5822e2c0268c837a54d3510972ba7849bb710af39895021e02c0a3589c197e1f
 target: esp32s3
 version: 2.0.0

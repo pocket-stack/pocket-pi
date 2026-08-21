@@ -6,6 +6,7 @@ const EMPTY_POSITION = { symbol: "NO OPEN POSITIONS", quantity: "", averagePrice
 const UNAVAILABLE_POSITION = { ...EMPTY_POSITION, symbol: "POSITIONS UNAVAILABLE" };
 const BLANK_POSITION = { ...EMPTY_POSITION, symbol: "" };
 const LANDSCAPE = View.viewport.orientation === "landscape";
+const DASHBOARD_PREVIEW_INDICES = LANDSCAPE || View.viewport.scale < 1 ? [0] : [0, 1];
 const ACCOUNT_VISIBLE_ROWS = LANDSCAPE ? 3 : 8;
 const ACTIVITY_VISIBLE_ROWS = LANDSCAPE ? 3 : 8;
 const POSITION_VISIBLE_ROWS = LANDSCAPE ? 3 : 9;
@@ -301,7 +302,7 @@ function activityPreview(state, index) {
 
 function compactActivity(state, index) {
   const item = activityPreview(state, index);
-  return View.Row({ style: { height: 72, paddingX: 20, align: "center", justify: "between" }, children: [
+  return View.Row({ style: { height: 80, paddingX: 20, align: "center", justify: "between" }, children: [
     View.Column({ style: { grow: 1, gap: 8 }, children: [
       View.Text({ text: item.title, style: { fontSize: "lg", color: "heading", fontWeight: "bold" } }),
       View.Text({ text: item.timestamp ? item.timestamp + "  ·  " + item.detail : "", style: { color: "muted" } }),
@@ -333,10 +334,10 @@ function chart(state) {
   });
 }
 
-function section(title, detail, height, children, onPress) {
+function section(title, detail, children, onPress) {
   return View.Pressable({
     onPress,
-    style: { height, direction: "column" },
+    style: { direction: "column" },
     children: [
       View.SectionHeading({ title, detail, action: true }),
       View.Card({ style: { grow: 1 }, children }),
@@ -366,10 +367,10 @@ function landscapeDashboard(state, accountLabel, pnl) {
           ] }),
           chart(state),
         ] }),
-        View.Row({ style: { height: 36, gap: 8 }, children: [
-          View.Pressable({ onPress: () => setSpan("day"), style: { grow: 1, basis: 0, height: "full", align: "center", justify: "center", radius: 8, background: state.span === "day" ? "accent" : "surface" }, children:
+        View.Row({ style: { gap: 8 }, children: [
+          View.Pressable({ onPress: () => setSpan("day"), style: { grow: 1, basis: 0, height: 36, align: "center", justify: "center", radius: 8, background: state.span === "day" ? "accent" : "surface" }, children:
             View.Text({ text: "1D", style: { color: state.span === "day" ? "white" : "muted", fontWeight: "bold" } }) }),
-          View.Pressable({ onPress: () => setSpan("week"), style: { grow: 1, basis: 0, height: "full", align: "center", justify: "center", radius: 8, background: state.span === "week" ? "accent" : "surface" }, children:
+          View.Pressable({ onPress: () => setSpan("week"), style: { grow: 1, basis: 0, height: 36, align: "center", justify: "center", radius: 8, background: state.span === "week" ? "accent" : "surface" }, children:
             View.Text({ text: "1W", style: { color: state.span === "week" ? "white" : "muted", fontWeight: "bold" } }) }),
           View.Text({ text: state.span === "day" ? "TODAY" : "PAST WEEK", style: { grow: 2, marginTop: 8, color: "muted" } }),
         ] }),
@@ -378,8 +379,8 @@ function landscapeDashboard(state, accountLabel, pnl) {
         ] }),
       ] }),
       View.Column({ style: { grow: 2, basis: 0, gap: 12 }, children: [
-        section("ACTIVITY", "LAST 7 DAYS", 104, [compactActivity(state, 0)], () => model.update({ screen: "activity" })),
-        section("POSITIONS", "", 96, [compactPosition(state, 0)], () => model.update({ screen: "positions" })),
+        section("ACTIVITY", "LAST 7 DAYS", DASHBOARD_PREVIEW_INDICES.map((index) => compactActivity(state, index)), () => model.update({ screen: "activity" })),
+        section("POSITIONS", "", DASHBOARD_PREVIEW_INDICES.map((index) => compactPosition(state, index)), () => model.update({ screen: "positions" })),
         View.Card({ style: { height: 72, paddingX: 16, direction: "row", align: "center", justify: "between" }, children: [
           View.Column({ style: { gap: 8 }, children: [
             View.Text({ text: "REALIZED P&L", style: { color: "heading", fontWeight: "bold" } }),
@@ -416,7 +417,7 @@ function dashboardScreen(state) {
         ],
       }),
       View.Card({
-        style: { grow: 1, minHeight: 291, paddingX: 20, paddingTop: 16 },
+        style: { paddingX: 20, paddingTop: 16 },
         children: [
           View.Row({ style: { height: 64, align: "end", justify: "between" }, children: [
             View.Text({ text: money(dashboard.totalValue), style: { fontSize: "title", color: "heading", fontWeight: "bold" } }),
@@ -425,7 +426,7 @@ function dashboardScreen(state) {
           chart(state),
         ],
       }),
-      View.Row({ style: { height: 44, gap: 12 }, children: [
+      View.Row({ style: { gap: 12 }, children: [
         View.Pressable({ onPress: () => setSpan("day"), style: { width: 100, height: 44, align: "center", justify: "center", radius: 8, background: state.span === "day" ? "accent" : "surface" }, children:
           View.Text({ text: "1D", style: { color: state.span === "day" ? "white" : "muted", fontWeight: "bold" } }) }),
         View.Pressable({ onPress: () => setSpan("week"), style: { width: 100, height: 44, align: "center", justify: "center", radius: 8, background: state.span === "week" ? "accent" : "surface" }, children:
@@ -435,8 +436,8 @@ function dashboardScreen(state) {
       View.Row({ style: { height: 104, gap: 16 }, children: [
         metric("VALUE", dashboard.totalValue), metric("CASH", dashboard.cash), metric("BUY POWER", dashboard.buyingPower),
       ] }),
-      section("ACTIVITY", "LAST 7 DAYS", 194, [compactActivity(state, 0), compactActivity(state, 1)], () => model.update({ screen: "activity" })),
-      section("POSITIONS", "", 180, [compactPosition(state, 0), compactPosition(state, 1)], () => model.update({ screen: "positions" })),
+      section("ACTIVITY", "LAST 7 DAYS", DASHBOARD_PREVIEW_INDICES.map((index) => compactActivity(state, index)), () => model.update({ screen: "activity" })),
+      section("POSITIONS", "", DASHBOARD_PREVIEW_INDICES.map((index) => compactPosition(state, index)), () => model.update({ screen: "positions" })),
       View.Card({
         style: { width: "full", height: 110, paddingX: 20, direction: "row", align: "center", justify: "between" },
         children: [

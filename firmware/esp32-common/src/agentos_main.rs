@@ -311,6 +311,7 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
     }];
     let mut agent_status = "STARTING";
     let mut busy = false;
+    let mut pending_prompt = None;
     let mut initial_prompt = runtime_config.initial_prompt;
     let initial_prompt_not_before =
         Instant::now() + Duration::from_secs(runtime_config.initial_prompt_delay_seconds);
@@ -418,12 +419,12 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
                                 Some("agent.submit") => {
                                     if let Some(prompt) = args.get("prompt").and_then(Value::as_str)
                                     {
-                                        submit_prompt(
+                                        queue_prompt(
                                             prompt.to_owned(),
-                                            &supervisor,
                                             &mut messages,
                                             &mut busy,
                                             &mut agent_status,
+                                            &mut pending_prompt,
                                         );
                                     }
                                 }
@@ -585,12 +586,12 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
                 && initial_prompt.is_none()
             {
                 if let Some(wake) = native_tools.claim_due() {
-                    submit_prompt(
+                    queue_prompt(
                         wake.prompt,
-                        &supervisor,
                         &mut messages,
                         &mut busy,
                         &mut agent_status,
+                        &mut pending_prompt,
                     );
                 }
                 // The ESP32 v1 runtime has one App/SQLite execution owner.
@@ -611,7 +612,7 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
             last_tick = Instant::now();
         }
 
-        if last_system_refresh.elapsed() >= Duration::from_secs(5) {
+        if !busy && last_system_refresh.elapsed() >= Duration::from_secs(5) {
             if supervisor.active_id() == pocket_pi_agentos::ROOT_APP_ID {
                 telemetry.update(supervisor.system_telemetry_visible()?);
                 system_dirty = true;
@@ -638,6 +639,7 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
             );
             supervisor.update_system(&facts)?;
             system_dirty = false;
+            redraw = true;
         }
         if supervisor.active_projection_is_stale() {
             // A background App commit is itself a redraw cause. The check is
@@ -651,6 +653,10 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
         // redundant Agent/App tick calls.
         if redraw || last_runtime_pump.elapsed() >= Duration::from_millis(50) {
             for event in supervisor.frame_render(redraw)? {
+                let show_event = match &event {
+                    AgentEvent::ResponseText(_) => H::SHOW_MODEL_PROGRESS,
+                    _ => true,
+                };
                 match event {
                     AgentEvent::Ready => {
                         log::info!("Pi Agent System App ready with App Tool registry");
@@ -660,8 +666,7 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
                                     c"*".as_ptr(),
                                     esp_idf_svc::sys::esp_log_level_t_ESP_LOG_WARN,
                                 );
-                                // Keep App transport stage boundaries visible on UART without
-                                // restoring noisy global INFO logging or exposing response data.
+                                // Log App transport stage boundaries without exposing response data.
                                 esp_idf_svc::sys::esp_log_level_set(
                                     c"pocket_pi_esp32_common::app_services".as_ptr(),
                                     esp_idf_svc::sys::esp_log_level_t_ESP_LOG_INFO,
@@ -690,8 +695,9 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
                         busy = false;
                     }
                 }
-                redraw = true;
-                system_dirty = true;
+                if show_event {
+                    system_dirty = true;
+                }
             }
             last_runtime_pump = Instant::now();
         }
@@ -705,12 +711,12 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
             && (!wireless_model || network_ready.load(Ordering::Acquire))
         {
             if let Some(prompt) = initial_prompt.take() {
-                submit_prompt(
+                queue_prompt(
                     prompt,
-                    &supervisor,
                     &mut messages,
                     &mut busy,
                     &mut agent_status,
+                    &mut pending_prompt,
                 );
                 redraw = true;
                 system_dirty = true;
@@ -722,6 +728,18 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
                 display.render(&supervisor)?;
             }
             redraw = false;
+        }
+
+        if !touch_was_down && !system_dirty {
+            if let Some(prompt) = pending_prompt.take() {
+                if let Err(error) = supervisor.prompt_agent(&prompt) {
+                    messages.last_mut().unwrap().text = format!("Agent is unavailable: {error:#}");
+                    busy = false;
+                    agent_status = "FAULTED";
+                    system_dirty = true;
+                    redraw = true;
+                }
+            }
         }
 
         // The loading facts is rendered before activation enters QuickJS,
@@ -981,9 +999,16 @@ fn with_psram_pthread_config<T>(
     action: impl FnOnce() -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
     // Large persistent workers use PSRAM stacks. App Action passes this setting
-    // to its NET child; the platform default is restored after each spawn.
+    // to its NET child; the caller's configuration is restored after each spawn.
     let default = unsafe { esp_idf_svc::sys::esp_pthread_get_default_config() };
-    let mut config = default;
+    let mut previous = default;
+    let current = unsafe { esp_idf_svc::sys::esp_pthread_get_cfg(&mut previous) };
+    if current == esp_idf_svc::sys::ESP_ERR_NOT_FOUND {
+        previous = default;
+    } else if current != esp_idf_svc::sys::ESP_OK {
+        anyhow::bail!("read pthread configuration: ESP-IDF error 0x{current:x}");
+    }
+    let mut config = previous;
     config.stack_size = stack_size;
     config.inherit_cfg = true;
     config.pin_to_core = 1;
@@ -994,19 +1019,19 @@ fn with_psram_pthread_config<T>(
         anyhow::bail!("configure PSRAM pthread: ESP-IDF error 0x{configured:x}");
     }
     let result = action();
-    let restored = unsafe { esp_idf_svc::sys::esp_pthread_set_cfg(&default) };
+    let restored = unsafe { esp_idf_svc::sys::esp_pthread_set_cfg(&previous) };
     if restored != esp_idf_svc::sys::ESP_OK {
-        anyhow::bail!("restore pthread defaults: ESP-IDF error 0x{restored:x}");
+        anyhow::bail!("restore pthread configuration: ESP-IDF error 0x{restored:x}");
     }
     result
 }
 
-fn submit_prompt(
+fn queue_prompt(
     prompt: String,
-    supervisor: &AppSupervisor,
     messages: &mut Vec<Message>,
     busy: &mut bool,
     agent_status: &mut &'static str,
+    pending_prompt: &mut Option<String>,
 ) {
     if *busy || prompt.trim().is_empty() {
         return;
@@ -1021,11 +1046,7 @@ fn submit_prompt(
     });
     *busy = true;
     *agent_status = "THINKING";
-    if let Err(error) = supervisor.prompt_agent(&prompt) {
-        messages.last_mut().unwrap().text = format!("Agent is unavailable: {error:#}");
-        *busy = false;
-        *agent_status = "FAULTED";
-    }
+    *pending_prompt = Some(prompt);
 }
 
 fn system_facts(

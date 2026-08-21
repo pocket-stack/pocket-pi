@@ -1,8 +1,8 @@
 /*
  * SPDX-License-Identifier: CC0-1.0
  *
- * Hardware values are derived from Waveshare's ESP32-S3-Touch-LCD-4.3
- * ESP-IDF demo. Pocket Pi removes every LVGL dependency.
+ * Panel and touch values follow Waveshare's ESP32-S3-Touch-LCD-4.3
+ * ESP-IDF board support. PocketJS owns the graphics runtime.
  */
 
 #include "waveshare_s3_board.h"
@@ -10,15 +10,18 @@
 #include "driver/gpio.h"
 #include "driver/i2c.h"
 #include "esp_check.h"
+#include "esp_cpu.h"
+#include "esp_flash_dispatcher.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_rgb.h"
 #include "esp_lcd_touch_gt911.h"
 #include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 #define LCD_WIDTH 800
 #define LCD_HEIGHT 480
-#define LCD_PIXEL_CLOCK_HZ (16 * 1000 * 1000)
+#define LCD_PIXEL_CLOCK_HZ (14 * 1000 * 1000)
 #define LCD_BOUNCE_BUFFER_PIXELS (LCD_WIDTH * 10)
 
 #define I2C_PORT I2C_NUM_0
@@ -29,6 +32,72 @@
 
 static const char *TAG = "pi_s3_board";
 static bool i2c_initialized;
+static portMUX_TYPE frame_lock = portMUX_INITIALIZER_UNLOCKED;
+static StaticSemaphore_t frame_semaphore_storage;
+static SemaphoreHandle_t frame_semaphore;
+static volatile uint32_t completed_frames;
+static volatile uint32_t vsync_count;
+static volatile uint32_t frame_count;
+static volatile uint32_t max_vsync_cycles;
+static volatile uint32_t max_frame_cycles;
+static volatile uint32_t last_vsync_cycle;
+static volatile uint32_t last_frame_cycle;
+
+esp_err_t pi_s3_flash_dispatcher_init(void)
+{
+    const esp_flash_dispatcher_config_t config = ESP_FLASH_DISPATCHER_DEFAULT_CONFIG;
+    return esp_flash_dispatcher_init(&config);
+}
+
+static void IRAM_ATTR record_scan_event(
+    volatile uint32_t *count,
+    volatile uint32_t *last_cycle,
+    volatile uint32_t *max_cycles
+)
+{
+    const uint32_t now = esp_cpu_get_cycle_count();
+    if (*last_cycle != 0) {
+        const uint32_t elapsed = now - *last_cycle;
+        if (elapsed > *max_cycles) {
+            *max_cycles = elapsed;
+        }
+    }
+    *last_cycle = now;
+    (*count)++;
+}
+
+static bool IRAM_ATTR on_vsync(
+    esp_lcd_panel_handle_t panel,
+    const esp_lcd_rgb_panel_event_data_t *event_data,
+    void *user_context
+)
+{
+    (void)panel;
+    (void)event_data;
+    (void)user_context;
+    portENTER_CRITICAL_ISR(&frame_lock);
+    record_scan_event(&vsync_count, &last_vsync_cycle, &max_vsync_cycles);
+    portEXIT_CRITICAL_ISR(&frame_lock);
+    return false;
+}
+
+static bool IRAM_ATTR on_frame_complete(
+    esp_lcd_panel_handle_t panel,
+    const esp_lcd_rgb_panel_event_data_t *event_data,
+    void *user_context
+)
+{
+    (void)panel;
+    (void)event_data;
+    (void)user_context;
+    portENTER_CRITICAL_ISR(&frame_lock);
+    record_scan_event(&frame_count, &last_frame_cycle, &max_frame_cycles);
+    completed_frames++;
+    portEXIT_CRITICAL_ISR(&frame_lock);
+    BaseType_t task_woken = pdFALSE;
+    xSemaphoreGiveFromISR(frame_semaphore, &task_woken);
+    return task_woken == pdTRUE;
+}
 
 static esp_err_t init_i2c(void)
 {
@@ -83,14 +152,20 @@ static esp_err_t reset_touch(void)
 esp_err_t pi_s3_board_init(
     esp_lcd_panel_handle_t *panel,
     esp_lcd_touch_handle_t *touch,
-    uint16_t **framebuffer
+    uint16_t **framebuffer_0,
+    uint16_t **framebuffer_1
 )
 {
-    ESP_RETURN_ON_FALSE(panel && touch && framebuffer, ESP_ERR_INVALID_ARG, TAG, "invalid output");
+    ESP_RETURN_ON_FALSE(
+        panel && touch && framebuffer_0 && framebuffer_1,
+        ESP_ERR_INVALID_ARG,
+        TAG,
+        "invalid output"
+    );
     *panel = NULL;
     *touch = NULL;
-    *framebuffer = NULL;
-
+    *framebuffer_0 = NULL;
+    *framebuffer_1 = NULL;
     const esp_lcd_rgb_panel_config_t panel_config = {
         .clk_src = LCD_CLK_SRC_DEFAULT,
         .timings = {
@@ -109,7 +184,7 @@ esp_err_t pi_s3_board_init(
         },
         .data_width = 16,
         .bits_per_pixel = 16,
-        .num_fbs = 1,
+        .num_fbs = 2,
         .bounce_buffer_size_px = LCD_BOUNCE_BUFFER_PIXELS,
         .sram_trans_align = 4,
         .psram_trans_align = 64,
@@ -129,11 +204,27 @@ esp_err_t pi_s3_board_init(
         },
     };
     ESP_RETURN_ON_ERROR(esp_lcd_new_rgb_panel(&panel_config, panel), TAG, "create RGB panel");
+    frame_semaphore = xSemaphoreCreateBinaryStatic(&frame_semaphore_storage);
+    ESP_RETURN_ON_FALSE(frame_semaphore, ESP_ERR_NO_MEM, TAG, "create frame semaphore");
+    const esp_lcd_rgb_panel_event_callbacks_t callbacks = {
+        .on_vsync = on_vsync,
+        .on_frame_buf_complete = on_frame_complete,
+    };
+    ESP_RETURN_ON_ERROR(
+        esp_lcd_rgb_panel_register_event_callbacks(*panel, &callbacks, NULL),
+        TAG,
+        "register frame callback"
+    );
     ESP_RETURN_ON_ERROR(esp_lcd_panel_init(*panel), TAG, "initialize RGB panel");
     ESP_RETURN_ON_ERROR(
-        esp_lcd_rgb_panel_get_frame_buffer(*panel, 1, (void **)framebuffer),
+        esp_lcd_rgb_panel_get_frame_buffer(
+            *panel,
+            2,
+            (void **)framebuffer_0,
+            (void **)framebuffer_1
+        ),
         TAG,
-        "get RGB framebuffer"
+        "get RGB framebuffers"
     );
 
     ESP_RETURN_ON_ERROR(init_i2c(), TAG, "initialize I2C");
@@ -167,6 +258,65 @@ esp_err_t pi_s3_backlight_on(void)
     ESP_RETURN_ON_ERROR(init_i2c(), TAG, "initialize I2C");
     ESP_RETURN_ON_ERROR(write_expander(0x24, 0x01), TAG, "configure CH422G mode");
     return write_expander(0x38, 0x1e);
+}
+
+esp_err_t pi_s3_present(esp_lcd_panel_handle_t panel, const uint16_t *framebuffer)
+{
+    ESP_RETURN_ON_FALSE(
+        panel && framebuffer && frame_semaphore,
+        ESP_ERR_INVALID_ARG,
+        TAG,
+        "invalid present"
+    );
+
+    portENTER_CRITICAL(&frame_lock);
+    const uint32_t start_frame = completed_frames;
+    const esp_err_t result = esp_lcd_panel_draw_bitmap(
+        panel,
+        0,
+        0,
+        LCD_WIDTH,
+        LCD_HEIGHT,
+        framebuffer
+    );
+    portEXIT_CRITICAL(&frame_lock);
+    if (result != ESP_OK) {
+        return result;
+    }
+
+    while (true) {
+        portENTER_CRITICAL(&frame_lock);
+        const bool complete = completed_frames != start_frame;
+        portEXIT_CRITICAL(&frame_lock);
+        if (complete) {
+            return ESP_OK;
+        }
+        if (xSemaphoreTake(frame_semaphore, pdMS_TO_TICKS(100)) != pdTRUE) {
+            ESP_RETURN_ON_ERROR(
+                esp_lcd_rgb_panel_restart(panel),
+                TAG,
+                "restart delayed RGB frame"
+            );
+        }
+    }
+}
+
+bool pi_s3_take_scan_stats(pi_s3_scan_stats_t *stats)
+{
+    if (!stats) {
+        return false;
+    }
+    portENTER_CRITICAL(&frame_lock);
+    stats->vsync_count = vsync_count;
+    stats->frame_count = frame_count;
+    stats->max_vsync_cycles = max_vsync_cycles;
+    stats->max_frame_cycles = max_frame_cycles;
+    vsync_count = 0;
+    frame_count = 0;
+    max_vsync_cycles = 0;
+    max_frame_cycles = 0;
+    portEXIT_CRITICAL(&frame_lock);
+    return stats->vsync_count != 0 || stats->frame_count != 0;
 }
 
 bool pi_s3_touch_read(esp_lcd_touch_handle_t touch, uint16_t *x, uint16_t *y)

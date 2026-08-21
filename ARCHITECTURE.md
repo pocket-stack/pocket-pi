@@ -5,17 +5,19 @@ devices. The Agent is a resident system actor with a persistent workspace,
 native capabilities, schedules and Agent-native Apps—not a desktop application
 or a generic Agent SDK.
 
-The current implementation has one supported hardware target and one companion
+The current implementation has two hardware targets and one companion
 development tool:
 
 | Role | Composition | Status |
 | --- | --- | --- |
 | Reference hardware | `firmware/esp32-p4` | ESP32-P4 is the first fully supported Pocket Pi target |
+| Supported hardware | `firmware/esp32-s3` | Waveshare ESP32-S3-Touch-LCD-4.3 with a 480x800 logical viewport |
 | Development simulator | `hosts/esp32-p4-sim` | Runs the ESP32-P4 product contracts on macOS; not a desktop product or hardware target |
 
-Both compositions use the same resident `pi-agent-core` System App and ordinary
-App source. The simulator substitutes development adapters; only the physical
-composition proves hardware behavior.
+All compositions use the same resident `pi-agent-core` System App and ordinary
+App source. The firmware targets share the AgentOS host loop in
+`firmware/esp32-common` and provide separate board adapters. The simulator
+substitutes development adapters; only physical hardware proves board behavior.
 
 The authoritative detailed design is
 [`docs/agentos-architecture.md`](docs/agentos-architecture.md).
@@ -41,8 +43,8 @@ The authoritative detailed design is
 - `crates/pocket-pi-protocols` owns model/provider transport protocols.
 - Hosts own hardware, transport, credentials, and rendering adapters.
 
-There is no legacy Rust product UI or general-purpose desktop runtime. The
-simulator and ESP32-P4 render the same PocketJS Views. Each host supplies one
+There is no Rust product UI or general-purpose desktop runtime. The simulator,
+ESP32-P4 and ESP32-S3 render the same PocketJS Views. Each host supplies one
 logical viewport to `AppSupervisor`; the shared View SDK exposes it to Apps as
 `View.viewport`. Rust firmware supplies the display/touch driver and renders
 the selected App's DrawList, but does not choose the App layout.
@@ -56,9 +58,9 @@ or replace the Agent. Model and native Tool transport complete asynchronously
 and return events to that persistent Guest.
 
 Ordinary View and Action Guests load on demand and use separate three-entry
-LRU caches. Only the foreground View ticks or renders. On ESP32-P4, App QuickJS
-heaps and large worker stacks allocate explicitly from PSRAM without changing
-the platform-wide `malloc()` policy.
+LRU caches. Only the foreground View ticks or renders. On both firmware targets,
+App QuickJS heaps and large worker stacks allocate explicitly from PSRAM without
+changing the platform-wide `malloc()` policy.
 
 Uninstall is the reverse of ordinary App activation inside the same
 `AppSupervisor`: it removes the App's Tool routes, schedules, cached View/Action
@@ -77,7 +79,9 @@ crates/pocket-pi-embedded/  embedded pi-agent-core bridge and host traits
 crates/pocket-pi-tools/     native workspace/shell/time/schedule Tools
 crates/pocket-pi-protocols/ provider codecs
 hosts/esp32-p4-sim/         macOS development simulator for ESP32-P4 contracts
+firmware/esp32-common/      shared ESP-IDF AgentOS host loop and services
 firmware/esp32-p4/          first supported target and reference implementation
+firmware/esp32-s3/          Waveshare ESP32-S3-Touch-LCD-4.3 board host
 tools/uart_io.py            shared raw UART read/write helpers
 tools/uart-provision.py     one-time wireless model provisioning
 tools/uart-install.py       App package ingress over UART
@@ -92,13 +96,13 @@ cargo xtask build pi-agent
 cargo xtask package app exa path/to/exa-credentials.json
 cargo xtask package app robinhood path/to/robinhood-credentials.json
 cargo xtask build esp32-p4
+cargo xtask build esp32-s3
 cargo xtask build esp32-p4-sim
 cargo xtask run esp32-p4-sim
 cargo xtask snapshot esp32-p4-sim
 ```
 
 Simulator proof, firmware compilation, and physical-board proof are separate
-evidence tiers. ESP32-P4 is the current reference hardware and physical-board
-proof remains its final acceptance tier. Future device targets must provide
-their own native composition and physical validation without moving product
-logic into firmware.
+evidence tiers. ESP32-P4 remains the reference target; ESP32-S3 has its own
+physical acceptance tier. Additional targets must provide a board host and
+physical validation without moving product logic into firmware.

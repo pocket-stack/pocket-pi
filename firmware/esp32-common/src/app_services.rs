@@ -793,10 +793,8 @@ fn read_sse_event(
     deadline: Instant,
 ) -> Result<Vec<u8>, String> {
     let mut out = Vec::with_capacity(8 * 1024);
-    // Stop after the first complete SSE event because the server keeps this
-    // connection alive. Reading one byte at a time made a normal MCP payload
-    // expensive enough to trip the ESP32 task watchdog, so consume the bytes
-    // already available from esp_http_client in bounded chunks instead.
+    // Consume available bytes in bounded chunks and stop after the first
+    // complete SSE event; the server keeps the connection alive afterward.
     let mut chunk = [0u8; 512];
     loop {
         remaining(deadline)?;

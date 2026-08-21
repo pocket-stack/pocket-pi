@@ -5,21 +5,21 @@ reference implementation. It demonstrates the complete device runtime:
 resident Pi Agent, `/workspace`, native tools, schedules, Agent-native Apps,
 local state, PocketJS UI and native device lifecycle.
 
-The repository also provides one companion development composition:
+The repository provides two hardware compositions and one companion simulator:
 
 | Role | Implementation | Runs on |
 |---|---|---|
-| Supported hardware target | `firmware/esp32-p4` | ESP32-P4 |
+| Reference hardware target | `firmware/esp32-p4` | ESP32-P4 |
+| Supported hardware target | `firmware/esp32-s3` | ESP32-S3 |
 | Product-contract simulator | `hosts/esp32-p4-sim` | macOS development host |
 
-The physical host and simulator use the same ordinary App source and
-`pocket-pi-agentos` supervisor. The ESP32-P4 host supplies its 720x1280 logical
-viewport; the simulator defaults to that value and accepts `--viewport
-WIDTHxHEIGHT` for another screen shape. Simulator mouse clicks and physical
-touch coordinates are both dispatched in the selected View's logical viewport.
-The Pi Agent Root View displays Chat, Apps, Files and Settings; there is no
-parallel Rust product UI. The simulator is not a desktop Pocket Pi product, a
-generic Agent harness or a second supported target.
+Both physical hosts and the simulator use the same ordinary App source and
+`pocket-pi-agentos` supervisor. ESP32-P4 supplies a 720x1280 logical viewport,
+ESP32-S3 supplies a rotated 480x800 logical viewport, and the simulator accepts
+`--viewport WIDTHxHEIGHT`. Simulator mouse clicks and physical touch coordinates
+are dispatched in the selected View's logical viewport. The Pi Agent Root View
+displays Chat, Apps, Files and Settings; there is no parallel Rust product UI.
+The simulator is not a desktop Pocket Pi product or a hardware target.
 
 The physical host selects `UartBackend` for a Mac Codex/Claude Code bridge or
 `WirelessBackend` for direct OpenAI/OpenRouter/Anthropic/DeepSeek HTTPS. These remain
@@ -32,6 +32,7 @@ itself.
 
 ```sh
 cargo xtask build esp32-p4
+cargo xtask build esp32-s3
 cargo xtask build esp32-p4-sim
 cargo xtask run esp32-p4-sim
 cargo xtask snapshot esp32-p4-sim
@@ -108,9 +109,9 @@ espflash monitor --port /dev/cu.usbserial-...
 espflash reset --port /dev/cu.usbserial-... --non-interactive
 ```
 
-For unprovisioned development-board bring-up, the optional model bridge can
-still route requests
-to a logged-in Mac Codex or Claude Code without persisting that backend:
+For unprovisioned development-board bring-up, the optional model bridge routes
+requests to a logged-in Mac Codex or Claude Code without persisting that
+backend:
 
 All UART CLIs leave DTR/RTS inactive before closing the port so the WCH USB
 serial bridge does not reset a running board.
@@ -151,11 +152,13 @@ The runtime reports that viewport to every View Guest, and the shared View SDK
 turns it into `View.viewport`. The SDK derives one geometry scale from the
 720x1280 portrait or 800x480 landscape reference canvas, preserves physical
 font and interaction minimums, and passes the scaled geometry to PocketJS.
-Apps only select a portrait stack or landscape columns; they do not contain
-board or resolution branches. Shared components own reusable geometry such as
-headers, navigation, keyboard, buttons and chart drawing. A board port must not
-add a board-specific App fork or a second Rust UI.
+Apps select a portrait stack or landscape columns and may reduce repeated
+preview content when the reported scale is below the reference canvas; they do
+not contain board or resolution branches. Shared components own reusable
+geometry such as headers, navigation, keyboard, buttons and chart drawing. A
+board port must not add a board-specific App fork or a second Rust UI.
 
-The exact ESP32-S3 firmware work still depends on the selected module, panel
-bus/controller, touch controller, PSRAM and flash layout. Those are host adapter
-inputs; they do not change the Viewport or App contract above.
+The Waveshare ESP32-S3-Touch-LCD-4.3 host implements those adapters for its
+800x480 RGB panel, GT911 touch controller, integrated Wi-Fi and 8 MB PSRAM. It
+reports a 480x800 logical viewport after rotation without changing the Viewport
+or App contract above.

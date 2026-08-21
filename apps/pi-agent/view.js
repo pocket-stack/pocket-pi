@@ -6,7 +6,11 @@
   const CHAT_VISIBLE_TURNS = LANDSCAPE ? 1 : 2;
   const CHAT_TEXT_WIDTH = View.viewport.width * (LANDSCAPE ? 0.42 : 0.74);
   const READER_TEXT_WIDTH = View.viewport.width * (LANDSCAPE ? 0.82 : 0.76);
-  const READER_PAGE_LINES = LANDSCAPE ? 12 : 36;
+  const READER_LINE_HEIGHT = 24;
+  const READER_CHROME_HEIGHT = 274;
+  const READER_PAGE_LINES = LANDSCAPE
+    ? 12
+    : Math.min(36, Math.max(1, Math.floor((View.viewport.height - READER_CHROME_HEIGHT * View.viewport.scale) / READER_LINE_HEIGHT)));
   const FILE_PAGE_LINES = LANDSCAPE ? 12 : 39;
   const APP_VISIBLE_ROWS = LANDSCAPE ? 1 : 4;
   const FILE_VISIBLE_ROWS = LANDSCAPE ? 2 : 7;
@@ -226,8 +230,7 @@
     const error = uninstallError.get();
     const status = error ? `UNINSTALL FAILED  ·  ${error}` : busy
       ? `UNINSTALLING ${busy.toUpperCase()}...`
-      : LANDSCAPE ? "APP DATA IS ISOLATED.  PI CAN USE APP TOOLS."
-        : "APP DATA STAYS ISOLATED.  PI AGENT CAN USE EACH APP'S TOOLS.";
+      : "APP DATA STAYS ISOLATED";
     const appList = View.Column({ style: { grow: 1 }, children: installed.length
       ? View.Row({ style: { grow: 1, gap: LANDSCAPE ? 12 : 20 }, children: [
         View.Column({ style: { grow: 1, gap: 16 }, children: installed.slice(offset, offset + APP_VISIBLE_ROWS).map(appRow) }),
@@ -392,10 +395,10 @@
       View.Column({ style: { grow: 1, padding: 24, gap: 12 }, children: [
         View.Box({ style: { height: 82, paddingX: 16, justify: "center", background: "surface" }, children:
           View.Text({ text: current?.author ?? "PI", style: { color: "accent", fontSize: "lg", fontWeight: "bold" } }) }),
-        View.Row({ style: { grow: 1, gap: 20 }, children: [
+        View.Row({ style: { grow: 1, gap: 20, overflow: "hidden" }, children: [
           View.Box({ style: { grow: 1, paddingX: 20, paddingTop: 20, background: "surface" }, children:
             View.Text({ text: current ? current.lines.slice(offset, offset + READER_PAGE_LINES).join("\n") : "", style: { fontSize: "xl" } }) }),
-          scrollable ? View.ScrollRail({ onUp: () => moveReader(-18), onDown: () => moveReader(18) }) : null,
+          scrollable ? View.ScrollRail({ onUp: () => moveReader(-18), onDown: () => moveReader(18), style: { height: "full" } }) : null,
         ] }),
       ] }),
     ] });

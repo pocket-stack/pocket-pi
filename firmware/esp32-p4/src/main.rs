@@ -83,6 +83,7 @@ impl DeviceHost for P4Host {
     const BOARD_NAME: &'static str = "Waveshare ESP32-P4-WIFI6-Touch-LCD-5";
     const FIRMWARE_VERSION: &'static str = env!("CARGO_PKG_VERSION");
     const VIEWPORT: Viewport = DISPLAY_VIEWPORT;
+    const SHOW_MODEL_PROGRESS: bool = true;
 
     fn init_wifi(
         nvs: EspDefaultNvsPartition,

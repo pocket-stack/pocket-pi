@@ -13,7 +13,7 @@ name = "pocket-pi-s3"
 harness = false
 
 [profile.release]
-opt-level = "s"
+opt-level = 2
 lto = "fat"
 codegen-units = 1
 
@@ -38,3 +38,6 @@ bindings_header = "src/waveshare_bindings.h"
 
 [[package.metadata.esp-idf-sys.extra_components]]
 remote_component = { name = "joltwallet/littlefs", version = "1.14.*" }
+
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "espressif/esp_flash_dispatcher", version = "1.0.3" }

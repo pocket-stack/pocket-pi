@@ -1,6 +1,6 @@
 # Pi Design component inventory
 
-状态：v0.4。Pi Design 是 Pocket Pi Apps 的全局视觉语言；各 App 不再各自维护一套
+状态：v0.5。Pi Design 是 Pocket Pi Apps 的全局视觉语言；各 App 不再各自维护一套
 Header、按钮、空状态或字号层级。
 
 Pi Agent 与普通 Source App 都使用 `system/view-sdk.js` 中的同一套 `View.*`
@@ -35,16 +35,18 @@ body 16→18px；不会引入 runtime font loader 或第二套字体。
 | `View.EmptyState` | optional icon、title、detail、regular/compact layout | empty 条件、retry action | ordinary Apps |
 | `View.MetricCard` | metric label、formatted value、optional tone | 数值计算、currency formatting | ordinary Apps |
 | `View.StatusBar` | 单行 runtime status、neutral/error tone | log history、progress model、retry | Pi Agent / ordinary Apps |
-| `View.ScrollButton` | UP/DN controls 的统一文字和视觉 | offset、pagination | Pi Agent / ordinary Apps |
+| `View.NavigationBar` | 等宽 navigation item、active state、横竖屏高度 | tab state、navigation policy | Pi Agent |
+| `View.ScrollButton` / `View.ScrollRail` | UP/DN controls 的统一文字、尺寸和排列 | offset、pagination | Pi Agent / ordinary Apps |
 | `View.Keyboard` | letters/symbols layers、通用 key events、按压反馈 | 输入内容、发送、Wi-Fi 等业务语义 | Pi Agent / ordinary Apps |
+| `View.Sparkline` | viewport-aware plot geometry、points、segments、axis labels | domain values、range selection、financial semantics | ordinary Apps |
 | `wrapLines` / `wrapPreview` / `wrapTextPage` | `measureText` 缓存、显式换行、preview ellipsis、按字符游标只物化可见文件页 | rich text、Markdown、scroll state | Pi Agent dynamic text / Files viewer |
 
 ## App-owned components
 
 这些组件仍含明确业务语义，不进入 Pi Design：
 
-- Pi Agent conversation turn、Bottom Navigation、Files row、App row；
-- Robinhood 20-point chart、time-range selector、account picker、activity row、
+- Pi Agent conversation turn、Files row、App row；
+- Robinhood chart data、time-range selector、account picker、activity row、
   position row、P&L projection；
 - Exa search-history query、result projection 和 retention state。
 

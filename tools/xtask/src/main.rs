@@ -19,7 +19,7 @@ fn main() -> Result<()> {
     let target = args.next();
     let rest = args.collect::<Vec<_>>();
     match (command_name.as_deref(), target.as_deref()) {
-        (Some("build"), Some("pi-agent")) => build_system_assets(&root),
+        (Some("build"), Some("pi-agent")) => build_embedded_guest(&root),
         (Some("build"), Some("view-sdk")) => {
             let pocketjs = pocketjs_checkout(&root)?;
             build_view_sdk(&root, &pocketjs)
@@ -28,31 +28,31 @@ fn main() -> Result<()> {
             let app = rest.first().context("package app requires an App id")?;
             package_source_app(&root, app, rest.get(1).map(PathBuf::from).as_deref())
         }
-        (Some("build"), Some("esp32-p4")) => {
-            build_system_assets(&root)?;
-            command(
-                Command::new("rustup")
-                    .current_dir(root.join("firmware/esp32-p4"))
-                    .args([
-                        "run",
-                        "nightly-2026-05-01",
-                        "./tools/cargo-esp32p4",
-                        "build",
-                        "--release",
-                    ]),
-                "building ESP32-P4 firmware",
-            )
-        }
+        (Some("build"), Some("esp32-p4")) => command(
+            Command::new("rustup")
+                .current_dir(root.join("firmware/esp32-p4"))
+                .args([
+                    "run",
+                    "nightly-2026-05-01",
+                    "./tools/cargo-esp32p4",
+                    "build",
+                    "--release",
+                ]),
+            "building ESP32-P4 firmware",
+        ),
+        (Some("build"), Some("esp32-s3")) => command(
+            Command::new("rustup")
+                .current_dir(root.join("firmware/esp32-s3"))
+                .args(["run", "esp", "./tools/cargo-esp32s3", "build", "--release"]),
+            "building ESP32-S3 firmware",
+        ),
         (Some("build"), Some("esp32-p4-sim")) => {
-            build_system_assets(&root)?;
             cargo(&root, ["build", "-p", "pocket-pi-esp32-p4-sim"])
         }
         (Some("run"), Some("esp32-p4-sim")) => {
-            build_system_assets(&root)?;
             cargo_with_args(&root, ["run", "-p", "pocket-pi-esp32-p4-sim", "--"], &rest)
         }
         (Some("snapshot"), Some("esp32-p4-sim")) => {
-            build_system_assets(&root)?;
             let output = root.join("artifacts/screenshots/esp32-p4-sim.png");
             std::fs::create_dir_all(output.parent().unwrap())?;
             cargo_with_args(
@@ -63,17 +63,11 @@ fn main() -> Result<()> {
         }
         _ => {
             eprintln!(
-                "usage:\n  cargo xtask build pi-agent|view-sdk|esp32-p4|esp32-p4-sim\n  cargo xtask package app <id> [credentials.json]\n  cargo xtask run esp32-p4-sim [args]\n  cargo xtask snapshot esp32-p4-sim"
+                "usage:\n  cargo xtask build pi-agent|view-sdk|esp32-p4|esp32-s3|esp32-p4-sim\n  cargo xtask package app <id> [credentials.json]\n  cargo xtask run esp32-p4-sim [args]\n  cargo xtask snapshot esp32-p4-sim"
             );
             bail!("unknown xtask command")
         }
     }
-}
-
-fn build_system_assets(root: &Path) -> Result<()> {
-    build_embedded_guest(root)?;
-    let pocketjs = pocketjs_checkout(root)?;
-    build_view_sdk(root, &pocketjs)
 }
 
 fn pocketjs_checkout(root: &Path) -> Result<PathBuf> {
