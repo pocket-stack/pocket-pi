@@ -1,0 +1,19 @@
+[build]
+target = "xtensa-esp32s3-espidf"
+
+[target.'cfg(target_os = "espidf")']
+linker = "ldproxy"
+runner = "espflash flash --monitor"
+rustflags = ["--cfg", "espidf_time64"]
+
+[unstable]
+build-std = ["std", "panic_abort"]
+
+[env]
+MCU = "esp32s3"
+ESP_IDF_VERSION = "v5.5.3"
+ESP_IDF_TOOLS_INSTALL_DIR = "workspace"
+CC_xtensa_esp32s3_espidf = { value = "tools/esp32s3-cc", relative = true }
+AR_xtensa_esp32s3_espidf = { value = "tools/esp32s3-ar", relative = true }
+CFLAGS_xtensa_esp32s3_espidf = "-mlongcalls -fno-pic -fno-PIC -fno-strict-aliasing -Wno-error=incompatible-pointer-types"
+LIBSQLITE3_FLAGS = "-DSQLITE_TEMP_STORE=3 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_MAX_MMAP_SIZE=0 -DSQLITE_OMIT_WAL -DSQLITE_OMIT_LOAD_EXTENSION -Dlstat=stat"

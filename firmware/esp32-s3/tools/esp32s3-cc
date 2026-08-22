@@ -1,0 +1,15 @@
+#!/bin/sh
+
+set -eu
+
+firmware_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+for compiler in \
+    "$firmware_root"/.embuild/espressif/tools/xtensa-esp-elf/*/xtensa-esp-elf/bin/xtensa-esp32s3-elf-gcc
+do
+    if [ -x "$compiler" ]; then
+        exec "$compiler" -isystem "$firmware_root/shim" "$@"
+    fi
+done
+
+echo "ESP32-S3 GCC is missing; build esp-idf-sys once to install the toolchain" >&2
+exit 1

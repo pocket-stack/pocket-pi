@@ -1,6 +1,7 @@
 const HISTORY_PAGE_SIZE = 10;
 const HISTORY_MAX_ROWS = 50;
-const HISTORY_VISIBLE_ROWS = 6;
+const LANDSCAPE = View.viewport.orientation === "landscape";
+const HISTORY_VISIBLE_ROWS = LANDSCAPE ? 1 : 6;
 
 const model = View.state({
   history: [],
@@ -54,9 +55,9 @@ const historyProjection = PocketPi.projection.many(
 
 function historyCard(item) {
   return View.Card({
-    style: { height: 126, paddingX: 20, direction: "row", align: "center", justify: "between" },
+    style: { width: "full", height: 126, paddingX: 20, direction: "row", align: "center", justify: "between" },
     children: [
-      View.Column({ style: { grow: 1, gap: 8 }, children: [
+      View.Column({ style: { grow: 1, basis: 0, gap: 8, overflow: "hidden" }, children: [
         View.Text({ text: item.query.slice(0, 48), style: { fontSize: "lg", fontWeight: "bold", color: "heading" } }),
         View.Text({ text: (item.top_title || item.error || "No result title").slice(0, 58), style: { color: "muted" } }),
         View.Text({ text: searchTime(item.searched_at), style: { color: "info", fontWeight: "bold" } }),
@@ -86,7 +87,7 @@ function render() {
       description: "Every research.search call is saved here automatically.",
       tone: "info",
     }),
-    View.Column({ style: { grow: 1, paddingX: 24, paddingY: 16 }, children: state.history.length === 0
+    View.Column({ style: { grow: 1, paddingX: LANDSCAPE ? 16 : 24, paddingY: LANDSCAPE ? 8 : 16 }, children: state.history.length === 0
       ? View.EmptyState({
         style: { height: "full" },
         icon: "E",
@@ -95,10 +96,10 @@ function render() {
         tone: "info",
       })
       : View.Row({ style: { gap: 20 }, children: [
-        View.Column({ style: { grow: 1, gap: 12 }, children: visible.map(historyCard) }),
+        View.Column({ style: { grow: 1, basis: 0, gap: 12 }, children: visible.map(historyCard) }),
         scrollable ? View.ScrollRail({ onUp: () => scrollHistory(-1), onDown: () => scrollHistory(1) }) : null,
       ] }) }),
-    View.Box({ style: { height: 96 }, children: View.StatusBar({
+    View.Box({ style: { height: LANDSCAPE ? 52 : 96 }, children: View.StatusBar({
       text: state.status,
       tone: state.status.includes("FAILED") ? "danger" : "neutral",
       dark: true,

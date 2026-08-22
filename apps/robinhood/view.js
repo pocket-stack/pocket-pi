@@ -5,6 +5,11 @@ const BLANK_ACTIVITY = { ...EMPTY_ACTIVITY, title: "" };
 const EMPTY_POSITION = { symbol: "NO OPEN POSITIONS", quantity: "", averagePrice: "", marketValue: "" };
 const UNAVAILABLE_POSITION = { ...EMPTY_POSITION, symbol: "POSITIONS UNAVAILABLE" };
 const BLANK_POSITION = { ...EMPTY_POSITION, symbol: "" };
+const LANDSCAPE = View.viewport.orientation === "landscape";
+const DASHBOARD_PREVIEW_INDICES = LANDSCAPE || View.viewport.scale < 1 ? [0] : [0, 1];
+const ACCOUNT_VISIBLE_ROWS = LANDSCAPE ? 3 : 8;
+const ACTIVITY_VISIBLE_ROWS = LANDSCAPE ? 3 : 8;
+const POSITION_VISIBLE_ROWS = LANDSCAPE ? 3 : 9;
 const EMPTY_DASHBOARD = {
   account: EMPTY_ACCOUNT,
   totalValue: null,
@@ -25,8 +30,7 @@ const model = View.state({
   accounts: [],
   selectedAccount: "",
   dashboard: EMPTY_DASHBOARD,
-  chartPoints: [],
-  chartSegments: [],
+  chartValues: [],
   chartLabels: [],
   chartTrend: { change: "$—", percent: "—", positive: true },
   accountScroll: 0,
@@ -83,7 +87,7 @@ function relativeTime(seconds) {
 
 function loadAccount(accountNumber) {
   if (!accountNumber) {
-    model.update({ dashboard: EMPTY_DASHBOARD, chartPoints: [], chartSegments: [], status: "WAITING FOR ROBINHOOD" });
+    model.update({ dashboard: EMPTY_DASHBOARD, chartValues: [], status: "WAITING FOR ROBINHOOD" });
     return;
   }
   const dashboard = dashboardCache.get(accountNumber) ?? EMPTY_DASHBOARD;
@@ -167,30 +171,15 @@ function applyChart(rows) {
     const pnl = state.span === "day" ? state.dashboard.pnlDay : state.dashboard.pnlWeek;
     const value = number(pnl);
     model.update({
-      chartPoints: [],
-      chartSegments: [],
+      chartValues: buckets.map((bucket) => bucket.value),
       chartLabels: labels,
       chartTrend: { change: money(pnl), percent: "—", positive: value === null || value >= 0 },
     });
     return;
   }
-  const low = Math.min(...values);
-  const high = Math.max(...values);
-  const range = Math.max(0.01, high - low);
-  const points = buckets.flatMap((bucket, index) => bucket.value === null ? [] : [{
-    x: index * 622 / 19,
-    y: values.length === 1 ? 80 : 10 + (high - bucket.value) * 140 / range,
-  }]);
-  const segments = points.slice(1).map((point, index) => {
-    const previous = points[index];
-    const dx = point.x - previous.x;
-    const dy = point.y - previous.y;
-    return { x: previous.x, y: previous.y, width: Math.sqrt(dx * dx + dy * dy), angle: Math.atan2(dy, dx) * 180 / Math.PI };
-  });
   const delta = values[values.length - 1] - values[0];
   model.update({
-    chartPoints: points,
-    chartSegments: segments,
+    chartValues: buckets.map((bucket) => bucket.value),
     chartLabels: labels,
     chartTrend: {
       change: money(String(delta)),
@@ -283,9 +272,9 @@ function refreshPortfolio() {
 function scroll(screen, direction) {
   const state = model.get();
   const config = {
-    accounts: ["accountScroll", state.accounts.length, 8],
-    activity: ["activityScroll", state.dashboard.activity.length, 8],
-    positions: ["positionScroll", state.dashboard.positions.length, 9],
+    accounts: ["accountScroll", state.accounts.length, ACCOUNT_VISIBLE_ROWS],
+    activity: ["activityScroll", state.dashboard.activity.length, ACTIVITY_VISIBLE_ROWS],
+    positions: ["positionScroll", state.dashboard.positions.length, POSITION_VISIBLE_ROWS],
   }[screen];
   const [key, length, visible] = config;
   model.update({ [key]: Math.max(0, Math.min(Math.max(0, length - visible), state[key] + direction)) });
@@ -313,7 +302,7 @@ function activityPreview(state, index) {
 
 function compactActivity(state, index) {
   const item = activityPreview(state, index);
-  return View.Row({ style: { height: 72, paddingX: 20, align: "center", justify: "between" }, children: [
+  return View.Row({ style: { height: 80, paddingX: 20, align: "center", justify: "between" }, children: [
     View.Column({ style: { grow: 1, gap: 8 }, children: [
       View.Text({ text: item.title, style: { fontSize: "lg", color: "heading", fontWeight: "bold" } }),
       View.Text({ text: item.timestamp ? item.timestamp + "  ·  " + item.detail : "", style: { color: "muted" } }),
@@ -337,33 +326,75 @@ function compactPosition(state, index) {
 }
 
 function chart(state) {
-  const tone = state.chartTrend.positive ? "success" : "danger";
-  return View.Column({ style: { width: 632, height: 196 }, children: [
-    View.Box({ style: { position: "relative", width: 632, height: 160, overflow: "hidden" }, children: [
-      View.Box({ style: { position: "absolute", left: 0, top: 158, width: 632, height: 2, background: "disabled" } }),
-      state.chartPoints.length < 2 ? View.Text({ text: "COLLECTING 5M VALUE HISTORY", style: { position: "absolute", left: 152, top: 72, color: "muted", fontWeight: "bold" } }) : null,
-      state.chartSegments.map((item) => View.Box({ style: {
-        position: "absolute", left: item.x, top: item.y - 1, width: item.width, height: 2,
-        radius: 8, background: tone, rotate: item.angle, originX: -0.5, originY: 0,
-      } })),
-      state.chartPoints.map((item) => View.Box({ style: {
-        position: "absolute", left: item.x - 3, top: item.y - 3, width: 6, height: 6, radius: 8, background: tone,
-      } })),
-    ] }),
-    View.Row({ style: { height: 36, paddingX: 4, align: "center", justify: "between" }, children:
-      state.chartLabels.map((label) => View.Text({ text: label || "", style: { color: "muted" } })) }),
-  ] });
+  return View.Sparkline({
+    values: state.chartValues,
+    labels: state.chartLabels,
+    tone: state.chartTrend.positive ? "success" : "danger",
+    empty: "COLLECTING 5M VALUE HISTORY",
+  });
 }
 
-function section(title, detail, height, children, onPress) {
+function section(title, detail, children, onPress) {
   return View.Pressable({
     onPress,
-    style: { height, direction: "column" },
+    style: { direction: "column" },
     children: [
       View.SectionHeading({ title, detail, action: true }),
       View.Card({ style: { grow: 1 }, children }),
     ],
   });
+}
+
+function landscapeDashboard(state, accountLabel, pnl) {
+  const dashboard = state.dashboard;
+  const status = state.status === "WAITING FOR ROBINHOOD" ? "WAITING FOR DATA" : state.status;
+  return View.Screen({ children: [
+    header("ROBINHOOD"),
+    View.Row({ style: { grow: 1, padding: 12, gap: 12 }, children: [
+      View.Column({ style: { grow: 3, basis: 0, gap: 12 }, children: [
+        View.Pressable({
+          onPress: () => model.update({ screen: "accounts" }),
+          style: { width: "full", height: 48, paddingX: 16, direction: "row", align: "center", justify: "between", radius: 12, background: "surface", borderColor: "border", borderWidth: 1, shadow: 1 },
+          children: [
+            View.Text({ text: "ACCOUNT", style: { color: "muted", fontWeight: "bold" } }),
+            View.Text({ text: accountLabel, style: { color: "heading", fontWeight: "bold" } }),
+          ],
+        }),
+        View.Card({ style: { grow: 1, paddingX: 16, paddingTop: 8 }, children: [
+          View.Row({ style: { height: 44, align: "end", justify: "between" }, children: [
+            View.Text({ text: money(dashboard.totalValue), style: { fontSize: "title", color: "heading", fontWeight: "bold" } }),
+            View.Text({ text: state.chartTrend.change + "  (" + state.chartTrend.percent + ")", style: { color: state.chartTrend.positive ? "success" : "danger", fontWeight: "bold" } }),
+          ] }),
+          chart(state),
+        ] }),
+        View.Row({ style: { gap: 8 }, children: [
+          View.Pressable({ onPress: () => setSpan("day"), style: { grow: 1, basis: 0, height: 36, align: "center", justify: "center", radius: 8, background: state.span === "day" ? "accent" : "surface" }, children:
+            View.Text({ text: "1D", style: { color: state.span === "day" ? "white" : "muted", fontWeight: "bold" } }) }),
+          View.Pressable({ onPress: () => setSpan("week"), style: { grow: 1, basis: 0, height: 36, align: "center", justify: "center", radius: 8, background: state.span === "week" ? "accent" : "surface" }, children:
+            View.Text({ text: "1W", style: { color: state.span === "week" ? "white" : "muted", fontWeight: "bold" } }) }),
+          View.Text({ text: state.span === "day" ? "TODAY" : "PAST WEEK", style: { grow: 2, marginTop: 8, color: "muted" } }),
+        ] }),
+        View.Row({ style: { height: 64, gap: 8 }, children: [
+          metric("VALUE", dashboard.totalValue), metric("CASH", dashboard.cash), metric("BUY POWER", dashboard.buyingPower),
+        ] }),
+      ] }),
+      View.Column({ style: { grow: 2, basis: 0, gap: 12 }, children: [
+        section("ACTIVITY", "LAST 7 DAYS", DASHBOARD_PREVIEW_INDICES.map((index) => compactActivity(state, index)), () => model.update({ screen: "activity" })),
+        section("POSITIONS", "", DASHBOARD_PREVIEW_INDICES.map((index) => compactPosition(state, index)), () => model.update({ screen: "positions" })),
+        View.Card({ style: { height: 72, paddingX: 16, direction: "row", align: "center", justify: "between" }, children: [
+          View.Column({ style: { gap: 8 }, children: [
+            View.Text({ text: "REALIZED P&L", style: { color: "heading", fontWeight: "bold" } }),
+            View.Text({ text: state.span === "day" ? "TODAY" : "WEEK", style: { color: "muted" } }),
+          ] }),
+          View.Text({ text: money(pnl), style: { fontSize: "xl", color: (number(pnl) ?? 0) >= 0 ? "success" : "danger", fontWeight: "bold" } }),
+        ] }),
+        View.Row({ style: { grow: 1, gap: 8 }, children: [
+          View.Box({ style: { grow: 1, basis: 0, height: "full" }, children: View.StatusBar({ text: status, tone: status.startsWith("REFRESH FAILED") ? "danger" : "neutral" }) }),
+          View.ActionButton({ label: state.refreshing ? "REFRESHING" : "REFRESH", disabled: state.refreshing, onPress: refreshPortfolio, style: { grow: 1, basis: 0, height: "full" } }),
+        ] }),
+      ] }),
+    ] }),
+  ] });
 }
 
 function dashboardScreen(state) {
@@ -373,6 +404,7 @@ function dashboardScreen(state) {
     ? "  ····" + dashboard.account.suffix + "  " + (selectedIndex + 1) + "/" + state.accounts.length
     : "") + "   ›";
   const pnl = state.span === "day" ? dashboard.pnlDay : dashboard.pnlWeek;
+  if (LANDSCAPE) return landscapeDashboard(state, accountLabel, pnl);
   return View.Screen({ children: [
     header("ROBINHOOD"),
     View.Column({ style: { grow: 1, paddingX: 24, paddingY: 12, gap: 12 }, children: [
@@ -385,7 +417,7 @@ function dashboardScreen(state) {
         ],
       }),
       View.Card({
-        style: { grow: 1, minHeight: 291, paddingX: 20, paddingTop: 16 },
+        style: { paddingX: 20, paddingTop: 16 },
         children: [
           View.Row({ style: { height: 64, align: "end", justify: "between" }, children: [
             View.Text({ text: money(dashboard.totalValue), style: { fontSize: "title", color: "heading", fontWeight: "bold" } }),
@@ -394,7 +426,7 @@ function dashboardScreen(state) {
           chart(state),
         ],
       }),
-      View.Row({ style: { height: 44, gap: 12 }, children: [
+      View.Row({ style: { gap: 12 }, children: [
         View.Pressable({ onPress: () => setSpan("day"), style: { width: 100, height: 44, align: "center", justify: "center", radius: 8, background: state.span === "day" ? "accent" : "surface" }, children:
           View.Text({ text: "1D", style: { color: state.span === "day" ? "white" : "muted", fontWeight: "bold" } }) }),
         View.Pressable({ onPress: () => setSpan("week"), style: { width: 100, height: 44, align: "center", justify: "center", radius: 8, background: state.span === "week" ? "accent" : "surface" }, children:
@@ -404,8 +436,8 @@ function dashboardScreen(state) {
       View.Row({ style: { height: 104, gap: 16 }, children: [
         metric("VALUE", dashboard.totalValue), metric("CASH", dashboard.cash), metric("BUY POWER", dashboard.buyingPower),
       ] }),
-      section("ACTIVITY", "LAST 7 DAYS", 194, [compactActivity(state, 0), compactActivity(state, 1)], () => model.update({ screen: "activity" })),
-      section("POSITIONS", "", 180, [compactPosition(state, 0), compactPosition(state, 1)], () => model.update({ screen: "positions" })),
+      section("ACTIVITY", "LAST 7 DAYS", DASHBOARD_PREVIEW_INDICES.map((index) => compactActivity(state, index)), () => model.update({ screen: "activity" })),
+      section("POSITIONS", "", DASHBOARD_PREVIEW_INDICES.map((index) => compactPosition(state, index)), () => model.update({ screen: "positions" })),
       View.Card({
         style: { width: "full", height: 110, paddingX: 20, direction: "row", align: "center", justify: "between" },
         children: [
@@ -418,7 +450,7 @@ function dashboardScreen(state) {
       }),
       View.Row({ style: { height: 64, gap: 16 }, children: [
         View.Box({ style: { grow: 1, height: "full" }, children: View.StatusBar({ text: state.status, tone: state.status.startsWith("REFRESH FAILED") ? "danger" : "neutral" }) }),
-        View.Box({ style: { width: 176, height: 64 }, children: View.ActionButton({ label: state.refreshing ? "REFRESHING" : "REFRESH NOW", disabled: state.refreshing, onPress: refreshPortfolio }) }),
+        View.ActionButton({ label: state.refreshing ? "REFRESHING" : "REFRESH NOW", disabled: state.refreshing, onPress: refreshPortfolio, style: { width: 176, height: 64 } }),
       ] }),
     ] }),
   ] });
@@ -429,7 +461,7 @@ function scrollRail(screen) {
 }
 
 function accountsScreen(state) {
-  const visible = state.accounts.slice(state.accountScroll, state.accountScroll + 8);
+  const visible = state.accounts.slice(state.accountScroll, state.accountScroll + ACCOUNT_VISIBLE_ROWS);
   return View.Screen({ children: [
     header("ACCOUNTS"),
     View.Column({ style: { grow: 1, padding: 24 }, children: visible.length
@@ -448,7 +480,7 @@ function accountsScreen(state) {
             ] }),
           ],
         })) }),
-        state.accounts.length > 8 ? scrollRail("accounts") : null,
+        state.accounts.length > ACCOUNT_VISIBLE_ROWS ? scrollRail("accounts") : null,
       ] })
       : View.EmptyState({ compact: true, style: { height: "full" }, title: "NO ACCOUNTS AVAILABLE" }) }),
   ] });
@@ -466,14 +498,14 @@ function activityCard(item) {
 }
 
 function activityScreen(state) {
-  const visible = state.dashboard.activity.slice(state.activityScroll, state.activityScroll + 8);
+  const visible = state.dashboard.activity.slice(state.activityScroll, state.activityScroll + ACTIVITY_VISIBLE_ROWS);
   const empty = state.dashboard.activityAvailable ? "NO ACTIVITY YET" : "ACTIVITY UNAVAILABLE";
   return View.Screen({ children: [
     header("ACTIVITY", "LAST 7 DAYS"),
     View.Column({ style: { grow: 1, padding: 24 }, children: visible.length
       ? View.Row({ style: { gap: 20 }, children: [
         View.Column({ style: { grow: 1, gap: 12 }, children: visible.map(activityCard) }),
-        state.dashboard.activity.length > 8 ? scrollRail("activity") : null,
+        state.dashboard.activity.length > ACTIVITY_VISIBLE_ROWS ? scrollRail("activity") : null,
       ] })
       : View.EmptyState({ title: empty, compact: true, style: { height: "full" } }) }),
   ] });
@@ -490,14 +522,14 @@ function positionCard(item) {
 }
 
 function positionsScreen(state) {
-  const visible = state.dashboard.positions.slice(state.positionScroll, state.positionScroll + 9);
+  const visible = state.dashboard.positions.slice(state.positionScroll, state.positionScroll + POSITION_VISIBLE_ROWS);
   const empty = state.dashboard.positionsAvailable ? "NO OPEN POSITIONS" : "POSITIONS UNAVAILABLE";
   return View.Screen({ children: [
     header("POSITIONS"),
     View.Column({ style: { grow: 1, padding: 24 }, children: visible.length
       ? View.Row({ style: { gap: 20 }, children: [
         View.Column({ style: { grow: 1, gap: 12 }, children: visible.map(positionCard) }),
-        state.dashboard.positions.length > 9 ? scrollRail("positions") : null,
+        state.dashboard.positions.length > POSITION_VISIBLE_ROWS ? scrollRail("positions") : null,
       ] })
       : View.EmptyState({ title: empty, compact: true, style: { height: "full" } }) }),
   ] });

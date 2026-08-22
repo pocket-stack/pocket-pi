@@ -1,0 +1,3 @@
+dependencies:
+  idf: ">=5.5.0"
+  espressif/esp_lcd_touch_gt911: "^1"

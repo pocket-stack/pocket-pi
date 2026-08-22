@@ -10,7 +10,7 @@ use pocket3d::gpu::{Gpu, OffscreenTarget};
 use pocket_pi_agentos::{
     stage_pocketapp_bytes, system_app_bundle, AppDescriptor, AppServiceHost, AppSupervisor,
     AppToolRequest, HttpRequest, InstalledAppIndex, NetFailure, RoutedToolHost, StagedApp,
-    TransportCompletion, MAX_POCKETAPP_BYTES, ROOT_APP_ID,
+    TransportCompletion, Viewport, MAX_POCKETAPP_BYTES, ROOT_APP_ID,
 };
 use pocket_pi_embedded::{AgentEvent, ToolHost};
 use pocket_pi_tools::{CoreToolHost, PlatformTools};
@@ -26,10 +26,7 @@ mod backend;
 
 use backend::BackendChoice;
 
-const PANEL_WIDTH: u32 = 720;
-const PANEL_HEIGHT: u32 = 1280;
-const WINDOW_WIDTH: u32 = 360;
-const WINDOW_HEIGHT: u32 = 640;
+const DEFAULT_VIEWPORT: Viewport = Viewport::new(720, 1280);
 
 struct Args {
     screenshot: Option<PathBuf>,
@@ -37,6 +34,7 @@ struct Args {
     workspace: PathBuf,
     app: String,
     root_tap: Option<(u16, u16)>,
+    viewport: Viewport,
     backend: BackendChoice,
 }
 
@@ -51,6 +49,7 @@ fn main() -> Result<()> {
             args.prompt,
             args.app,
             args.root_tap,
+            args.viewport,
             args.backend,
         )
     } else {
@@ -59,6 +58,7 @@ fn main() -> Result<()> {
             args.prompt,
             args.app,
             args.root_tap,
+            args.viewport,
             args.backend,
         )
     }
@@ -71,6 +71,7 @@ fn parse_args() -> Result<Args> {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/esp32-p4-sim/workspace");
     let mut app = ROOT_APP_ID.to_owned();
     let mut root_tap = None;
+    let mut viewport = DEFAULT_VIEWPORT;
     let mut backend = std::env::var("POCKET_PI_BACKEND").unwrap_or_else(|_| "codex".into());
     let mut model = None;
     let mut args = std::env::args().skip(1);
@@ -82,25 +83,10 @@ fn parse_args() -> Result<Args> {
             "--app" => {
                 app = match next(&mut args, &argument)?.as_str() {
                     "pi-agent" => ROOT_APP_ID.to_owned(),
-                    "files" => {
-                        root_tap = Some((270, 1220));
-                        ROOT_APP_ID.to_owned()
-                    }
-                    "apps" => {
-                        root_tap = Some((450, 1220));
-                        ROOT_APP_ID.to_owned()
-                    }
-                    "settings" => {
-                        root_tap = Some((630, 1220));
-                        ROOT_APP_ID.to_owned()
-                    }
-                    "keyboard" => {
-                        root_tap = Some((350, 1110));
-                        ROOT_APP_ID.to_owned()
-                    }
                     value => value.to_owned(),
                 }
             }
+            "--viewport" => viewport = parse_viewport(&next(&mut args, "--viewport")?)?,
             "--backend" => backend = next(&mut args, "--backend")?,
             "--model" => model = Some(next(&mut args, "--model")?),
             "--tap" => {
@@ -119,12 +105,25 @@ fn parse_args() -> Result<Args> {
         workspace,
         app,
         root_tap,
+        viewport,
         backend: BackendChoice::from_name(&backend, model).map_err(anyhow::Error::msg)?,
     })
 }
 
 fn next(args: &mut impl Iterator<Item = String>, name: &str) -> Result<String> {
     args.next().ok_or_else(|| anyhow!("{name} needs a value"))
+}
+
+fn parse_viewport(value: &str) -> Result<Viewport> {
+    let (width, height) = value
+        .split_once('x')
+        .ok_or_else(|| anyhow!("--viewport expects WIDTHxHEIGHT"))?;
+    let viewport = Viewport::new(width.parse()?, height.parse()?);
+    anyhow::ensure!(
+        viewport.width > 0 && viewport.height > 0,
+        "viewport dimensions must be positive"
+    );
+    Ok(viewport)
 }
 
 fn prepare_workspace(root: &Path) -> Result<()> {
@@ -360,7 +359,12 @@ struct InstallUi {
 }
 
 impl Product {
-    fn new(workspace: PathBuf, backend: BackendChoice, app: &str) -> Result<Self> {
+    fn new(
+        workspace: PathBuf,
+        viewport: Viewport,
+        backend: BackendChoice,
+        app: &str,
+    ) -> Result<Self> {
         let model_label = match &backend {
             BackendChoice::Wireless {
                 provider, model, ..
@@ -373,7 +377,7 @@ impl Product {
         };
         let services: Arc<dyn AppServiceHost> = Arc::new(SimAppServices);
         let catalog = InstalledAppIndex::load(&workspace, system_app_bundle())?;
-        let mut supervisor = AppSupervisor::new(workspace.clone(), catalog, services)?;
+        let mut supervisor = AppSupervisor::new(workspace.clone(), viewport, catalog, services)?;
         supervisor.open(app)?;
 
         let native_tools = Arc::new(CoreToolHost::new(workspace.clone(), Arc::new(SimPlatform)));
@@ -844,9 +848,10 @@ fn headless(
     prompt: Option<String>,
     app: String,
     root_tap: Option<(u16, u16)>,
+    viewport: Viewport,
     backend: BackendChoice,
 ) -> Result<()> {
-    let mut product = Product::new(workspace, backend, &app)?;
+    let mut product = Product::new(workspace, viewport, backend, &app)?;
     if let Some((x, y)) = root_tap {
         product.tap(x, y)?;
         product.run_pending_ui_action();
@@ -874,7 +879,7 @@ fn headless(
     }
 
     let gpu = Gpu::new_headless()?;
-    let target = OffscreenTarget::new(&gpu, PANEL_WIDTH, PANEL_HEIGHT);
+    let target = OffscreenTarget::new(&gpu, viewport.width, viewport.height);
     let mut renderer = UiRenderer::new(&gpu, pocket3d::gpu::OFFSCREEN_FORMAT);
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
     product.supervisor.with_ui(|ui| {
@@ -885,7 +890,7 @@ fn headless(
             &words,
             &mut encoder,
             &target.view,
-            (PANEL_WIDTH, PANEL_HEIGHT),
+            (viewport.width, viewport.height),
             wgpu::LoadOp::Clear(wgpu::Color::BLACK),
         )
     })?;
@@ -905,6 +910,7 @@ struct WindowState {
     config: wgpu::SurfaceConfiguration,
     renderer: UiRenderer,
     product: Product,
+    viewport: Viewport,
     cursor: (u16, u16),
     touch_down: bool,
 }
@@ -914,6 +920,7 @@ struct WindowApp {
     initial_prompt: Option<String>,
     initial_app: String,
     initial_root_tap: Option<(u16, u16)>,
+    viewport: Viewport,
     backend: Option<BackendChoice>,
     state: Option<WindowState>,
     error: Option<anyhow::Error>,
@@ -924,6 +931,7 @@ fn windowed(
     prompt: Option<String>,
     app: String,
     root_tap: Option<(u16, u16)>,
+    viewport: Viewport,
     backend: BackendChoice,
 ) -> Result<()> {
     let event_loop = EventLoop::new()?;
@@ -932,6 +940,7 @@ fn windowed(
         initial_prompt: prompt,
         initial_app: app,
         initial_root_tap: root_tap,
+        viewport,
         backend: Some(backend),
         state: None,
         error: None,
@@ -945,8 +954,14 @@ impl WindowApp {
         let window = Arc::new(
             event_loop.create_window(
                 Window::default_attributes()
-                    .with_title("Pocket Pi AgentOS — ESP32-P4 Simulator")
-                    .with_inner_size(winit::dpi::LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT))
+                    .with_title(format!(
+                        "Pocket Pi AgentOS Simulator — {}×{}",
+                        self.viewport.width, self.viewport.height
+                    ))
+                    .with_inner_size(winit::dpi::LogicalSize::new(
+                        self.viewport.width.div_ceil(2),
+                        self.viewport.height.div_ceil(2),
+                    ))
                     .with_resizable(false),
             )?,
         );
@@ -964,7 +979,12 @@ impl WindowApp {
             .backend
             .take()
             .ok_or_else(|| anyhow!("simulator backend was already consumed"))?;
-        let mut product = Product::new(self.workspace.clone(), backend, &self.initial_app)?;
+        let mut product = Product::new(
+            self.workspace.clone(),
+            self.viewport,
+            backend,
+            &self.initial_app,
+        )?;
         if let Some((x, y)) = self.initial_root_tap.take() {
             product.tap(x, y)?;
         }
@@ -978,6 +998,7 @@ impl WindowApp {
             config,
             renderer,
             product,
+            viewport: self.viewport,
             cursor: (0, 0),
             touch_down: false,
         })
@@ -995,7 +1016,7 @@ impl WindowApp {
         };
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = state.gpu.device.create_command_encoder(&Default::default());
-        let scale = state.config.width as f32 / PANEL_WIDTH as f32;
+        let scale = state.config.width as f32 / state.viewport.width as f32;
         state.product.supervisor.with_ui(|ui| {
             let words = ui.draw().words.clone();
             state.renderer.render_words_scaled(
@@ -1020,11 +1041,11 @@ impl WindowApp {
     }
 
     fn update_cursor(state: &mut WindowState, x: f64, y: f64) {
-        let x = x * PANEL_WIDTH as f64 / state.config.width as f64;
-        let y = y * PANEL_HEIGHT as f64 / state.config.height as f64;
+        let x = x * state.viewport.width as f64 / state.config.width as f64;
+        let y = y * state.viewport.height as f64 / state.config.height as f64;
         state.cursor = (
-            x.clamp(0.0, (PANEL_WIDTH - 1) as f64) as u16,
-            y.clamp(0.0, (PANEL_HEIGHT - 1) as f64) as u16,
+            x.clamp(0.0, (state.viewport.width - 1) as f64) as u16,
+            y.clamp(0.0, (state.viewport.height - 1) as f64) as u16,
         );
     }
 }
@@ -1098,6 +1119,14 @@ impl ApplicationHandler for WindowApp {
 mod tests {
     use super::*;
     use pocket_pi_embedded::ToolResult;
+
+    #[test]
+    fn viewport_argument_requires_positive_width_and_height() {
+        assert_eq!(parse_viewport("800x480").unwrap(), Viewport::new(800, 480));
+        for value in ["800", "0x480", "800x0", "widextall"] {
+            assert!(parse_viewport(value).is_err(), "accepted {value}");
+        }
+    }
 
     fn init_logs() {
         let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -1202,7 +1231,8 @@ mod tests {
 
     fn test_supervisor(workspace: &Path, services: Arc<dyn AppServiceHost>) -> AppSupervisor {
         let catalog = InstalledAppIndex::load(workspace, system_app_bundle()).unwrap();
-        let mut supervisor = AppSupervisor::new(workspace, catalog, services).unwrap();
+        let mut supervisor =
+            AppSupervisor::new(workspace, DEFAULT_VIEWPORT, catalog, services).unwrap();
         for app_id in ["robinhood", "exa"] {
             let source = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../..")
@@ -1272,8 +1302,13 @@ mod tests {
             pocket_pi_agentos::stage_pocketapp(&package, &temp.path().join("staged")).unwrap();
 
         let index = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
-        let mut supervisor =
-            AppSupervisor::new(&workspace, index, Arc::new(SimAppServices)).unwrap();
+        let mut supervisor = AppSupervisor::new(
+            &workspace,
+            DEFAULT_VIEWPORT,
+            index,
+            Arc::new(SimAppServices),
+        )
+        .unwrap();
         assert!(supervisor.catalog().descriptor("exa").is_none());
         supervisor
             .apply_app(&staged.release_dir, staged.credentials)

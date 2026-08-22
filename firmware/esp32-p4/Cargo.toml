@@ -23,15 +23,10 @@ opt-level = "z"
 
 [dependencies]
 anyhow = "1"
-base64 = "0.23.1"
 log = "0.4"
-serde_json = "1"
 pocket-pi-agentos = { path = "../../crates/pocket-pi-agentos" }
-pocket-pi-embedded = { path = "../../crates/pocket-pi-embedded" }
-pocket-pi-protocols = { path = "../../crates/pocket-pi-protocols" }
-pocket-pi-tools = { path = "../../crates/pocket-pi-tools" }
+pocket-pi-esp32-common = { path = "../esp32-common" }
 esp-idf-svc = { version = "0.52.1", features = ["critical-section"] }
-embedded-svc = "0.29"
 pocketjs-esp32p4-ppa = { git = "https://github.com/pocket-stack/pocketjs.git", rev = "e12cf12f82cc60b636368119d49a06eb9ed2a3d5", features = ["esp-idf"] }
 
 [build-dependencies]

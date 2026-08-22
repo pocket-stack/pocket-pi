@@ -20,14 +20,14 @@ Pocket Pi builds on:
   capabilities and lifecycle.
 
 **ESP32-P4 is the first fully supported hardware target and the current
-reference implementation.** The macOS ESP32-P4 simulator is a development and
-product-contract testing tool; it is not a desktop Pocket Pi product or a
-second hardware target.
+reference implementation.** ESP32-S3 is also supported through the Waveshare
+ESP32-S3-Touch-LCD-4.3 firmware host. The macOS ESP32-P4 simulator is a
+development and product-contract testing tool; it is not a desktop Pocket Pi
+product or a hardware emulator.
 
-> **Project status:** the Waveshare ESP32-P4 target has working end-to-end
-> Agent, workspace, schedule, App, display/touch and provider paths. The first
-> target remains board-specific and under active development; see
-> [Current validation](#current-validation) for the exact evidence and limits.
+> **Project status:** the Waveshare ESP32-P4 reference target and Waveshare
+> ESP32-S3-Touch-LCD-4.3 target both run the shared AgentOS/App stack. See
+> [Current validation](#current-validation) for build and physical evidence.
 
 ## One complete device runtime
 
@@ -55,19 +55,35 @@ success never replaces physical-device acceptance.
 - Rust stable for the development simulator;
 - Bun for rebuilding the embedded JavaScript guest;
 - a logged-in `codex` CLI for the simulator's local Codex backend;
-- the esp-rs/ESP-IDF toolchain, `nightly-2026-05-01`, and `espflash` for the
-  supported ESP32-P4 target.
+- the esp-rs/ESP-IDF toolchains and `espflash` for physical targets; ESP32-P4
+  uses `nightly-2026-05-01`, while ESP32-S3 uses the `esp` toolchain declared
+  by its firmware directory.
 
-The current firmware target is the
-**Waveshare ESP32-P4-WIFI6-Touch-LCD-5**.
+The current firmware targets are **Waveshare ESP32-P4-WIFI6-Touch-LCD-5** and
+**Waveshare ESP32-S3-Touch-LCD-4.3**.
 
 ### Build the device and development simulator
 
 ```sh
-cargo xtask build pi-agent
 cargo xtask build esp32-p4-sim
 cargo xtask build esp32-p4
+cargo xtask build esp32-s3
 ```
+
+These commands use the generated Pi Agent bundle and View SDK resources
+committed to this repository. A separate PocketJS checkout is needed only when
+regenerating View SDK resources:
+
+```sh
+cargo xtask build pi-agent
+
+git clone https://github.com/pocket-stack/pocketjs.git ../pocketjs
+git -C ../pocketjs checkout e12cf12f82cc60b636368119d49a06eb9ed2a3d5
+POCKETJS_ROOT=../pocketjs cargo xtask build view-sdk
+```
+
+`POCKETJS_ROOT` is an optional developer override. Normal simulator and
+firmware builds never inspect or modify a neighboring PocketJS checkout.
 
 Firmware embeds the Pi Agent source View and Agent loop so a blank device can boot. Ordinary Apps
 use the installable container:
@@ -88,9 +104,9 @@ stored for that App:
 cargo xtask package app exa
 ```
 
-### 1. Pocket Pi on ESP32-P4
+### 1. Pocket Pi on physical ESP32 hardware
 
-Build and flash the release firmware:
+Build and flash ESP32-P4:
 
 ```sh
 cargo xtask build esp32-p4
@@ -99,6 +115,17 @@ DEVICE_PORT=/dev/cu.usbmodem...
 espflash flash --baud 921600 --port "$DEVICE_PORT" \
   --partition-table firmware/esp32-p4/partitions.csv \
   firmware/esp32-p4/target/riscv32imafc-esp-espidf/release/pocket-pi-p4
+```
+
+Build and flash ESP32-S3:
+
+```sh
+cargo xtask build esp32-s3
+
+DEVICE_PORT=/dev/cu.usbmodem...
+espflash flash --baud 921600 --port "$DEVICE_PORT" \
+  --partition-table firmware/esp32-s3/partitions.csv \
+  firmware/esp32-s3/target/xtensa-esp32s3-espidf/release/pocket-pi-s3
 ```
 
 Provision the board once with a direct wireless model backend. DeepSeek is the
@@ -197,9 +224,17 @@ DEEPSEEK_API_KEY=... DEEPSEEK_THINKING_LEVEL=xhigh \
   cargo xtask run esp32-p4-sim --backend deepseek
 ```
 
-The window uses the ESP32-P4 product's 720x1280 coordinate system. Mouse input
-is mapped through the same hit-testing code as physical touch input. Generate a
-deterministic UI snapshot with:
+The window defaults to the ESP32-P4 product's 720x1280 logical viewport. Pass a
+different viewport to exercise the same App source on another screen shape;
+mouse input is mapped through the same hit-testing code as physical touch
+input:
+
+```sh
+cargo xtask run esp32-p4-sim --viewport 800x480
+cargo xtask run esp32-p4-sim --viewport 480x800
+```
+
+Generate a deterministic UI snapshot with:
 
 ```sh
 cargo xtask snapshot esp32-p4-sim
@@ -212,7 +247,7 @@ Backends belong to their host composition, not to the Agent core:
 | Host | Supported backends |
 |---|---|
 | ESP32 simulator | local Codex, OpenAI, OpenRouter, Anthropic, DeepSeek V4 |
-| Physical ESP32-P4 | standalone wireless OpenAI, OpenRouter, Anthropic or DeepSeek V4 |
+| Physical ESP32-P4 and ESP32-S3 | standalone wireless OpenAI, OpenRouter, Anthropic or DeepSeek V4 |
 
 The optional development-only `UartBackend` and the standalone
 `WirelessBackend` implement the same model-completion contract. Wireless
@@ -249,8 +284,7 @@ memory and can create or revise its own recurring schedules.
 The shared [PocketJS](https://github.com/pocket-stack/pocketjs) device UI
 includes:
 
-- Chat with provider-dependent incremental replies, recent-turn history and a
-  full-message reader;
+- Chat with provider replies, recent-turn history and a full-message reader;
 - Files with workspace metadata, file viewing and scrolling;
 - Apps with install discovery and destructive uninstall mode;
 - Settings with Wi-Fi scanning, selection and password entry;
@@ -269,7 +303,9 @@ crates/pocket-pi-tools/       portable workspace, shell, time and schedule tools
 crates/pocket-pi-protocols/   model request, response and streaming codecs
 crates/pocket-pi-agentos/     App Supervisor, System App lifecycle and App contracts
 hosts/esp32-p4-sim/           macOS development simulator for ESP32-P4 contracts
+firmware/esp32-common/        shared ESP-IDF AgentOS host loop and services
 firmware/esp32-p4/            first supported device and reference implementation
+firmware/esp32-s3/            Waveshare ESP32-S3-Touch-LCD-4.3 board host
 tools/uart_io.py              shared raw UART read/write helpers
 tools/uart-provision.py       one-time wireless model provisioning
 tools/uart-install.py         App package ingress over UART
@@ -283,44 +319,27 @@ the firmware, simulator adapters remain in `hosts/esp32-p4-sim`, and optional
 external services remain Apps.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for ownership and lifecycle boundaries,
-and [docs/esp32-p4-port.md](docs/esp32-p4-port.md) for board-specific details.
+[docs/agentos-architecture.md](docs/agentos-architecture.md) for the viewport
+contract, and [docs/esp32-p4-port.md](docs/esp32-p4-port.md) for the reference
+target and board-port responsibilities.
 
 ## Current validation
 
-On **2026-08-18**, the workspace completed 51 Rust tests and 3 App text behavior
-tests with no failures, passed workspace Clippy with warnings denied, and built
-the Pi Agent assets, simulator and ESP32-P4 release firmware. The core tests
-cover code-only update, SQLite migration, credential/data preservation and boot
-completion of an interrupted approved update. `xtask` also produced a
-credential-free Exa update package. Temporary packages covering successful,
-missing and failing schema migrations were used only for physical acceptance
-and are not part of the repository.
-The current release firmware was then flashed to a physical ESP32-P4 without an
-erase. Existing NVS Wi-Fi state survived and DHCP restored `192.168.0.118`. The
-board completed an HTTP fresh install, a UART code-only update, an HTTP schema
-migration and a reset while preserving the App value and migration marker. A
-second cycle rejected schema downgrade and missing migration before mutation,
-rolled back an intentionally failing migration, preserved the v1 release and
-data, and finally accepted the valid v2 package over UART. On 2026-08-14, a
-simulator LAN smoke uploaded the generated Exa
-package through `POST /install` and received HTTP 202; the core install test
-proves activation, Tool routing, SQLite ownership and restart recovery for a
-previously absent App. The uninstall lifecycle test proves complete App-owned
-state removal, live Tool removal, restart absence and reinstall. A physical
-ESP32-P4 then accepted the same Exa package over UART, stopped at the shared
-review screen, installed after touch confirmation, uninstalled it from Apps,
-kept it absent across restart, and accepted a clean UART reinstall.
-The split UART tools were then verified on the same board: one-time DeepSeek
-provisioning received `PPI-CONFIG-STORED`; a bridge-free reset logged
-`loaded wireless model configuration from NVS`, restored Wi-Fi/DHCP on
-the saved network, and reached an idle Pi Agent; the independent App uploader
-transferred Exa to the shared review screen without resetting the board.
-That 2026-08-14 hardware evidence predates the current Source App contract and is
-not physical-board acceptance for this refactor.
+On **2026-08-21**, the workspace completed 54 Rust tests, passed workspace
+Clippy with warnings denied, and built the simulator plus both ESP32-P4 and
+ESP32-S3 release firmware. The core suite covers viewport propagation, geometry
+scaling, minimum touch targets, App lifecycle, SQLite ownership and model/tool
+contracts.
 
-Phone upload, fresh provider calls and unattended memory pressure remain
-separate evidence tiers. Simulator and cross-build success do not substitute
-for fresh physical-board acceptance.
+ESP32-P4 remains the reference target with physical coverage for Agent,
+workspace, schedules, App install/update/uninstall, display/touch, Wi-Fi and
+direct model-provider operation. Physical ESP32-S3 validation covers boot,
+480x800 logical scanout, GT911 touch, integrated Wi-Fi, workspace Tool Calls,
+ordinary App installation and an Exa request. Long-running latency, display
+stability and memory-pressure testing remain separate acceptance work.
+
+Simulator and cross-build success do not substitute for physical-board
+acceptance on either target.
 
 ## Development checks
 

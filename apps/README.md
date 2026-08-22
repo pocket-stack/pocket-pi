@@ -10,10 +10,19 @@ Each directory contains one independently versioned PocketJS App source.
 Build the System App when developing its source:
 
 ```sh
-POCKETJS_ROOT=/path/to/pocketjs cargo xtask build pi-agent
+cargo xtask build pi-agent
 ```
 
-This updates the generated bundles embedded by the Firmware build.
+This updates `apps/pi-agent/dist/agent.js`, which is committed and embedded by
+Firmware builds. Rebuild the separate View SDK resource pack only after editing
+`system/view-sdk-pack.ts`:
+
+```sh
+POCKETJS_ROOT=/path/to/pocketjs cargo xtask build view-sdk
+```
+
+`POCKETJS_ROOT` must point to the PocketJS revision pinned by Pocket Pi. It is
+not required for normal App packaging, simulator builds or Firmware builds.
 
 Package either ordinary App directly, without PocketJS, Bun or a compile step:
 

@@ -1,0 +1,21 @@
+[workspace]
+
+[package]
+name = "pocket-pi-esp32-common"
+version = "0.1.0"
+edition = "2021"
+resolver = "2"
+rust-version = "1.82"
+publish = false
+
+[dependencies]
+anyhow = "1"
+base64 = "0.23.1"
+embedded-svc = "0.29"
+esp-idf-svc = { version = "0.52.1", features = ["critical-section"] }
+log = "0.4"
+serde_json = "1"
+pocket-pi-agentos = { path = "../../crates/pocket-pi-agentos" }
+pocket-pi-embedded = { path = "../../crates/pocket-pi-embedded" }
+pocket-pi-protocols = { path = "../../crates/pocket-pi-protocols" }
+pocket-pi-tools = { path = "../../crates/pocket-pi-tools" }

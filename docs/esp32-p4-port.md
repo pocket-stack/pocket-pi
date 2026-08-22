@@ -5,19 +5,21 @@ reference implementation. It demonstrates the complete device runtime:
 resident Pi Agent, `/workspace`, native tools, schedules, Agent-native Apps,
 local state, PocketJS UI and native device lifecycle.
 
-The repository also provides one companion development composition:
+The repository provides two hardware compositions and one companion simulator:
 
 | Role | Implementation | Runs on |
 |---|---|---|
-| Supported hardware target | `firmware/esp32-p4` | ESP32-P4 |
+| Reference hardware target | `firmware/esp32-p4` | ESP32-P4 |
+| Supported hardware target | `firmware/esp32-s3` | ESP32-S3 |
 | Product-contract simulator | `hosts/esp32-p4-sim` | macOS development host |
 
-The physical host and simulator use the same ordinary App source and
-`pocket-pi-agentos` supervisor at a 720x1280 logical viewport. Simulator mouse
-clicks and physical touch coordinates are both dispatched to the selected App
-View. The Pi Agent Root View displays Chat, Apps, Files and Settings; there is
-no parallel Rust product UI. The simulator is not a desktop Pocket Pi product,
-a generic Agent harness or a second supported target.
+Both physical hosts and the simulator use the same ordinary App source and
+`pocket-pi-agentos` supervisor. ESP32-P4 supplies a 720x1280 logical viewport,
+ESP32-S3 supplies a rotated 480x800 logical viewport, and the simulator accepts
+`--viewport WIDTHxHEIGHT`. Simulator mouse clicks and physical touch coordinates
+are dispatched in the selected View's logical viewport. The Pi Agent Root View
+displays Chat, Apps, Files and Settings; there is no parallel Rust product UI.
+The simulator is not a desktop Pocket Pi product or a hardware target.
 
 The physical host selects `UartBackend` for a Mac Codex/Claude Code bridge or
 `WirelessBackend` for direct OpenAI/OpenRouter/Anthropic/DeepSeek HTTPS. These remain
@@ -30,9 +32,16 @@ itself.
 
 ```sh
 cargo xtask build esp32-p4
+cargo xtask build esp32-s3
 cargo xtask build esp32-p4-sim
 cargo xtask run esp32-p4-sim
 cargo xtask snapshot esp32-p4-sim
+```
+
+Use the simulator to exercise another logical display without forking an App:
+
+```sh
+cargo xtask run esp32-p4-sim --viewport 800x480
 ```
 
 ## Simulator model backends
@@ -100,9 +109,9 @@ espflash monitor --port /dev/cu.usbserial-...
 espflash reset --port /dev/cu.usbserial-... --non-interactive
 ```
 
-For unprovisioned development-board bring-up, the optional model bridge can
-still route requests
-to a logged-in Mac Codex or Claude Code without persisting that backend:
+For unprovisioned development-board bring-up, the optional model bridge routes
+requests to a logged-in Mac Codex or Claude Code without persisting that
+backend:
 
 All UART CLIs leave DTR/RTS inactive before closing the port so the WCH USB
 serial bridge does not reset a running board.
@@ -127,3 +136,29 @@ native time and persistent schedule implementation.
 `pocket-pi-agentos` selects the foreground View and keeps the Pi Agent System
 App resident. Each host supplies the mounted workspace, capabilities, model
 adapter, and renderer; product UI and domain logic do not live in Rust firmware.
+
+## Porting another display or board
+
+A new board port has three responsibilities:
+
+1. implement its display scanout, touch input and other board adapters in a new
+   firmware host;
+2. pass the same logical `Viewport` to `AppSupervisor`, the renderer/framebuffer
+   and touch-coordinate mapping;
+3. validate the existing App sources in the simulator at that viewport, then
+   repeat boot, scanout, touch and memory checks on the physical board.
+
+The runtime reports that viewport to every View Guest, and the shared View SDK
+turns it into `View.viewport`. The SDK derives one geometry scale from the
+720x1280 portrait or 800x480 landscape reference canvas, preserves physical
+font and interaction minimums, and passes the scaled geometry to PocketJS.
+Apps select a portrait stack or landscape columns and may reduce repeated
+preview content when the reported scale is below the reference canvas; they do
+not contain board or resolution branches. Shared components own reusable
+geometry such as headers, navigation, keyboard, buttons and chart drawing. A
+board port must not add a board-specific App fork or a second Rust UI.
+
+The Waveshare ESP32-S3-Touch-LCD-4.3 host implements those adapters for its
+800x480 RGB panel, GT911 touch controller, integrated Wi-Fi and 8 MB PSRAM. It
+reports a 480x800 logical viewport after rotation without changing the Viewport
+or App contract above.

@@ -18,15 +18,15 @@ use pocket_pi_agentos::{
 use pocket_pi_embedded::{AgentEvent, ModelBackend, ToolHost, MODEL_WORKER_STACK_BYTES};
 use pocket_pi_protocols::model::ModelBackendSettings;
 use pocket_pi_tools::CoreToolHost;
-use pocketjs_esp32p4_ppa::{EspIdfPpaOps, RenderTargetState, Renderer};
 use serde_json::{json, Value};
 
-use super::{
+use crate::{
     app_services::EspAppServices,
     backend,
     device_state::{SettingsFacts, WifiSettingsFacts},
-    esp_result, init_wifi, storage, transport, transport::LineTransport as _, DisplayProbe,
-    EspPlatform, BOARD_NAME, PANEL_HEIGHT, PANEL_WIDTH,
+    storage, transport,
+    transport::LineTransport as _,
+    DeviceHost, EspPlatform,
 };
 
 const AGENTOS_FREERTOS_HZ: u32 = 100;
@@ -106,7 +106,8 @@ impl SystemTelemetry {
             .sum::<u64>();
         let capacity = elapsed.saturating_mul(SYSTEM_TELEMETRY_CORES);
         let cpu = (capacity != 0).then(|| {
-            100u64.saturating_sub(idle_elapsed.saturating_mul(100) / capacity)
+            100u64
+                .saturating_sub(idle_elapsed.saturating_mul(100) / capacity)
                 .min(100) as u8
         });
         self.previous = Some((idle, now));
@@ -117,23 +118,16 @@ impl SystemTelemetry {
 fn idle_run_times(tasks: [esp_idf_svc::sys::TaskHandle_t; 2]) -> [u32; 2] {
     tasks.map(|task| unsafe {
         let mut status = core::mem::zeroed::<esp_idf_svc::sys::TaskStatus_t>();
-        esp_idf_svc::sys::vTaskGetInfo(
-            task,
-            &mut status,
-            0,
-            esp_idf_svc::sys::eTaskState_eRunning,
-        );
+        esp_idf_svc::sys::vTaskGetInfo(task, &mut status, 0, esp_idf_svc::sys::eTaskState_eRunning);
         status.ulRunTimeCounter
     })
 }
 
 fn telemetry_facts(cpu_percent: Option<u8>) -> SystemTelemetryFacts {
-    let total = unsafe {
-        esp_idf_svc::sys::heap_caps_get_total_size(esp_idf_svc::sys::MALLOC_CAP_SPIRAM)
-    };
-    let free = unsafe {
-        esp_idf_svc::sys::heap_caps_get_free_size(esp_idf_svc::sys::MALLOC_CAP_SPIRAM)
-    };
+    let total =
+        unsafe { esp_idf_svc::sys::heap_caps_get_total_size(esp_idf_svc::sys::MALLOC_CAP_SPIRAM) };
+    let free =
+        unsafe { esp_idf_svc::sys::heap_caps_get_free_size(esp_idf_svc::sys::MALLOC_CAP_SPIRAM) };
     let psram_used_percent = if total == 0 {
         0
     } else {
@@ -146,7 +140,7 @@ fn telemetry_facts(cpu_percent: Option<u8>) -> SystemTelemetryFacts {
     }
 }
 
-pub fn run() -> anyhow::Result<()> {
+pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
     let _workspace = storage::mount_workspace()?;
     let nvs = EspDefaultNvsPartition::take()?;
 
@@ -163,9 +157,11 @@ pub fn run() -> anyhow::Result<()> {
         }
         None => {
             let config = transport::request_runtime_config(uart.as_ref(), Duration::from_secs(20))
-                .map_err(|error| anyhow::anyhow!(
-                    "Pocket Pi is not provisioned; run tools/uart-provision.py: {error}"
-                ))?;
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "Pocket Pi is not provisioned; run tools/uart-provision.py: {error}"
+                    )
+                })?;
             if matches!(config.model.backend, ModelBackendSettings::Wireless { .. }) {
                 transport::persist_runtime_config(nvs.clone(), &config)
                     .map_err(anyhow::Error::msg)?;
@@ -185,17 +181,17 @@ pub fn run() -> anyhow::Result<()> {
         }
     }
 
-    let mut wifi = match init_wifi(
+    let mut wifi = match H::init_wifi(
         nvs.clone(),
         runtime_config.wifi_ssid.as_deref(),
         runtime_config.wifi_password.as_deref(),
     ) {
         Ok(wifi) => {
-            log::info!("C6-SDIO Wi-Fi and lwIP netif active");
+            log::info!("Wi-Fi and lwIP netif active");
             Some(wifi)
         }
         Err(error) => {
-            log::error!("C6-SDIO Wi-Fi radio probe failed: {error:#}");
+            log::error!("Wi-Fi radio probe failed: {error:#}");
             None
         }
     };
@@ -211,7 +207,7 @@ pub fn run() -> anyhow::Result<()> {
             })
         })
         .unwrap_or_else(|| SettingsFacts {
-            firmware_version: env!("CARGO_PKG_VERSION").into(),
+            firmware_version: H::FIRMWARE_VERSION.into(),
             workspace_free_bytes: storage::workspace_free_bytes().ok(),
             wifi: WifiSettingsFacts {
                 status: "WI-FI DRIVER UNAVAILABLE".into(),
@@ -266,29 +262,14 @@ pub fn run() -> anyhow::Result<()> {
         Some(nvs),
     ));
     let mut supervisor = with_psram_pthread_config(ACTION_STACK_BYTES, || {
-        AppSupervisor::new(storage::WORKSPACE_ROOT, catalog, services)
+        AppSupervisor::new(storage::WORKSPACE_ROOT, H::VIEWPORT, catalog, services)
     })?;
     let mut telemetry = SystemTelemetry::new();
     supervisor.frame()?;
 
-    let mut renderer = pocketjs_esp32p4_ppa::Renderer::new(Default::default())
-        .ok_or_else(|| anyhow::anyhow!("invalid PocketJS renderer configuration"))?;
-    let mut ppa = EspIdfPpaOps::new()
-        .map_err(|error| anyhow::anyhow!("initialize PocketJS PPA: ESP-IDF error 0x{error:x}"))?;
-    log::info!("Pocket Pi AgentOS hardware boot: {BOARD_NAME}");
-    let mut display = match init_display(&mut renderer, &mut ppa, &supervisor) {
-        Ok(display) => {
-            log::info!("MIPI-DSI panel active with PocketJS App View");
-            Some(display)
-        }
-        Err(error) => {
-            log::error!("MIPI-DSI panel failed: {error:#}");
-            None
-        }
-    };
     let native_tools = Arc::new(CoreToolHost::new(
         storage::WORKSPACE_ROOT,
-        Arc::new(EspPlatform),
+        EspPlatform::new(H::BOARD_ID),
     ));
     let native: Arc<dyn ToolHost> = native_tools.clone();
     let (routed_tools, app_rx) = RoutedToolHost::new(native, supervisor.catalog().clone());
@@ -296,13 +277,25 @@ pub fn run() -> anyhow::Result<()> {
         "provider":provider,
         "model":resolved_model,
         "thinkingLevel":model_settings.thinking_level.id(),
-        "systemPrompt":"You are Pi Agent, the first-class system App in Pocket Pi AgentOS on an ESP32-P4. You can manage the top-level /workspace and use installed App tools. Use /workspace for durable memory, notes, plans, and artifacts; read and update relevant files when continuity matters. Installed Apps own their Data, Actions, and Views. Be concise."
+        "systemPrompt":format!("You are Pi Agent, the first-class system App in Pocket Pi AgentOS on {}. You can manage the top-level /workspace and use installed App tools. Use /workspace for durable memory, notes, plans, and artifacts; read and update relevant files when continuity matters. Installed Apps own their Data, Actions, and Views. Be concise.", H::BOARD_NAME)
     });
     with_psram_pthread_config(MODEL_WORKER_STACK_BYTES, || {
         supervisor
             .boot_agent(&config.to_string(), backend, Arc::new(routed_tools))
             .map_err(anyhow::Error::msg)
     })?;
+
+    log::info!("Pocket Pi AgentOS hardware boot: {}", H::BOARD_NAME);
+    let mut display = match H::init_display(&supervisor) {
+        Ok(display) => {
+            log::info!("display active with PocketJS App View");
+            Some(display)
+        }
+        Err(error) => {
+            log::error!("display failed: {error:#}");
+            None
+        }
+    };
     let install_root = prepare_install_root()?;
     let (install_tx, install_rx) = mpsc::sync_channel(1);
     let install_slot = Arc::new(AtomicBool::new(false));
@@ -318,6 +311,7 @@ pub fn run() -> anyhow::Result<()> {
     }];
     let mut agent_status = "STARTING";
     let mut busy = false;
+    let mut pending_prompt = None;
     let mut initial_prompt = runtime_config.initial_prompt;
     let initial_prompt_not_before =
         Instant::now() + Duration::from_secs(runtime_config.initial_prompt_delay_seconds);
@@ -375,9 +369,7 @@ pub fn run() -> anyhow::Result<()> {
                         pending_install = Some(staged);
                     }
                     Err(error) => {
-                        let current = supervisor
-                            .catalog()
-                            .descriptor(&staged.descriptor.id);
+                        let current = supervisor.catalog().descriptor(&staged.descriptor.id);
                         if let Some(path) = staged.release_dir.parent() {
                             let _ = std::fs::remove_dir_all(path);
                         }
@@ -425,13 +417,14 @@ pub fn run() -> anyhow::Result<()> {
                                     }
                                 }
                                 Some("agent.submit") => {
-                                    if let Some(prompt) = args.get("prompt").and_then(Value::as_str) {
-                                        submit_prompt(
+                                    if let Some(prompt) = args.get("prompt").and_then(Value::as_str)
+                                    {
+                                        queue_prompt(
                                             prompt.to_owned(),
-                                            &supervisor,
                                             &mut messages,
                                             &mut busy,
                                             &mut agent_status,
+                                            &mut pending_prompt,
                                         );
                                     }
                                 }
@@ -446,7 +439,9 @@ pub fn run() -> anyhow::Result<()> {
                                     }
                                 }
                                 Some("apps.install")
-                                    if install_ui.as_ref().is_some_and(|ui| ui.state == "review") =>
+                                    if install_ui
+                                        .as_ref()
+                                        .is_some_and(|ui| ui.state == "review") =>
                                 {
                                     if let Some(ui) = &mut install_ui {
                                         ui.state = "installing";
@@ -483,11 +478,10 @@ pub fn run() -> anyhow::Result<()> {
                                     }
                                 },
                                 Some("device.wifi.connect") => {
-                                    let ssid = args.get("ssid").and_then(Value::as_str).unwrap_or("");
-                                    let password = args
-                                        .get("password")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or("");
+                                    let ssid =
+                                        args.get("ssid").and_then(Value::as_str).unwrap_or("");
+                                    let password =
+                                        args.get("password").and_then(Value::as_str).unwrap_or("");
                                     match wifi.as_mut() {
                                         Some(wifi) => {
                                             match wifi.begin_connect(ssid, password, true) {
@@ -592,12 +586,12 @@ pub fn run() -> anyhow::Result<()> {
                 && initial_prompt.is_none()
             {
                 if let Some(wake) = native_tools.claim_due() {
-                    submit_prompt(
+                    queue_prompt(
                         wake.prompt,
-                        &supervisor,
                         &mut messages,
                         &mut busy,
                         &mut agent_status,
+                        &mut pending_prompt,
                     );
                 }
                 // The ESP32 v1 runtime has one App/SQLite execution owner.
@@ -618,7 +612,7 @@ pub fn run() -> anyhow::Result<()> {
             last_tick = Instant::now();
         }
 
-        if last_system_refresh.elapsed() >= Duration::from_secs(5) {
+        if !busy && last_system_refresh.elapsed() >= Duration::from_secs(5) {
             if supervisor.active_id() == pocket_pi_agentos::ROOT_APP_ID {
                 telemetry.update(supervisor.system_telemetry_visible()?);
                 system_dirty = true;
@@ -645,6 +639,7 @@ pub fn run() -> anyhow::Result<()> {
             );
             supervisor.update_system(&facts)?;
             system_dirty = false;
+            redraw = true;
         }
         if supervisor.active_projection_is_stale() {
             // A background App commit is itself a redraw cause. The check is
@@ -658,6 +653,10 @@ pub fn run() -> anyhow::Result<()> {
         // redundant Agent/App tick calls.
         if redraw || last_runtime_pump.elapsed() >= Duration::from_millis(50) {
             for event in supervisor.frame_render(redraw)? {
+                let show_event = match &event {
+                    AgentEvent::ResponseText(_) => H::SHOW_MODEL_PROGRESS,
+                    _ => true,
+                };
                 match event {
                     AgentEvent::Ready => {
                         log::info!("Pi Agent System App ready with App Tool registry");
@@ -667,16 +666,15 @@ pub fn run() -> anyhow::Result<()> {
                                     c"*".as_ptr(),
                                     esp_idf_svc::sys::esp_log_level_t_ESP_LOG_WARN,
                                 );
-                                // Keep App transport stage boundaries visible on UART without
-                                // restoring noisy global INFO logging or exposing response data.
+                                // Log App transport stage boundaries without exposing response data.
                                 esp_idf_svc::sys::esp_log_level_set(
-                                    c"pocket_pi_p4::app_services".as_ptr(),
+                                    c"pocket_pi_esp32_common::app_services".as_ptr(),
                                     esp_idf_svc::sys::esp_log_level_t_ESP_LOG_INFO,
                                 );
                             }
                         }
                         agent_status = "IDLE";
-                        messages[0].text = "ESP32-P4 Pi Agent is ready.".into();
+                        messages[0].text = format!("{} Pi Agent is ready.", H::BOARD_ID);
                     }
                     AgentEvent::ResponseText(text) => {
                         if let Some(message) = messages.last_mut() {
@@ -697,8 +695,9 @@ pub fn run() -> anyhow::Result<()> {
                         busy = false;
                     }
                 }
-                redraw = true;
-                system_dirty = true;
+                if show_event {
+                    system_dirty = true;
+                }
             }
             last_runtime_pump = Instant::now();
         }
@@ -712,12 +711,12 @@ pub fn run() -> anyhow::Result<()> {
             && (!wireless_model || network_ready.load(Ordering::Acquire))
         {
             if let Some(prompt) = initial_prompt.take() {
-                submit_prompt(
+                queue_prompt(
                     prompt,
-                    &supervisor,
                     &mut messages,
                     &mut busy,
                     &mut agent_status,
+                    &mut pending_prompt,
                 );
                 redraw = true;
                 system_dirty = true;
@@ -726,9 +725,21 @@ pub fn run() -> anyhow::Result<()> {
 
         if redraw {
             if let Some(display) = display.as_mut() {
-                display.render_agentos(&mut renderer, &mut ppa, &supervisor)?;
+                display.render(&supervisor)?;
             }
             redraw = false;
+        }
+
+        if !touch_was_down && !system_dirty {
+            if let Some(prompt) = pending_prompt.take() {
+                if let Err(error) = supervisor.prompt_agent(&prompt) {
+                    messages.last_mut().unwrap().text = format!("Agent is unavailable: {error:#}");
+                    busy = false;
+                    agent_status = "FAULTED";
+                    system_dirty = true;
+                    redraw = true;
+                }
+            }
         }
 
         // The loading facts is rendered before activation enters QuickJS,
@@ -988,9 +999,16 @@ fn with_psram_pthread_config<T>(
     action: impl FnOnce() -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
     // Large persistent workers use PSRAM stacks. App Action passes this setting
-    // to its NET child; the platform default is restored after each spawn.
+    // to its NET child; the caller's configuration is restored after each spawn.
     let default = unsafe { esp_idf_svc::sys::esp_pthread_get_default_config() };
-    let mut config = default;
+    let mut previous = default;
+    let current = unsafe { esp_idf_svc::sys::esp_pthread_get_cfg(&mut previous) };
+    if current == esp_idf_svc::sys::ESP_ERR_NOT_FOUND {
+        previous = default;
+    } else if current != esp_idf_svc::sys::ESP_OK {
+        anyhow::bail!("read pthread configuration: ESP-IDF error 0x{current:x}");
+    }
+    let mut config = previous;
     config.stack_size = stack_size;
     config.inherit_cfg = true;
     config.pin_to_core = 1;
@@ -1001,19 +1019,19 @@ fn with_psram_pthread_config<T>(
         anyhow::bail!("configure PSRAM pthread: ESP-IDF error 0x{configured:x}");
     }
     let result = action();
-    let restored = unsafe { esp_idf_svc::sys::esp_pthread_set_cfg(&default) };
+    let restored = unsafe { esp_idf_svc::sys::esp_pthread_set_cfg(&previous) };
     if restored != esp_idf_svc::sys::ESP_OK {
-        anyhow::bail!("restore pthread defaults: ESP-IDF error 0x{restored:x}");
+        anyhow::bail!("restore pthread configuration: ESP-IDF error 0x{restored:x}");
     }
     result
 }
 
-fn submit_prompt(
+fn queue_prompt(
     prompt: String,
-    supervisor: &AppSupervisor,
     messages: &mut Vec<Message>,
     busy: &mut bool,
     agent_status: &mut &'static str,
+    pending_prompt: &mut Option<String>,
 ) {
     if *busy || prompt.trim().is_empty() {
         return;
@@ -1028,11 +1046,7 @@ fn submit_prompt(
     });
     *busy = true;
     *agent_status = "THINKING";
-    if let Err(error) = supervisor.prompt_agent(&prompt) {
-        messages.last_mut().unwrap().text = format!("Agent is unavailable: {error:#}");
-        *busy = false;
-        *agent_status = "FAULTED";
-    }
+    *pending_prompt = Some(prompt);
 }
 
 fn system_facts(
@@ -1144,144 +1158,4 @@ fn system_facts(
             })),
         },
     })
-}
-
-fn init_display(
-    renderer: &mut Renderer,
-    ppa: &mut EspIdfPpaOps,
-    supervisor: &AppSupervisor,
-) -> anyhow::Result<DisplayProbe> {
-    unsafe {
-        let mut panel = core::ptr::null_mut();
-        let mut io = core::ptr::null_mut();
-        let mut touch = core::ptr::null_mut();
-        let mut framebuffer_0 = core::ptr::null_mut();
-        let mut framebuffer_1 = core::ptr::null_mut();
-        let mut framebuffer_2 = core::ptr::null_mut();
-
-        esp_result(
-            "bsp_display_new",
-            esp_idf_svc::sys::bsp_display_new(core::ptr::null(), &mut panel, &mut io),
-        )?;
-        esp_result(
-            "esp_lcd_dpi_panel_get_frame_buffer",
-            esp_idf_svc::sys::esp_lcd_dpi_panel_get_frame_buffer(
-                panel,
-                3,
-                &mut framebuffer_0,
-                &mut framebuffer_1,
-                &mut framebuffer_2,
-            ),
-        )?;
-        let framebuffers = [framebuffer_0, framebuffer_1, framebuffer_2];
-        if framebuffers.iter().any(|framebuffer| framebuffer.is_null()) {
-            anyhow::bail!("esp_lcd_dpi_panel_get_frame_buffer returned a null buffer")
-        }
-
-        let pixels = core::slice::from_raw_parts_mut(
-            framebuffers[0].cast::<u16>(),
-            PANEL_WIDTH as usize * PANEL_HEIGHT as usize,
-        );
-        let mut render_states = [
-            RenderTargetState::new(),
-            RenderTargetState::new(),
-            RenderTargetState::new(),
-        ];
-        supervisor.with_ui(|ui| {
-            let words = ui.draw().words.clone();
-            renderer
-                .render_incremental(
-                    &mut render_states[0],
-                    ui,
-                    &words,
-                    pixels,
-                    PANEL_WIDTH,
-                    PANEL_HEIGHT,
-                    ppa,
-                )
-                .ok_or_else(|| anyhow::anyhow!("PocketJS rejected the App framebuffer geometry"))
-        })?;
-
-        esp_result(
-            "esp_lcd_dpi_panel_set_pattern",
-            esp_idf_svc::sys::esp_lcd_dpi_panel_set_pattern(
-                panel,
-                esp_idf_svc::sys::mipi_dsi_pattern_type_t_MIPI_DSI_PATTERN_NONE,
-            ),
-        )?;
-        esp_result(
-            "esp_lcd_panel_disp_on_off",
-            esp_idf_svc::sys::esp_lcd_panel_disp_on_off(panel, true),
-        )?;
-        esp_result("esp_lcd_panel_draw_bitmap", {
-            esp_idf_svc::sys::esp_lcd_panel_draw_bitmap(
-                panel,
-                0,
-                0,
-                PANEL_WIDTH as i32,
-                PANEL_HEIGHT as i32,
-                framebuffers[0],
-            )
-        })?;
-        esp_result(
-            "bsp_display_backlight_on",
-            esp_idf_svc::sys::bsp_display_backlight_on(),
-        )?;
-        esp_result(
-            "pi_p4_touch_new",
-            esp_idf_svc::sys::pi_p4_touch_new(&mut touch),
-        )?;
-
-        Ok(DisplayProbe {
-            panel,
-            _io: io,
-            touch,
-            framebuffers: framebuffers.map(|framebuffer| framebuffer.cast()),
-            render_states,
-            next_framebuffer: 1,
-        })
-    }
-}
-
-impl DisplayProbe {
-    fn render_agentos(
-        &mut self,
-        renderer: &mut Renderer,
-        ppa: &mut EspIdfPpaOps,
-        supervisor: &AppSupervisor,
-    ) -> anyhow::Result<()> {
-        let framebuffer = self.framebuffers[self.next_framebuffer];
-        let pixels = unsafe {
-            core::slice::from_raw_parts_mut(
-                framebuffer,
-                PANEL_WIDTH as usize * PANEL_HEIGHT as usize,
-            )
-        };
-        supervisor.with_ui(|ui| {
-            let words = ui.draw().words.clone();
-            renderer
-                .render_incremental(
-                    &mut self.render_states[self.next_framebuffer],
-                    ui,
-                    &words,
-                    pixels,
-                    PANEL_WIDTH,
-                    PANEL_HEIGHT,
-                    ppa,
-                )
-                .ok_or_else(|| anyhow::anyhow!("PocketJS rejected the App framebuffer geometry"))
-        })?;
-        esp_result("esp_lcd_panel_draw_bitmap", unsafe {
-            esp_idf_svc::sys::esp_lcd_panel_draw_bitmap(
-                self.panel,
-                0,
-                0,
-                PANEL_WIDTH as i32,
-                PANEL_HEIGHT as i32,
-                framebuffer.cast(),
-            )
-        })?;
-        self.next_framebuffer = (self.next_framebuffer + 1) % self.framebuffers.len();
-        Ok(())
-    }
 }
