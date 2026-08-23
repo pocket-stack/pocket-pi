@@ -4,9 +4,29 @@
   "id": "pi-agent",
   "title": "Pi Agent",
   "description": "System Agent and workspace",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "capabilities": ["data.fs", "data.sqlite"],
   "resources": {},
-  "tools": [],
+  "toolNamespace": "workspace",
+  "tools": [
+    {
+      "name": "workspace.delete",
+      "action": "deleteFile",
+      "description": "Delete one regular user file from /workspace. The path is relative to /workspace. Managed system roots and directories are preserved.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "description": "File path relative to /workspace."
+          }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      }
+    }
+  ],
   "schedules": []
 }

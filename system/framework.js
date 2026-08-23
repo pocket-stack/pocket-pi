@@ -98,13 +98,17 @@
     try {
       const value = action();
       exec("COMMIT");
-      if (typeof globalThis.app?.commit !== "function") fail("Data commit is unavailable");
-      globalThis.app.commit();
+      commit();
       return value;
     } catch (error) {
       try { exec("ROLLBACK"); } catch {}
       throw error;
     }
+  }
+
+  function commit() {
+    if (typeof globalThis.app?.commit !== "function") fail("Data commit is unavailable");
+    globalThis.app.commit();
   }
 
   function callService(service, operation, args = {}) {
@@ -146,7 +150,7 @@
     action: (action, args = {}) => ({ type: "action", action, args }),
     command: (command, args = {}) => ({ type: "command", command, args }),
     navigate: (app) => ({ type: "command", command: "apps.open", args: { app } }),
-    data: Object.freeze({ query: rows, exec, transaction }),
+    data: Object.freeze({ query: rows, exec, transaction, commit }),
     resources: Object.freeze({
       get(name) {
         if (!Object.hasOwn(resources, name)) fail(`unknown resource: ${name}`);

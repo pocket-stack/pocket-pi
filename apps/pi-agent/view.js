@@ -3,8 +3,14 @@
   const FONT_CHAT = { fontSize: "xl" };
   const FONT_FILE = { fontSize: "body" };
   const LANDSCAPE = View.viewport.orientation === "landscape";
+  const CHAT_LINE_HEIGHT = 24;
+  const CHAT_PREVIEW_HEIGHT = 84;
+  const CHAT_PREVIEW_LINES = LANDSCAPE ? 3 : Math.max(1, Math.floor(CHAT_PREVIEW_HEIGHT * View.viewport.scale / CHAT_LINE_HEIGHT));
   const CHAT_VISIBLE_TURNS = LANDSCAPE ? 1 : 2;
   const CHAT_TEXT_WIDTH = View.viewport.width * (LANDSCAPE ? 0.42 : 0.74);
+  const KEYBOARD_OUTER_PADDING = LANDSCAPE ? 12 : 24;
+  const KEYBOARD_INNER_PADDING = LANDSCAPE ? 14 : 22;
+  const KEYBOARD_TEXT_WIDTH = View.viewport.width - 2 * (KEYBOARD_OUTER_PADDING + KEYBOARD_INNER_PADDING) * View.viewport.scale;
   const READER_TEXT_WIDTH = View.viewport.width * (LANDSCAPE ? 0.82 : 0.76);
   const READER_LINE_HEIGHT = 24;
   const READER_CHROME_HEIGHT = 274;
@@ -13,8 +19,9 @@
     : Math.min(36, Math.max(1, Math.floor((View.viewport.height - READER_CHROME_HEIGHT * View.viewport.scale) / READER_LINE_HEIGHT)));
   const FILE_PAGE_LINES = LANDSCAPE ? 12 : 39;
   const APP_VISIBLE_ROWS = LANDSCAPE ? 1 : 4;
-  const FILE_VISIBLE_ROWS = LANDSCAPE ? 2 : 7;
+  const FILE_VISIBLE_ROWS = LANDSCAPE ? 2 : 5;
   const WIFI_VISIBLE_ROWS = LANDSCAPE ? 2 : 5;
+  const SYSTEM_ROOTS = new Set([".pi-agent", ".system", "apps", "data", "system"]);
   const tabs = ["chat", "files", "apps", "settings"];
 
   const screen = View.state("chat");
@@ -34,6 +41,9 @@
   const fileOffset = View.state(0);
   const files = jsonState([]);
   const fileError = View.state("");
+  const fileDeleteMode = View.state(false);
+  const fileDeleteError = View.state("");
+  const deletingFile = View.state("");
   const viewer = View.state(null);
   const reader = View.state(null);
   const readerOffset = View.state(0);
@@ -74,6 +84,16 @@
     });
   }
 
+  function deleteButton(target, busy, onPress) {
+    return View.ActionButton({
+      label: busy === target ? "..." : "X",
+      tone: "danger",
+      disabled: Boolean(busy),
+      onPress,
+      style: { width: 68, height: 68 },
+    });
+  }
+
   function systemHeader(title, onBack) {
     const status = agent.get();
     return View.Header({
@@ -99,30 +119,30 @@
       children: [
         View.Pressable({
           onPress: () => openReader("YOU", slot.user.get()),
-          style: { grow: LANDSCAPE ? 1 : 0, height: LANDSCAPE ? undefined : 118, direction: "column" },
+          style: { grow: LANDSCAPE ? 1 : 0, height: LANDSCAPE ? undefined : 118, direction: "column", overflow: "hidden" },
           children: [
             View.Row({ style: { height: 30, align: "center", gap: 12 }, children: [
               View.Box({ style: { width: 10, height: 10, radius: 5, background: "accent" } }),
               View.Text({ text: "YOU", style: { color: "accent", fontSize: "lg", fontWeight: "bold" } }),
             ] }),
             View.Text({
-              text: () => PiText.wrapPreview(slot.user.get(), FONT_CHAT, CHAT_TEXT_WIDTH, 3),
-              style: { grow: LANDSCAPE ? 1 : 0, height: LANDSCAPE ? undefined : 84, paddingTop: LANDSCAPE ? 6 : 12, fontSize: "xl" },
+              text: () => PiText.wrapPreview(slot.user.get(), FONT_CHAT, CHAT_TEXT_WIDTH, CHAT_PREVIEW_LINES),
+              style: { grow: LANDSCAPE ? 1 : 0, height: LANDSCAPE ? undefined : CHAT_PREVIEW_HEIGHT, fontSize: "xl", lineHeight: CHAT_LINE_HEIGHT },
             }),
           ],
         }),
         View.Box({ style: { height: 2, marginX: 4, marginY: 14, background: "border" } }),
         View.Pressable({
           onPress: () => openReader("PI", slot.assistant.get()),
-          style: { grow: LANDSCAPE ? 1 : 0, height: LANDSCAPE ? undefined : 118, direction: "column" },
+          style: { grow: LANDSCAPE ? 1 : 0, height: LANDSCAPE ? undefined : 118, direction: "column", overflow: "hidden" },
           children: [
             View.Row({ style: { height: 30, align: "center", gap: 12 }, children: [
               View.Box({ style: { width: 10, height: 10, radius: 5, background: "success" } }),
               View.Text({ text: "PI", style: { color: "success", fontSize: "lg", fontWeight: "bold" } }),
             ] }),
             View.Text({
-              text: () => PiText.wrapPreview(slot.assistant.get(), FONT_CHAT, CHAT_TEXT_WIDTH, 3),
-              style: { grow: LANDSCAPE ? 1 : 0, height: LANDSCAPE ? undefined : 84, paddingTop: LANDSCAPE ? 6 : 12, fontSize: "xl" },
+              text: () => PiText.wrapPreview(slot.assistant.get(), FONT_CHAT, CHAT_TEXT_WIDTH, CHAT_PREVIEW_LINES),
+              style: { grow: LANDSCAPE ? 1 : 0, height: LANDSCAPE ? undefined : CHAT_PREVIEW_HEIGHT, fontSize: "xl", lineHeight: CHAT_LINE_HEIGHT },
             }),
           ],
         }),
@@ -161,18 +181,22 @@
   }
 
   function fileRow(entry) {
+    const path = joinPath(filePath.get(), entry.name);
+    const deleting = fileDeleteMode.get() && canDeleteFile(entry);
+    const busy = deletingFile.get();
     return View.Pressable({
-      onPress: () => openFileEntry(entry),
+      onPress: () => busy || deleting ? "" : openFileEntry(entry),
       style: { width: "full", height: 120, paddingX: 18, direction: "row", align: "center", gap: 20, background: "surface" },
       children: [
         View.Box({
           style: { width: 64, height: 64, align: "center", justify: "center", background: entry.kind === "dir" ? "infoSoft" : "successSoft" },
           children: View.Text({ text: entry.kind === "dir" ? "D" : "F", style: { color: entry.kind === "dir" ? "info" : "success", fontSize: "lg", fontWeight: "bold" } }),
         }),
-        View.Column({ style: { grow: 1, gap: 8 }, children: [
+        View.Column({ style: { grow: 1, gap: 8, overflow: "hidden" }, children: [
           View.Text({ text: (entry.name + (entry.kind === "dir" ? "/" : "")).slice(0, 52), style: { fontSize: "lg", fontWeight: "bold" } }),
           View.Text({ text: entry.kind === "dir" ? "FOLDER" : formatSize(entry.size), style: { color: "muted" } }),
         ] }),
+        deleting ? deleteButton(path, busy, () => requestDeleteFile(entry)) : null,
       ],
     });
   }
@@ -181,20 +205,33 @@
     const entries = files.get();
     const offset = fileOffset.get();
     const path = filePath.get();
-    return View.Screen({ children: [
-      systemHeader("WORKSPACE FILES", path ? goUpDirectory : undefined),
-      View.Column({ style: { grow: 1, padding: 24, gap: 12 }, children: [
-        View.Box({ style: { height: 48, paddingX: 16, justify: "center", background: "border" }, children:
-          View.Text({ text: "/workspace" + (path ? "/" + path : ""), style: { color: "muted" } }) }),
-        View.Column({ style: { grow: 1 }, children: entries.length
-          ? View.Row({ style: { gap: 20 }, children: [
-            View.Column({ style: { grow: 1, gap: LANDSCAPE ? 6 : 12 }, children: entries.slice(offset, offset + FILE_VISIBLE_ROWS).map(fileRow) }),
-            entries.length > FILE_VISIBLE_ROWS ? View.ScrollRail({ onUp: () => moveFiles(-FILE_VISIBLE_ROWS), onDown: () => moveFiles(FILE_VISIBLE_ROWS) }) : null,
-          ] })
-          : View.EmptyState({ compact: true, style: { height: "full" }, title: fileError.get }) }),
-      ] }),
-      bottomBar(),
-    ] });
+    const busy = deletingFile.get();
+    const error = fileDeleteError.get();
+    const status = error ? `DELETE FAILED  ·  ${error}` : busy ? "DELETING FILE..." : "SYSTEM FILES STAY PROTECTED";
+    const fileList = View.Column({ style: { grow: 1 }, children: entries.length
+      ? View.Row({ style: { grow: 1, gap: LANDSCAPE ? 12 : 20 }, children: [
+        View.Column({ style: { grow: 1, gap: LANDSCAPE ? 6 : 12 }, children: entries.slice(offset, offset + FILE_VISIBLE_ROWS).map(fileRow) }),
+        entries.length > FILE_VISIBLE_ROWS ? View.ScrollRail({ onUp: () => moveFiles(-FILE_VISIBLE_ROWS), onDown: () => moveFiles(FILE_VISIBLE_ROWS) }) : null,
+      ] })
+      : View.EmptyState({ compact: true, style: { height: "full" }, title: fileError.get }) });
+    const pathBox = View.Box({ style: { height: 48, paddingX: 16, justify: "center", background: "border", overflow: "hidden" }, children:
+      View.Text({ text: "/workspace" + (path ? "/" + path : ""), style: { color: "muted" } }) });
+    const statusBox = View.Box({ style: { grow: LANDSCAPE ? 1 : 0, height: LANDSCAPE ? undefined : 112, paddingX: LANDSCAPE ? 16 : 24, background: "border" }, children:
+      View.StatusBar({ text: status, tone: error ? "danger" : "neutral" }) });
+    const actionBox = View.ActionButton({
+      label: fileDeleteMode.get() ? "DONE" : "DELETE FILES",
+      disabled: Boolean(busy) || (!fileDeleteMode.get() && !entries.some(canDeleteFile)),
+      tone: fileDeleteMode.get() ? "neutral" : "danger",
+      onPress: () => fileDeleteMode.set(!fileDeleteMode.get()),
+      style: { width: "full", height: LANDSCAPE ? 56 : 80 },
+    });
+    const content = LANDSCAPE
+      ? View.Row({ style: { grow: 1, padding: 12, gap: 12 }, children: [
+        View.Column({ style: { grow: 2, basis: 0, gap: 10 }, children: [pathBox, fileList] }),
+        View.Column({ style: { grow: 1, basis: 0, gap: 12 }, children: [statusBox, actionBox] }),
+      ] })
+      : View.Column({ style: { grow: 1, padding: 24, gap: 16 }, children: [pathBox, fileList, statusBox, actionBox] });
+    return View.Screen({ children: [systemHeader("WORKSPACE FILES", path ? goUpDirectory : undefined), content, bottomBar()] });
   }
 
   function appRow(app) {
@@ -213,11 +250,7 @@
           ] }),
         ] }),
         uninstallMode.get()
-          ? View.ActionButton({
-            label: busy === app.id ? "..." : "X", tone: "danger", disabled: Boolean(busy),
-            onPress: () => PocketPi.command("apps.uninstall", { app: app.id }),
-            style: { width: 68, height: 68 },
-          })
+          ? deleteButton(app.id, busy, () => PocketPi.command("apps.uninstall", { app: app.id }))
           : View.Text({ text: "›", style: { color: "accent", fontSize: "title", fontWeight: "bold" } }),
       ],
     });
@@ -338,10 +371,14 @@
     const limit = purpose.type === "wifi" ? 63 : 256;
     return View.Screen({ children: [
       systemHeader(purpose.type === "wifi" ? "WIFI PASSWORD" : "NEW MESSAGE", closeKeyboard),
-      View.Column({ style: { grow: 1, paddingX: LANDSCAPE ? 12 : 24, paddingTop: LANDSCAPE ? 8 : 20 }, children: [
-        View.Box({ style: { grow: 1, paddingX: LANDSCAPE ? 14 : 22, paddingTop: LANDSCAPE ? 10 : 24, background: "surface" }, children:
+      View.Column({ style: { grow: 1, paddingX: KEYBOARD_OUTER_PADDING, paddingTop: LANDSCAPE ? 8 : 20 }, children: [
+        View.Box({ style: { grow: 1, paddingX: KEYBOARD_INNER_PADDING, paddingTop: LANDSCAPE ? 10 : 24, background: "surface" }, children:
           View.Text({
-            text: () => input.get() ? (purpose.type === "wifi" ? "*".repeat(input.get().length) : input.get()) : purpose.type === "wifi" ? "ENTER NETWORK PASSWORD..." : "TYPE YOUR MESSAGE...",
+            text: () => PiText.wrapLines(
+              input.get() ? (purpose.type === "wifi" ? "*".repeat(input.get().length) : input.get()) : purpose.type === "wifi" ? "ENTER NETWORK PASSWORD..." : "TYPE YOUR MESSAGE...",
+              FONT_BODY,
+              KEYBOARD_TEXT_WIDTH,
+            ).join("\n"),
             style: { color: "heading", fontSize: "lg" },
           }) }),
         View.Row({ style: { height: LANDSCAPE ? 52 : 86, paddingX: 4, align: "center", justify: "between" }, children: [
@@ -471,9 +508,13 @@
 
   function openTab(tab) {
     if (tab !== "apps") uninstallMode.set(false);
+    if (tab !== "files") fileDeleteMode.set(false);
     activeTab.set(tab);
     screen.set(tab);
-    if (tab === "files") refreshFiles(filePath.get());
+    if (tab === "files") {
+      fileDeleteError.set("");
+      refreshFiles(filePath.get());
+    }
     return "";
   }
 
@@ -619,7 +660,7 @@
       const next = readDirectory(path);
       files.set(next);
       fileError.set(next.length ? "" : "THIS DIRECTORY IS EMPTY");
-      fileOffset.set(Math.min(fileOffset.get(), Math.max(0, next.length - 8)));
+      fileOffset.set(Math.min(fileOffset.get(), Math.max(0, next.length - FILE_VISIBLE_ROWS)));
     } catch (error) {
       files.set([]);
       fileError.set(error instanceof Error ? error.message : String(error));
@@ -627,7 +668,7 @@
   }
 
   function moveFiles(delta) {
-    fileOffset.set(Math.max(0, Math.min(Math.max(0, files.get().length - 8), fileOffset.get() + delta)));
+    fileOffset.set(Math.max(0, Math.min(Math.max(0, files.get().length - FILE_VISIBLE_ROWS), fileOffset.get() + delta)));
     return "";
   }
 
@@ -635,6 +676,7 @@
     const parts = filePath.get().split("/");
     parts.pop();
     const path = parts.join("/");
+    fileDeleteError.set("");
     filePath.set(path);
     fileOffset.set(0);
     refreshFiles(path);
@@ -644,6 +686,7 @@
   function openFileEntry(entry) {
     const path = joinPath(filePath.get(), entry.name);
     if (entry.kind === "dir") {
+      fileDeleteError.set("");
       filePath.set(path);
       fileOffset.set(0);
       refreshFiles(path);
@@ -657,6 +700,27 @@
     } catch (error) {
       fileError.set(error instanceof Error ? error.message : String(error));
     }
+    return "";
+  }
+
+  function canDeleteFile(entry) {
+    return entry.kind === "file" && !SYSTEM_ROOTS.has(filePath.get().split("/", 1)[0]);
+  }
+
+  function requestDeleteFile(entry) {
+    const path = joinPath(filePath.get(), entry.name);
+    deletingFile.set(path);
+    fileDeleteError.set("");
+    return PocketPi.action("deleteFile", { path });
+  }
+
+  function finishFileDelete() {
+    const path = deletingFile.get();
+    if (!path) return "";
+    const result = JSON.parse(fs.stat(path));
+    deletingFile.set("");
+    fileDeleteError.set(result.error === undefined ? "FILE IS STILL PRESENT" : "");
+    refreshFiles();
     return "";
   }
 
@@ -724,7 +788,7 @@
   }
 
   function moveWifi(delta) {
-    wifiOffset.set(Math.max(0, Math.min(Math.max(0, networks.get().length - 5), wifiOffset.get() + delta)));
+    wifiOffset.set(Math.max(0, Math.min(Math.max(0, networks.get().length - WIFI_VISIBLE_ROWS), wifiOffset.get() + delta)));
     return "";
   }
 
@@ -755,7 +819,7 @@
     const settings = next.settings ?? {};
     const wifi = settings.wifi ?? {};
     networks.set(wifi.networks ?? []);
-    wifiOffset.set(Math.min(wifiOffset.get(), Math.max(0, (wifi.networks ?? []).length - 5)));
+    wifiOffset.set(Math.min(wifiOffset.get(), Math.max(0, (wifi.networks ?? []).length - WIFI_VISIBLE_ROWS)));
     wifiSsid.set(wifi.connectedSsid || "NOT CONNECTED");
     wifiDetail.set(wifi.ipAddress
       ? `IP ${wifi.ipAddress}  RSSI ${wifi.rssiDbm ?? "--"} DBM`
@@ -774,6 +838,6 @@
       return install.get() === null && screen.get() === "settings";
     },
   });
-  View.mount(root);
+  View.mount(root, finishFileDelete);
   refreshFiles("");
 })();

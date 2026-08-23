@@ -85,7 +85,7 @@ POCKETJS_ROOT=../pocketjs cargo xtask build view-sdk
 `POCKETJS_ROOT` is an optional developer override. Normal simulator and
 firmware builds never inspect or modify a neighboring PocketJS checkout.
 
-Firmware embeds the Pi Agent source View and Agent loop so a blank device can boot. Ordinary Apps
+Firmware embeds the Pi Agent source Actions, View and Agent loop so a blank device can boot. Ordinary Apps
 use the installable container:
 
 ```sh
@@ -264,9 +264,11 @@ provider's `max` reasoning effort.
 
 ## Embedded Agent capabilities
 
-The simulator and physical firmware register the same portable core tools:
+The simulator and physical firmware register the same tools:
 
 - workspace files: `read`, `write`, `edit`, `find`, `grep`, `ls`;
+- `workspace.delete`, routed through the Pi Agent System App's `deleteFile`
+  Action;
 - bounded shell commands through `bash`;
 - `device.status` and `time.now`;
 - `workspace.context` for durable Agent-managed memory;

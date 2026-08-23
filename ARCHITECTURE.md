@@ -35,7 +35,8 @@ The authoritative detailed design is
 - `crates/pocket-pi-embedded` provides the bounded JavaScript Agent Loop bridge.
   In AgentOS hosts, the loop is loaded from the Pi Agent System App release into
   the same PocketJS Guest as its Root View.
-- `apps/pi-agent` owns the Root View and Agent Loop release artifacts.
+- `apps/pi-agent` owns the System Actions, Root View and Agent Loop release
+  artifacts.
 - `apps/robinhood` and `apps/exa` own their Tools, Actions, SQLite schemas, and
   PocketJS Views.
 - `crates/pocket-pi-tools` owns portable native workspace, bounded shell, time,
@@ -53,6 +54,7 @@ the selected App's DrawList, but does not choose the App layout.
 
 The Pi Agent is a first-class, always-resident System App. Its Agent Loop,
 context, Tool Registry, and Root View share one Guest and one App lifecycle.
+Its Actions use the shared three-entry Action LRU.
 Opening Robinhood or Exa changes only the foreground View; it does not restart
 or replace the Agent. Model and native Tool transport complete asynchronously
 and return events to that persistent Guest.
