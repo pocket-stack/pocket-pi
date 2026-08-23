@@ -2,9 +2,9 @@
 
 Each directory contains one independently versioned PocketJS App source.
 
-- `pi-agent` is the privileged, resident System App. It owns `/workspace`; its
-  Actions, View and Agent loop are embedded in Firmware rather than installed
-  as a `.pocketapp`.
+- `pi-agent` is the privileged System App and owns `/workspace`. Firmware seeds
+  its release at boot instead of installing a `.pocketapp`. Its View and Agent
+  loop run in one resident Guest; its Actions use the shared Action LRU.
 - `robinhood` and `exa` are ordinary Apps. They own their Tools, Actions,
   SQLite state and Views, and are never embedded or seeded by firmware.
 

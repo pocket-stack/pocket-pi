@@ -30,6 +30,14 @@ const MAX_JSON_RESOURCE_BYTES: usize = 256 * 1024;
 const MAX_RESOURCE_BYTES: usize = 512 * 1024;
 const VIEW_RUNTIME_LIMIT: usize = 3;
 const ACTION_RUNTIME_LIMIT: usize = 3;
+const SYSTEM_RELEASE_FILES: [&str; 6] = [
+    "app.json",
+    "plan.json",
+    "actions.js",
+    "view.js",
+    "text.js",
+    "agent.js",
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Viewport {
@@ -810,14 +818,7 @@ fn validate_package_credentials(
 
 fn load_system_release(release_dir: &Path) -> Result<InstalledApp> {
     validate_system_release_root(release_dir)?;
-    for required in [
-        "app.json",
-        "plan.json",
-        "actions.js",
-        "view.js",
-        "text.js",
-        "agent.js",
-    ] {
+    for required in SYSTEM_RELEASE_FILES {
         anyhow::ensure!(
             release_dir.join(required).is_file(),
             "System App release is missing {required}"
@@ -861,14 +862,6 @@ fn load_system_release(release_dir: &Path) -> Result<InstalledApp> {
 }
 
 fn validate_system_release_root(release_dir: &Path) -> Result<()> {
-    let allowed = BTreeSet::from([
-        "app.json",
-        "plan.json",
-        "actions.js",
-        "view.js",
-        "text.js",
-        "agent.js",
-    ]);
     for entry in std::fs::read_dir(release_dir)? {
         let entry = entry?;
         let name = entry
@@ -877,7 +870,7 @@ fn validate_system_release_root(release_dir: &Path) -> Result<()> {
             .ok_or_else(|| anyhow!("App Bundle contains a non-UTF-8 file"))?
             .to_owned();
         anyhow::ensure!(
-            entry.file_type()?.is_file() && allowed.contains(name.as_str()),
+            entry.file_type()?.is_file() && SYSTEM_RELEASE_FILES.contains(&name.as_str()),
             "unexpected App Bundle file: {name}"
         );
     }
