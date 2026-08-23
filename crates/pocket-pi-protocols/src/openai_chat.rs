@@ -143,6 +143,7 @@ struct Usage {
 
 pub struct Stream {
     dialect: Dialect,
+    emit_progress: bool,
     thinking: String,
     text: String,
     tool_calls: BTreeMap<u64, PendingToolCall>,
@@ -150,16 +151,11 @@ pub struct Stream {
     stop_reason: Option<String>,
 }
 
-impl Default for Stream {
-    fn default() -> Self {
-        Self::new(Dialect::OpenAi)
-    }
-}
-
 impl Stream {
-    pub fn new(dialect: Dialect) -> Self {
+    pub fn new(dialect: Dialect, emit_progress: bool) -> Self {
         Self {
             dialect,
+            emit_progress,
             thinking: String::new(),
             text: String::new(),
             tool_calls: BTreeMap::new(),
@@ -218,13 +214,17 @@ impl Stream {
         if let Some(thinking) = delta.get("reasoning_content").and_then(Value::as_str) {
             if !thinking.is_empty() {
                 self.thinking.push_str(thinking);
-                events.push(ModelStreamEvent::Thinking(thinking.into()));
+                if self.emit_progress {
+                    events.push(ModelStreamEvent::Thinking(thinking.into()));
+                }
             }
         }
         if let Some(content) = delta.get("content").and_then(Value::as_str) {
             if !content.is_empty() {
                 self.text.push_str(content);
-                events.push(ModelStreamEvent::Text(content.into()));
+                if self.emit_progress {
+                    events.push(ModelStreamEvent::Text(content.into()));
+                }
             }
         }
         for call in delta
@@ -502,7 +502,7 @@ mod tests {
 
     #[test]
     fn deepseek_stream_decodes_thinking_text_multiple_tools_and_usage() {
-        let mut stream = Stream::new(Dialect::DeepSeek);
+        let mut stream = Stream::new(Dialect::DeepSeek, true);
         assert_eq!(
             stream
                 .push(r#"{"choices":[{"delta":{"reasoning_content":"think "}}]}"#)
@@ -530,7 +530,7 @@ mod tests {
         assert_eq!(result["usage"]["reasoning"], 12);
         assert_eq!(result["stopReason"], "toolUse");
 
-        let mut truncated = Stream::new(Dialect::DeepSeek);
+        let mut truncated = Stream::new(Dialect::DeepSeek, true);
         truncated.push(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"time_dot_now","arguments":"{"}}]},"finish_reason":"length"}]}"#).unwrap();
         assert!(truncated.finish().unwrap_err().contains("truncated"));
     }

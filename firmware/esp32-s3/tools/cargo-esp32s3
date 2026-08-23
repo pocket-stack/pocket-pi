@@ -4,6 +4,7 @@ set -eu
 
 firmware_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 tools_root="$firmware_root/.embuild/espressif"
+# Recommended custom ESP-IDF scanout tuning: GDMA interrupt level 3 and LCD DMA priority 5.
 sysroot=
 for candidate in \
     "$tools_root"/tools/xtensa-esp-elf/*/xtensa-esp-elf/xtensa-esp-elf

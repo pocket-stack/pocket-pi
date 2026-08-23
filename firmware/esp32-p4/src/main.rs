@@ -84,6 +84,7 @@ impl DeviceHost for P4Host {
     const FIRMWARE_VERSION: &'static str = env!("CARGO_PKG_VERSION");
     const VIEWPORT: Viewport = DISPLAY_VIEWPORT;
     const SHOW_MODEL_PROGRESS: bool = true;
+    const MODEL_WORKER_CORE: i32 = 1;
 
     fn init_wifi(
         nvs: EspDefaultNvsPartition,

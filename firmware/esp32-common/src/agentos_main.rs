@@ -244,6 +244,7 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
                 runtime_config
                     .model_api_key
                     .ok_or_else(|| anyhow::anyhow!("wireless backend is missing API key"))?,
+                H::SHOW_MODEL_PROGRESS,
             )
             .map_err(anyhow::Error::msg)?,
         ),
@@ -261,7 +262,7 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
         catalog.clone(),
         Some(nvs),
     ));
-    let mut supervisor = with_psram_pthread_config(ACTION_STACK_BYTES, || {
+    let mut supervisor = with_psram_pthread_config(ACTION_STACK_BYTES, 1, || {
         AppSupervisor::new(storage::WORKSPACE_ROOT, H::VIEWPORT, catalog, services)
     })?;
     let mut telemetry = SystemTelemetry::new();
@@ -279,7 +280,7 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
         "thinkingLevel":model_settings.thinking_level.id(),
         "systemPrompt":format!("You are Pi Agent, the first-class system App in Pocket Pi AgentOS on {}. You can manage the top-level /workspace and use installed App tools. Use /workspace for durable memory, notes, plans, and artifacts; read and update relevant files when continuity matters. Installed Apps own their Data, Actions, and Views. Be concise.", H::BOARD_NAME)
     });
-    with_psram_pthread_config(MODEL_WORKER_STACK_BYTES, || {
+    with_psram_pthread_config(MODEL_WORKER_STACK_BYTES, H::MODEL_WORKER_CORE, || {
         supervisor
             .boot_agent(&config.to_string(), backend, Arc::new(routed_tools))
             .map_err(anyhow::Error::msg)
@@ -756,7 +757,7 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
                     .release_dir
                     .parent()
                     .map(std::path::Path::to_path_buf);
-                let result = with_psram_pthread_config(ACTION_STACK_BYTES, || {
+                let result = with_psram_pthread_config(ACTION_STACK_BYTES, 1, || {
                     supervisor.apply_app(&staged.release_dir, staged.credentials)
                 });
                 match &result {
@@ -996,6 +997,7 @@ fn install_job(install_root: &Path) -> PathBuf {
 
 fn with_psram_pthread_config<T>(
     stack_size: usize,
+    core: i32,
     action: impl FnOnce() -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
     // Large persistent workers use PSRAM stacks. App Action passes this setting
@@ -1011,7 +1013,7 @@ fn with_psram_pthread_config<T>(
     let mut config = previous;
     config.stack_size = stack_size;
     config.inherit_cfg = true;
-    config.pin_to_core = 1;
+    config.pin_to_core = core;
     config.stack_alloc_caps =
         esp_idf_svc::sys::MALLOC_CAP_SPIRAM | esp_idf_svc::sys::MALLOC_CAP_8BIT;
     let configured = unsafe { esp_idf_svc::sys::esp_pthread_set_cfg(&config) };

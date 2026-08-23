@@ -28,6 +28,7 @@ pub trait DeviceHost {
     const FIRMWARE_VERSION: &'static str;
     const VIEWPORT: Viewport;
     const SHOW_MODEL_PROGRESS: bool;
+    const MODEL_WORKER_CORE: i32;
 
     fn init_wifi(
         nvs: EspDefaultNvsPartition,
