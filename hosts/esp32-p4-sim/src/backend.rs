@@ -149,13 +149,16 @@ impl ModelBackend for WirelessBackend {
         };
 
         let mut stream = match self.provider {
-            WirelessProvider::Anthropic => SimProviderStream::Anthropic(Default::default()),
-            WirelessProvider::DeepSeek => {
-                SimProviderStream::Chat(openai_chat::Stream::new(openai_chat::Dialect::DeepSeek))
+            WirelessProvider::Anthropic => {
+                SimProviderStream::Anthropic(anthropic_messages::Stream::new(true))
             }
-            WirelessProvider::OpenAi | WirelessProvider::OpenRouter => {
-                SimProviderStream::Chat(Default::default())
-            }
+            WirelessProvider::DeepSeek => SimProviderStream::Chat(openai_chat::Stream::new(
+                openai_chat::Dialect::DeepSeek,
+                true,
+            )),
+            WirelessProvider::OpenAi | WirelessProvider::OpenRouter => SimProviderStream::Chat(
+                openai_chat::Stream::new(openai_chat::Dialect::OpenAi, true),
+            ),
         };
         for line in BufReader::new(response.into_reader()).lines() {
             let line = line.map_err(|error| format!("model stream read failed: {error}"))?;

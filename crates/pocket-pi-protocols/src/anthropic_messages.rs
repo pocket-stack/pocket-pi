@@ -83,14 +83,23 @@ struct PendingToolCall {
     arguments: String,
 }
 
-#[derive(Default)]
 pub struct Stream {
+    emit_progress: bool,
     text: String,
     tool_calls: BTreeMap<u64, PendingToolCall>,
     stop_reason: Option<String>,
 }
 
 impl Stream {
+    pub fn new(emit_progress: bool) -> Self {
+        Self {
+            emit_progress,
+            text: String::new(),
+            tool_calls: BTreeMap::new(),
+            stop_reason: None,
+        }
+    }
+
     pub fn push(&mut self, data_json: &str) -> Result<Vec<ModelStreamEvent>, String> {
         let event: Value = serde_json::from_str(data_json)
             .map_err(|error| format!("parse Anthropic stream event: {error}"))?;
@@ -125,7 +134,7 @@ impl Stream {
                     Some("text_delta") => {
                         let text = delta.get("text").and_then(Value::as_str).unwrap_or("");
                         self.text.push_str(text);
-                        Ok(if text.is_empty() {
+                        Ok(if text.is_empty() || !self.emit_progress {
                             Vec::new()
                         } else {
                             alloc::vec![ModelStreamEvent::Text(text.to_string())]
@@ -267,7 +276,7 @@ mod tests {
 
     #[test]
     fn streams_text() {
-        let mut stream = Stream::default();
+        let mut stream = Stream::new(true);
         assert_eq!(
             stream
                 .push(r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}"#)
@@ -283,7 +292,7 @@ mod tests {
 
     #[test]
     fn streams_multiple_tool_calls() {
-        let mut stream = Stream::default();
+        let mut stream = Stream::new(true);
         for event in [
             r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"one","name":"first"}}"#,
             r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#,

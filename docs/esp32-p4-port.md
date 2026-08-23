@@ -130,6 +130,38 @@ UART provisioning also seeds the board clock from the Mac for development.
 Standalone operation uses ESP-IDF SNTP after Wi-Fi connects. Both feed the same
 native time and persistent schedule implementation.
 
+## Evidence-based scanout diagnosis
+
+Display performance work must start from one reproducible firmware baseline:
+record the source revision, firmware hash, `sdkconfig`, pixel clock, framebuffer
+count, bounce-buffer size and flash command. Run the same build through idle,
+UI-only, network-only, short model response, long model response, QuickJS-heavy
+and Flash/tool-call scenarios. Record physical observations, successful builds,
+boot logs and counter results as separate evidence tiers.
+
+Collect all required measurements in one diagnostic build. Interrupt and
+frame callbacks update RAM counters and emit one summary after each test window
+containing:
+
+- VSYNC and frame-complete cadence;
+- bounce-refill interval, refill duration and deadline misses;
+- presentation timestamps and the selected framebuffer;
+- per-core idle runtime;
+- free and largest-block values for internal RAM and PSRAM; and
+- model transport phase timestamps.
+
+Compare one variable at a time with the same workload and repeat each A/B pair.
+Keep a change only when the physical result and a relevant measurement move in
+the same direction. Treat a normal vertical-blank interval as expected scanout
+timing.
+
+For example, a worker-core hypothesis compares identical model turns with only
+the worker affinity changed, while checking per-core idle time and refill
+cadence. A cache-stall hypothesis compares otherwise identical cache-safe and
+default builds, while checking refill misses. Retain a hypothesis only when the
+counters and physical display change together. Production firmware contains
+only the validated change.
+
 ## App UI boundary
 
 `apps/pi-agent`, `apps/robinhood`, and `apps/exa` own their PocketJS Views.

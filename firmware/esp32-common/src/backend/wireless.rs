@@ -17,14 +17,23 @@ thread_local! {
 pub struct WirelessBackend {
     provider: WirelessProvider,
     api_key: String,
+    emit_progress: bool,
 }
 
 impl WirelessBackend {
-    pub fn new(provider: WirelessProvider, api_key: String) -> Result<Self, String> {
+    pub fn new(
+        provider: WirelessProvider,
+        api_key: String,
+        emit_progress: bool,
+    ) -> Result<Self, String> {
         if api_key.is_empty() || api_key.len() > 512 || !api_key.is_ascii() {
             return Err(format!("{} API key is invalid", provider.id()));
         }
-        Ok(Self { provider, api_key })
+        Ok(Self {
+            provider,
+            api_key,
+            emit_progress,
+        })
     }
 
     fn request(&self, pi_request: &str) -> Result<(&'static str, String), String> {
@@ -84,12 +93,20 @@ impl WirelessBackend {
             .map_err(|error| SendError::BeforeResponse(format!("send model request: {error}")))?;
         let status = response.status();
         let mut decoder = match self.provider {
-            WirelessProvider::Anthropic => ProviderStream::Anthropic(Default::default()),
+            WirelessProvider::Anthropic => {
+                ProviderStream::Anthropic(anthropic_messages::Stream::new(self.emit_progress))
+            }
             WirelessProvider::DeepSeek => {
-                ProviderStream::Chat(openai_chat::Stream::new(openai_chat::Dialect::DeepSeek))
+                ProviderStream::Chat(openai_chat::Stream::new(
+                    openai_chat::Dialect::DeepSeek,
+                    self.emit_progress,
+                ))
             }
             WirelessProvider::OpenAi | WirelessProvider::OpenRouter => {
-                ProviderStream::Chat(Default::default())
+                ProviderStream::Chat(openai_chat::Stream::new(
+                    openai_chat::Dialect::OpenAi,
+                    self.emit_progress,
+                ))
             }
         };
         let mut pending = Vec::with_capacity(4 * 1024);

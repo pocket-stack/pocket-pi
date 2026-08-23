@@ -92,6 +92,7 @@ impl DeviceHost for S3Host {
     const FIRMWARE_VERSION: &'static str = env!("CARGO_PKG_VERSION");
     const VIEWPORT: Viewport = DISPLAY_VIEWPORT;
     const SHOW_MODEL_PROGRESS: bool = false;
+    const MODEL_WORKER_CORE: i32 = 0;
 
     fn init_wifi(
         nvs: EspDefaultNvsPartition,
