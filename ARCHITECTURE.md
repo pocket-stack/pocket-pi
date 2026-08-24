@@ -77,9 +77,9 @@ top-level `/workspace` and cross-App Tool Registry.
 
 For ordinary App iteration, `app.checkout` copies only the live source to
 `apps/<id>/checkout`; the Agent edits that directory with the existing workspace
-Tools. `app.submit` validates and renames it into Installer staging, then ends
-the Agent turn at the physical confirmation screen. App data and credentials
-never enter the checkout.
+Tools. `app.submit` validates and renames it into Installer staging, then opens
+the physical confirmation screen while the Agent completes normally. App data
+and credentials never enter the checkout.
 
 ## Repository map
 

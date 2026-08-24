@@ -17,7 +17,7 @@ components。Pi Agent 页面位于 `apps/pi-agent/view.js`，其动态文本分�
 | spacing | 24 design-unit screen gutter、card padding、stack gap | 直接写在当前 concrete component recipe 中，不导出无人消费的 token map |
 | surfaces | card、selected card、row、muted、shell recipes | arbitrary children 的容器保持 literal View；当前没有单独的 unused surface registry |
 | status tones | neutral、info、success、warning、danger | 由 runtime View SDK 的 `Badge`/`StatusBar` 统一表达 |
-| dynamic glyphs | curly quotes、non-breaking/en/em dash、ellipsis、bullet | 进入现有 Inter subset atlas |
+| dynamic glyphs | curly quotes、em dash、ellipsis、middle dot/bullet、navigation arrows | 进入现有 Inter subset atlas |
 
 PocketJS 当前只提供 baked font slots。View SDK 从中固定使用 16 / 18 / 20 /
 24px，并为四个字号都打包 regular 与 bold；不会引入 runtime font loader 或
