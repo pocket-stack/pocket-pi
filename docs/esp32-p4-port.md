@@ -11,7 +11,7 @@ The repository provides two hardware compositions and one companion simulator:
 |---|---|---|
 | Reference hardware target | `firmware/esp32-p4` | ESP32-P4 |
 | Supported hardware target | `firmware/esp32-s3` | ESP32-S3 |
-| Product-contract simulator | `hosts/esp32-p4-sim` | macOS development host |
+| Product-contract simulator | `hosts/esp32-sim` | macOS development host |
 
 Both physical hosts and the simulator use the same ordinary App source and
 `pocket-pi-agentos` supervisor. ESP32-P4 supplies a 720x1280 logical viewport,
@@ -30,18 +30,23 @@ adapters only receive a complete `.pocketapp` and hand it to the shared Installe
 in `pocket-pi-agentos`; neither writes App storage, credentials or runtime state
 itself.
 
+The resident Agent uses that same lifecycle: `app.checkout` creates the editable
+source under `apps/<id>/checkout`, and `app.submit` moves it into the shared
+Installer staging before opening physical confirmation. The host does not gain
+a second Agent-specific updater.
+
 ```sh
 cargo xtask build esp32-p4
 cargo xtask build esp32-s3
-cargo xtask build esp32-p4-sim
-cargo xtask run esp32-p4-sim
-cargo xtask snapshot esp32-p4-sim
+cargo xtask build esp32-sim
+cargo xtask run esp32-sim
+cargo xtask snapshot esp32-sim
 ```
 
 Use the simulator to exercise another logical display without forking an App:
 
 ```sh
-cargo xtask run esp32-p4-sim --viewport 800x480
+cargo xtask run esp32-sim --viewport 800x480
 ```
 
 ## Simulator model backends
@@ -52,22 +57,22 @@ host fulfills a model request.
 
 ```sh
 # Direct OpenAI request
-OPENAI_API_KEY=... cargo xtask run esp32-p4-sim \
+OPENAI_API_KEY=... cargo xtask run esp32-sim \
   --backend openai --model gpt-5.6
 
 # Local Codex using the Mac's existing Coding Plan login
-cargo xtask run esp32-p4-sim --backend codex
+cargo xtask run esp32-sim --backend codex
 
 # Other direct providers
-OPENROUTER_API_KEY=... cargo xtask run esp32-p4-sim \
+OPENROUTER_API_KEY=... cargo xtask run esp32-sim \
   --backend openrouter --model openai/gpt-5.6
-ANTHROPIC_API_KEY=... cargo xtask run esp32-p4-sim \
+ANTHROPIC_API_KEY=... cargo xtask run esp32-sim \
   --backend anthropic --model claude-sonnet-4-6
 DEEPSEEK_API_KEY=... DEEPSEEK_THINKING_LEVEL=xhigh \
-  cargo xtask run esp32-p4-sim --backend deepseek
+  cargo xtask run esp32-sim --backend deepseek
 
 # Real Agent -> native write tool -> simulated LittleFS workspace
-cargo xtask run esp32-p4-sim --backend codex \
+cargo xtask run esp32-sim --backend codex \
   --workspace target/esp32-workspace
 ```
 

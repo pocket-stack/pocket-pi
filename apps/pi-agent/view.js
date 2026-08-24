@@ -1,7 +1,7 @@
 (() => {
-  const FONT_BODY = { fontSize: "lg" };
-  const FONT_CHAT = { fontSize: "xl" };
-  const FONT_FILE = { fontSize: "body" };
+  const FONT_BODY = { fontSize: "md" };
+  const FONT_CHAT = { fontSize: "lg" };
+  const FONT_FILE = { fontSize: "sm" };
   const LANDSCAPE = View.viewport.orientation === "landscape";
   const CHAT_LINE_HEIGHT = 24;
   const CHAT_PREVIEW_HEIGHT = 84;
@@ -123,11 +123,11 @@
           children: [
             View.Row({ style: { height: 30, align: "center", gap: 12 }, children: [
               View.Box({ style: { width: 10, height: 10, radius: 5, background: "accent" } }),
-              View.Text({ text: "YOU", style: { color: "accent", fontSize: "lg", fontWeight: "bold" } }),
+              View.Text({ text: "YOU", style: { color: "accent", fontSize: "md", fontWeight: "bold" } }),
             ] }),
             View.Text({
               text: () => PiText.wrapPreview(slot.user.get(), FONT_CHAT, CHAT_TEXT_WIDTH, CHAT_PREVIEW_LINES),
-              style: { grow: LANDSCAPE ? 1 : 0, height: LANDSCAPE ? undefined : CHAT_PREVIEW_HEIGHT, fontSize: "xl", lineHeight: CHAT_LINE_HEIGHT },
+              style: { grow: LANDSCAPE ? 1 : 0, height: LANDSCAPE ? undefined : CHAT_PREVIEW_HEIGHT, fontSize: "lg", lineHeight: CHAT_LINE_HEIGHT },
             }),
           ],
         }),
@@ -138,11 +138,11 @@
           children: [
             View.Row({ style: { height: 30, align: "center", gap: 12 }, children: [
               View.Box({ style: { width: 10, height: 10, radius: 5, background: "success" } }),
-              View.Text({ text: "PI", style: { color: "success", fontSize: "lg", fontWeight: "bold" } }),
+              View.Text({ text: "PI", style: { color: "success", fontSize: "md", fontWeight: "bold" } }),
             ] }),
             View.Text({
               text: () => PiText.wrapPreview(slot.assistant.get(), FONT_CHAT, CHAT_TEXT_WIDTH, CHAT_PREVIEW_LINES),
-              style: { grow: LANDSCAPE ? 1 : 0, height: LANDSCAPE ? undefined : CHAT_PREVIEW_HEIGHT, fontSize: "xl", lineHeight: CHAT_LINE_HEIGHT },
+              style: { grow: LANDSCAPE ? 1 : 0, height: LANDSCAPE ? undefined : CHAT_PREVIEW_HEIGHT, fontSize: "lg", lineHeight: CHAT_LINE_HEIGHT },
             }),
           ],
         }),
@@ -159,7 +159,7 @@
       View.Text({ text: "NEXT WAKE", style: { color: "muted", fontWeight: "bold" } }),
       View.Text({
         text: scheduleText.get,
-        style: { color: schedulePresent.get() ? "heading" : "muted", fontSize: "lg", fontWeight: schedulePresent.get() ? "bold" : "regular" },
+        style: { color: schedulePresent.get() ? "heading" : "muted", fontSize: "md", fontWeight: schedulePresent.get() ? "bold" : "regular" },
       }),
     ] });
     const action = View.ActionButton({
@@ -190,10 +190,10 @@
       children: [
         View.Box({
           style: { width: 64, height: 64, align: "center", justify: "center", background: entry.kind === "dir" ? "infoSoft" : "successSoft" },
-          children: View.Text({ text: entry.kind === "dir" ? "D" : "F", style: { color: entry.kind === "dir" ? "info" : "success", fontSize: "lg", fontWeight: "bold" } }),
+          children: View.Text({ text: entry.kind === "dir" ? "D" : "F", style: { color: entry.kind === "dir" ? "info" : "success", fontSize: "md", fontWeight: "bold" } }),
         }),
         View.Column({ style: { grow: 1, gap: 8, overflow: "hidden" }, children: [
-          View.Text({ text: (entry.name + (entry.kind === "dir" ? "/" : "")).slice(0, 52), style: { fontSize: "lg", fontWeight: "bold" } }),
+          View.Text({ text: (entry.name + (entry.kind === "dir" ? "/" : "")).slice(0, 52), style: { fontSize: "md", fontWeight: "bold" } }),
           View.Text({ text: entry.kind === "dir" ? "FOLDER" : formatSize(entry.size), style: { color: "muted" } }),
         ] }),
         deleting ? deleteButton(path, busy, () => requestDeleteFile(entry)) : null,
@@ -240,18 +240,16 @@
       onPress: () => uninstallMode.get() ? "" : PocketPi.navigate(app.id),
       style: { width: "full", height: 150, paddingX: 24, direction: "row", align: "center", gap: 20, background: "surface" },
       children: [
-        View.Row({ style: { grow: 1, align: "center", gap: 20 }, children: [
-          View.Box({ style: { width: 68, height: 68, align: "center", justify: "center", background: "accentSoft" }, children:
-            View.Text({ text: app.title.slice(0, 1).toUpperCase(), style: { color: "accent", fontSize: "xl", fontWeight: "bold" } }) }),
-          View.Column({ style: { grow: 1, gap: 8 }, children: [
-            View.Text({ text: app.title, style: { fontSize: "xl", fontWeight: "bold" } }),
-            View.Text({ text: app.description, style: { color: "muted", fontSize: "lg" } }),
-            app.scheduleEveryMinutes ? View.Text({ text: `UPDATES EVERY ${app.scheduleEveryMinutes} MINUTES`, style: { color: "muted" } }) : null,
-          ] }),
+        View.Box({ style: { width: 68, height: 68, align: "center", justify: "center", background: "accentSoft" }, children:
+          View.Text({ text: app.title.slice(0, 1).toUpperCase(), style: { color: "accent", fontSize: "lg", fontWeight: "bold" } }) }),
+        View.Column({ style: { grow: 1, basis: 0, gap: 8, overflow: "hidden" }, children: [
+          View.Text({ text: app.title, style: { fontSize: "lg", fontWeight: "bold" } }),
+          View.Text({ text: app.description, style: { color: "muted", fontSize: "md" } }),
+          app.scheduleEveryMinutes ? View.Text({ text: `UPDATES EVERY ${app.scheduleEveryMinutes} MINUTES`, style: { color: "muted" } }) : null,
         ] }),
         uninstallMode.get()
           ? deleteButton(app.id, busy, () => PocketPi.command("apps.uninstall", { app: app.id }))
-          : View.Text({ text: "›", style: { color: "accent", fontSize: "title", fontWeight: "bold" } }),
+          : View.Text({ text: "›", style: { color: "accent", fontSize: "xl", fontWeight: "bold" } }),
       ],
     });
   }
@@ -299,9 +297,10 @@
   function networkRow(network) {
     return View.Pressable({
       onPress: () => selectNetwork(network),
-      style: { width: "full", height: LANDSCAPE ? 72 : 84, paddingX: 20, direction: "row", align: "center", justify: "between", background: "surface" },
+      style: { width: "full", height: LANDSCAPE ? 72 : 84, paddingX: 20, direction: "row", align: "center", gap: 12, background: "surface" },
       children: [
-        View.Text({ text: network.ssid, style: { fontSize: "lg", fontWeight: "bold" } }),
+        View.Column({ style: { grow: 1, basis: 0, overflow: "hidden" }, children:
+          View.Text({ text: network.ssid, style: { fontSize: "md", fontWeight: "bold" } }) }),
         View.Text({ text: `${network.rssiDbm} DBM  ${network.secured ? "LOCK" : "OPEN"}`, style: { color: "muted" } }),
       ],
     });
@@ -316,9 +315,9 @@
       View.Text({ text: psramText.get, style: { color: "subtle", fontWeight: "bold" } }),
     ] });
     const wifiSummary = View.Row({ style: { height: LANDSCAPE ? 132 : 154, paddingX: 20, align: "center", gap: 16, background: "surface" }, children: [
-      View.Column({ style: { grow: 1, gap: LANDSCAPE ? 8 : 12 }, children: [
-        View.Text({ text: "WI-FI", style: { fontSize: "lg", fontWeight: "bold" } }),
-        View.Text({ text: wifiSsid.get, style: { color: "accent", fontSize: "lg", fontWeight: "bold" } }),
+      View.Column({ style: { grow: 1, basis: 0, gap: LANDSCAPE ? 8 : 12, overflow: "hidden" }, children: [
+        View.Text({ text: "WI-FI", style: { fontSize: "md", fontWeight: "bold" } }),
+        View.Text({ text: wifiSsid.get, style: { color: "accent", fontSize: "md", fontWeight: "bold" } }),
         View.Text({ text: wifiDetail.get, style: { color: "muted" } }),
       ] }),
       View.ActionButton({
@@ -336,7 +335,7 @@
       : View.EmptyState({ compact: true, style: { height: "full" }, title: "NO NETWORK LIST YET", detail: "TAP SCAN TO FIND WI-FI" }) });
     const backendSummary = View.Column({ style: { height: LANDSCAPE ? 80 : 160, paddingX: 20, justify: "center", gap: LANDSCAPE ? 6 : 12, background: "surface" }, children: [
       View.Text({ text: "MODEL BACKEND", style: { color: "muted" } }),
-      View.Text({ text: model.get, style: { fontSize: "lg", fontWeight: "bold" } }),
+      View.Text({ text: model.get, style: { fontSize: "md", fontWeight: "bold" } }),
       View.Text({
         text: () => PiText.wrapPreview(deviceText.get(), FONT_BODY, View.viewport.width * (LANDSCAPE ? 0.4 : 0.84), 1),
         style: { color: "muted" },
@@ -379,7 +378,7 @@
               FONT_BODY,
               KEYBOARD_TEXT_WIDTH,
             ).join("\n"),
-            style: { color: "heading", fontSize: "lg" },
+            style: { color: "heading", fontSize: "md" },
           }) }),
         View.Row({ style: { height: LANDSCAPE ? 52 : 86, paddingX: 4, align: "center", justify: "between" }, children: [
           View.Text({ text: () => `${input.get().length} / ${limit} CHARACTERS`, style: { color: "muted" } }),
@@ -409,7 +408,7 @@
       systemHeader("FILE VIEWER", closeViewer),
       View.Column({ style: { grow: 1, padding: 24, gap: 12 }, children: [
         View.Box({ style: { height: 82, paddingX: 16, justify: "center", background: "surface" }, children:
-          View.Text({ text: current?.path ?? "NO FILE OPEN", style: { fontSize: "lg", fontWeight: "bold" } }) }),
+          View.Text({ text: current?.path ?? "NO FILE OPEN", style: { fontSize: "md", fontWeight: "bold" } }) }),
         View.Row({ style: { grow: 1, gap: 20 }, children: [
           View.Box({ style: { grow: 1, paddingX: 20, paddingTop: 20, background: "shell" }, children:
             View.Text({ text: current?.page.text ?? "", style: { color: "border" } }) }),
@@ -431,10 +430,10 @@
       systemHeader("MESSAGE READER", closeReader),
       View.Column({ style: { grow: 1, padding: 24, gap: 12 }, children: [
         View.Box({ style: { height: 82, paddingX: 16, justify: "center", background: "surface" }, children:
-          View.Text({ text: current?.author ?? "PI", style: { color: "accent", fontSize: "lg", fontWeight: "bold" } }) }),
+          View.Text({ text: current?.author ?? "PI", style: { color: "accent", fontSize: "md", fontWeight: "bold" } }) }),
         View.Row({ style: { grow: 1, gap: 20, overflow: "hidden" }, children: [
           View.Box({ style: { grow: 1, paddingX: 20, paddingTop: 20, background: "surface" }, children:
-            View.Text({ text: current ? current.lines.slice(offset, offset + READER_PAGE_LINES).join("\n") : "", style: { fontSize: "xl" } }) }),
+            View.Text({ text: current ? current.lines.slice(offset, offset + READER_PAGE_LINES).join("\n") : "", style: { fontSize: "lg" } }) }),
           scrollable ? View.ScrollRail({ onUp: () => moveReader(-18), onDown: () => moveReader(18), style: { height: "full" } }) : null,
         ] }),
       ] }),
@@ -458,17 +457,17 @@
       View.SectionHeading({ title: "REQUESTED ACCESS", detail: "PACKAGE MANIFEST" }),
       View.Card({ style: { grow: 1, paddingX: LANDSCAPE ? 16 : 24, paddingY: LANDSCAPE ? 12 : 24, gap: LANDSCAPE ? 8 : 20 }, children: [
         View.Text({ text: "NETWORK", style: { color: "muted", fontWeight: "bold" } }),
-        View.Text({ text: detail.network.length ? detail.network.slice(0, 2).join("\n") : "NO NETWORK ACCESS", style: { fontSize: "lg" } }),
+        View.Text({ text: detail.network.length ? detail.network.slice(0, 2).join("\n") : "NO NETWORK ACCESS", style: { fontSize: "md" } }),
         View.Box({ style: { height: 2, background: "border" } }),
         View.Text({ text: "CREDENTIALS", style: { color: "muted", fontWeight: "bold" } }),
-        View.Text({ text: detail.update ? "PRESERVE INSTALLED CREDENTIALS" : detail.credentials.length ? detail.credentials.slice(0, 3).join(", ") : "NONE", style: { fontSize: "lg" } }),
+        View.Text({ text: detail.update ? "PRESERVE INSTALLED CREDENTIALS" : detail.credentials.length ? detail.credentials.slice(0, 3).join(", ") : "NONE", style: { fontSize: "md" } }),
         View.Box({ style: { height: 2, background: "border" } }),
         View.Text({ text: "CAPABILITIES", style: { color: "muted", fontWeight: "bold" } }),
-        View.Text({ text: `${detail.tools} TOOLS  |  ${detail.schedules} SCHEDULES`, style: { fontSize: "lg" } }),
+        View.Text({ text: `${detail.tools} TOOLS  |  ${detail.schedules} SCHEDULES`, style: { fontSize: "md" } }),
       ] }),
     ] });
     const result = View.Column({ style: { grow: LANDSCAPE ? 1 : 0, height: LANDSCAPE ? undefined : 150, paddingX: 24, justify: "center", gap: 12, radius: 12, background: surface }, children: [
-      View.Text({ text: title, style: { color, fontSize: "xl", fontWeight: "bold" } }),
+      View.Text({ text: title, style: { color, fontSize: "lg", fontWeight: "bold" } }),
       View.Text({ text: message, style: { color: "muted" } }),
     ] });
     const actionButton = View.ActionButton({

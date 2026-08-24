@@ -5,7 +5,7 @@ members = [
     "crates/pocket-pi-embedded",
     "crates/pocket-pi-protocols",
     "crates/pocket-pi-tools",
-    "hosts/esp32-p4-sim",
+    "hosts/esp32-sim",
     "tools/xtask",
 ]
 # ESP-IDF owns its target, toolchain and lockfile. Keeping the firmware as a

@@ -73,7 +73,7 @@ impl BackendChoice {
             "provider": provider,
             "model": model,
             "thinkingLevel": thinking_level,
-            "systemPrompt": "You are Pocket Pi in the ESP32 simulator. Be concise."
+            "systemPrompt": "You are Pocket Pi in the ESP32 simulator. To iterate an installed ordinary App, call app.checkout, edit only its returned checkout with the normal file tools, update app.json version, then call app.submit after all edits are complete; it opens physical confirmation. Change schemaVersion and add the matching numbered migration only when the SQLite schema changes. Be concise."
         })
         .to_string()
     }

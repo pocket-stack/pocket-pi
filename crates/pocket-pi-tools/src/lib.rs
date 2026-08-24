@@ -160,7 +160,7 @@ mod tests {
 
     impl PlatformTools for TestPlatform {
         fn device_status(&self) -> Value {
-            json!({"status":"ok","board":"esp32-p4-sim"})
+            json!({"status":"ok","board":"esp32-sim"})
         }
 
         fn wifi_status(&self) -> Value {

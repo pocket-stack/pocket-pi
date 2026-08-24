@@ -4,7 +4,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex, RwLock};
@@ -26,6 +26,11 @@ pub const ROOT_APP_ID: &str = "pi-agent";
 pub const POCKETJS_REVISION: &str = "e12cf12f82cc60b636368119d49a06eb9ed2a3d5";
 pub const SYSTEM_FRAMEWORK_API: u32 = 1;
 pub const MAX_POCKETAPP_BYTES: usize = 2 * 1024 * 1024;
+const APP_CHECKOUT_TOOL: &str = "app.checkout";
+const APP_SUBMIT_TOOL: &str = "app.submit";
+const APP_EVENT_LIMIT: usize = 16;
+const APP_EVENT_ERROR_CHARS: usize = 2_048;
+const MIN_SYNCED_UNIX_SECONDS: u64 = 1_735_689_600; // 2025-01-01T00:00:00Z
 const MAX_JSON_RESOURCE_BYTES: usize = 256 * 1024;
 const MAX_RESOURCE_BYTES: usize = 512 * 1024;
 const VIEW_RUNTIME_LIMIT: usize = 3;
@@ -231,6 +236,17 @@ pub struct AppInstallReview {
     pub update: bool,
     pub current_version: Option<String>,
     pub current_schema_version: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppEvent {
+    occurred_at: Option<String>,
+    operation: String,
+    version: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 pub fn stage_pocketapp(package: &Path, staging_dir: &Path) -> Result<StagedApp> {
@@ -720,6 +736,10 @@ fn validate_app_tools(app: &InstalledApp, routes: &BTreeMap<String, ToolRoute>) 
             .and_then(Value::as_str)
             .filter(|action| !action.is_empty())
             .ok_or_else(|| anyhow!("{name} tool is missing action"))?;
+        anyhow::ensure!(
+            !matches!(name, APP_CHECKOUT_TOOL | APP_SUBMIT_TOOL),
+            "App tool name is reserved: {name}"
+        );
         anyhow::ensure!(!routes.contains_key(name), "duplicate App tool: {name}");
         anyhow::ensure!(
             !action.contains('.'),
@@ -2125,6 +2145,112 @@ impl AppSupervisor {
         self.validate_app_change(&candidate, &staged.credentials)
     }
 
+    pub fn checkout_app(&self, app_id: &str) -> Result<String> {
+        ensure_safe_component(app_id, "App id")?;
+        anyhow::ensure!(app_id != ROOT_APP_ID, "cannot checkout the System App");
+        let app = self
+            .catalog
+            .app(app_id)
+            .ok_or_else(|| anyhow!("unknown App: {app_id}"))?;
+        let app_root = self.workspace.join("apps").join(app_id);
+        let checkout = app_root.join("checkout");
+        match checkout.symlink_metadata() {
+            Ok(metadata) => {
+                anyhow::ensure!(
+                    metadata.file_type().is_dir(),
+                    "App checkout is not a directory"
+                );
+                return Ok(format!("apps/{app_id}/checkout"));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+
+        let temporary = app_root.join(".checkout-tmp");
+        if temporary.exists() {
+            std::fs::remove_dir_all(&temporary)?;
+        }
+        let copied = copy_directory(&app.release_dir, &temporary);
+        if let Err(error) = copied {
+            let _ = std::fs::remove_dir_all(&temporary);
+            return Err(error);
+        }
+        std::fs::rename(&temporary, &checkout).context("publish App checkout")?;
+        Ok(format!("apps/{app_id}/checkout"))
+    }
+
+    pub fn submit_app_checkout(
+        &self,
+        requested_path: &str,
+        install_root: &Path,
+    ) -> Result<(StagedApp, AppInstallReview)> {
+        let (app_id, checkout) = self.resolve_checkout(requested_path)?;
+        anyhow::ensure!(
+            checkout.symlink_metadata()?.file_type().is_dir(),
+            "App checkout is not a directory"
+        );
+        let candidate = load_source_release(&checkout, &app_id)?;
+        let review = self.validate_app_change(&candidate, &BTreeMap::new())?;
+        let staged = StagedApp {
+            descriptor: candidate.descriptor,
+            release_dir: checkout.clone(),
+            credentials: BTreeMap::new(),
+        };
+
+        std::fs::create_dir_all(install_root)?;
+        let job = install_root.join(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default()
+                .to_string(),
+        );
+        std::fs::create_dir(&job)?;
+        let release_dir = job.join("release");
+        if let Err(error) = std::fs::rename(&checkout, &release_dir) {
+            let _ = std::fs::remove_dir(&job);
+            return Err(error).context("submit App checkout");
+        }
+        Ok((
+            StagedApp {
+                release_dir,
+                ..staged
+            },
+            review,
+        ))
+    }
+
+    fn resolve_checkout(&self, requested_path: &str) -> Result<(String, PathBuf)> {
+        let path = Path::new(requested_path);
+        let relative = if path.is_absolute() {
+            path.strip_prefix("/workspace")
+                .context("App checkout path must be under /workspace")?
+        } else {
+            path
+        };
+        let components = relative.components().collect::<Vec<_>>();
+        anyhow::ensure!(
+            matches!(components.as_slice(), [Component::Normal(apps), Component::Normal(_), Component::Normal(checkout)] if *apps == "apps" && *checkout == "checkout"),
+            "app.submit requires apps/<id>/checkout"
+        );
+        let Component::Normal(app_id) = components[1] else {
+            unreachable!()
+        };
+        let app_id = app_id
+            .to_str()
+            .ok_or_else(|| anyhow!("App id is not UTF-8"))?
+            .to_owned();
+        ensure_safe_component(&app_id, "App id")?;
+        anyhow::ensure!(
+            app_id != ROOT_APP_ID && self.catalog.app(&app_id).is_some(),
+            "unknown App: {app_id}"
+        );
+        Ok((
+            app_id.clone(),
+            self.workspace.join("apps").join(app_id).join("checkout"),
+        ))
+    }
+
     pub fn apply_app(
         &mut self,
         staging_release: &Path,
@@ -2145,27 +2271,100 @@ impl AppSupervisor {
             descriptor.id != ROOT_APP_ID,
             "the Pi Agent System App is built into Firmware"
         );
-        let candidate = load_source_release(staging_release, &descriptor.id)?;
-        let review = self.validate_app_change(&candidate, &credentials)?;
-        let app_root = self.workspace.join("apps").join(&descriptor.id);
-        if review.update {
-            return self.update_app(staging_release, candidate, &app_root);
-        }
-        if app_root.exists() {
-            std::fs::remove_dir_all(&app_root)
-                .with_context(|| format!("clear incomplete App {}", descriptor.id))?;
-        }
-
-        let credential_ids = credentials.keys().cloned().collect::<Vec<_>>();
-        let result = self.install_new_app(staging_release, candidate, credentials, &app_root);
-        if result.is_err() {
-            if let Some(app_id) = app_root.file_name().and_then(|value| value.to_str()) {
-                self.action_runner.unregister(app_id);
-                let _ = self.services.remove_app_state(app_id, &credential_ids);
+        let operation = if self.catalog.app(&descriptor.id).is_some() {
+            "update"
+        } else {
+            "install"
+        };
+        let result = (|| {
+            let candidate = load_source_release(staging_release, &descriptor.id)?;
+            let review = self.validate_app_change(&candidate, &credentials)?;
+            let app_root = self.workspace.join("apps").join(&descriptor.id);
+            if review.update {
+                return self.update_app(staging_release, candidate, &app_root);
             }
-            let _ = std::fs::remove_dir_all(&app_root);
-        }
+            if app_root.exists() {
+                std::fs::remove_dir_all(&app_root)
+                    .with_context(|| format!("clear incomplete App {}", descriptor.id))?;
+            }
+
+            let credential_ids = credentials.keys().cloned().collect::<Vec<_>>();
+            let result = self.install_new_app(staging_release, candidate, credentials, &app_root);
+            if result.is_err() {
+                if let Some(app_id) = app_root.file_name().and_then(|value| value.to_str()) {
+                    self.action_runner.unregister(app_id);
+                    let _ = self.services.remove_app_state(app_id, &credential_ids);
+                }
+                let _ = std::fs::remove_dir_all(&app_root);
+            }
+            result
+        })();
+        self.record_app_result(&descriptor, operation, &result);
         result
+    }
+
+    fn record_app_result(
+        &self,
+        descriptor: &AppDescriptor,
+        operation: &str,
+        result: &Result<AppDescriptor>,
+    ) {
+        let (status, error) = match result {
+            Ok(_) => ("succeeded", None),
+            Err(error) => (
+                "failed",
+                Some(
+                    format!("{error:#}")
+                        .chars()
+                        .take(APP_EVENT_ERROR_CHARS)
+                        .collect(),
+                ),
+            ),
+        };
+        if let Err(error) = self.append_app_event(descriptor, operation, status, error) {
+            log::warn!(
+                "failed to record {operation} event for App {}: {error:#}",
+                descriptor.id
+            );
+        }
+    }
+
+    pub fn record_app_dismissal(&self, descriptor: &AppDescriptor, update: bool) {
+        let operation = if update { "update" } else { "install" };
+        if let Err(error) = self.append_app_event(descriptor, operation, "dismissed", None) {
+            log::warn!(
+                "failed to record dismissed {operation} for App {}: {error:#}",
+                descriptor.id
+            );
+        }
+    }
+
+    fn append_app_event(
+        &self,
+        descriptor: &AppDescriptor,
+        operation: &str,
+        status: &str,
+        error: Option<String>,
+    ) -> Result<()> {
+        ensure_safe_component(&descriptor.id, "App id")?;
+        let path = app_events_path(&self.workspace, &descriptor.id);
+        let mut events = match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice::<Vec<AppEvent>>(&bytes)
+                .with_context(|| format!("parse App events for {}", descriptor.id))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
+        events.push(AppEvent {
+            occurred_at: synchronized_utc_timestamp(),
+            operation: operation.to_owned(),
+            version: descriptor.version.clone(),
+            status: status.to_owned(),
+            error,
+        });
+        if events.len() > APP_EVENT_LIMIT {
+            events.drain(..events.len() - APP_EVENT_LIMIT);
+        }
+        atomic_write(&path, &serde_json::to_vec_pretty(&events)?)
     }
 
     fn validate_app_change(
@@ -2280,7 +2479,6 @@ impl AppSupervisor {
             .get(&app_id)
             .cloned()
             .expect("installed App has a revision");
-
         let rehearsal_root = staging_release.with_extension("rehearsal");
         if rehearsal_root.exists() {
             std::fs::remove_dir_all(&rehearsal_root)?;
@@ -2443,6 +2641,11 @@ impl AppSupervisor {
             .catalog
             .app(app_id)
             .ok_or_else(|| anyhow!("unknown App: {app_id}"))?;
+        match std::fs::remove_file(app_events_path(&self.workspace, app_id)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("delete App events"),
+        }
 
         let removed_tools = app
             .descriptor
@@ -2901,6 +3104,12 @@ fn validate_update_contract(
     current_schema: u32,
 ) -> Result<()> {
     anyhow::ensure!(
+        candidate.descriptor.version != installed.descriptor.version,
+        "App {} update must change version {}",
+        candidate.descriptor.id,
+        installed.descriptor.version
+    );
+    anyhow::ensure!(
         candidate.descriptor.schema_version >= installed.descriptor.schema_version,
         "App {} cannot downgrade schema {} to {}",
         candidate.descriptor.id,
@@ -3043,6 +3252,47 @@ fn seed_system_runtime(workspace: &Path) -> Result<()> {
     atomic_write(&workspace.join("system/view-sdk.pak"), system_view_pak())
 }
 
+fn app_events_relative_path(app_id: &str) -> String {
+    format!(".system/app-events/{app_id}.json")
+}
+
+fn app_events_path(workspace: &Path, app_id: &str) -> PathBuf {
+    workspace.join(app_events_relative_path(app_id))
+}
+
+fn synchronized_utc_timestamp() -> Option<String> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+    let seconds = now.as_secs();
+    if seconds < MIN_SYNCED_UNIX_SECONDS {
+        return None;
+    }
+    let days = (seconds / 86_400) as i64;
+    let seconds_of_day = seconds % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
+        seconds_of_day / 3_600,
+        (seconds_of_day % 3_600) / 60,
+        seconds_of_day % 60,
+        now.subsec_millis()
+    ))
+}
+
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    (year, month, day)
+}
+
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     if std::fs::read(path).ok().as_deref() == Some(bytes) {
         return Ok(());
@@ -3065,7 +3315,23 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-pub struct AppToolRequest {
+fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
+    std::fs::create_dir(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let target = destination.join(entry.file_name());
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            copy_directory(&entry.path(), &target)?;
+        } else {
+            anyhow::ensure!(kind.is_file(), "App source contains a non-file entry");
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+pub struct AgentToolRequest {
     name: String,
     args_json: String,
     deadline: Instant,
@@ -3075,22 +3341,22 @@ pub struct AppToolRequest {
 pub struct RoutedToolHost {
     native: Arc<dyn ToolHost>,
     catalog: InstalledAppIndex,
-    app_tx: mpsc::Sender<AppToolRequest>,
+    agent_tx: mpsc::Sender<AgentToolRequest>,
 }
 
 impl RoutedToolHost {
     pub fn new(
         native: Arc<dyn ToolHost>,
         catalog: InstalledAppIndex,
-    ) -> (Self, mpsc::Receiver<AppToolRequest>) {
-        let (app_tx, app_rx) = mpsc::channel();
+    ) -> (Self, mpsc::Receiver<AgentToolRequest>) {
+        let (agent_tx, agent_rx) = mpsc::channel();
         (
             Self {
                 native,
                 catalog,
-                app_tx,
+                agent_tx,
             },
-            app_rx,
+            agent_rx,
         )
     }
 }
@@ -3098,19 +3364,22 @@ impl RoutedToolHost {
 impl ToolHost for RoutedToolHost {
     fn definitions(&self) -> Vec<Value> {
         let mut definitions = self.native.definitions();
+        definitions.extend(agent_app_tool_definitions());
         definitions.extend(self.catalog.tool_definitions());
         definitions
     }
 
     fn execute(&self, call_id: &str, name: &str, args_json: &str) -> ToolResult {
-        if self.catalog.route_for_tool(name).is_none() {
+        if !matches!(name, APP_CHECKOUT_TOOL | APP_SUBMIT_TOOL)
+            && self.catalog.route_for_tool(name).is_none()
+        {
             return self.native.execute(call_id, name, args_json);
         }
         let (response, response_rx) = mpsc::channel();
         let deadline = new_action_deadline();
         if self
-            .app_tx
-            .send(AppToolRequest {
+            .agent_tx
+            .send(AgentToolRequest {
                 name: name.to_owned(),
                 args_json: args_json.to_owned(),
                 deadline,
@@ -3135,9 +3404,73 @@ impl ToolHost for RoutedToolHost {
     }
 }
 
-impl AppToolRequest {
-    pub fn handle(self, supervisor: &AppSupervisor) {
-        supervisor.begin_agent_tool(&self.name, &self.args_json, self.deadline, self.response);
+impl AgentToolRequest {
+    pub fn handle(
+        self,
+        supervisor: &mut AppSupervisor,
+        submit: impl FnOnce(&mut AppSupervisor, &str) -> Result<Value>,
+    ) {
+        match self.name.as_str() {
+            APP_CHECKOUT_TOOL => {
+                let result = required_tool_string(&self.args_json, "id").and_then(|app_id| {
+                    supervisor.checkout_app(&app_id).map(|path| {
+                        json!({
+                            "status":"ready",
+                            "path":path,
+                            "recentEventsPath":app_events_relative_path(&app_id)
+                        })
+                    })
+                });
+                let _ = self.response.send(tool_result(result));
+            }
+            APP_SUBMIT_TOOL => {
+                let result = required_tool_string(&self.args_json, "path")
+                    .and_then(|path| submit(supervisor, &path));
+                let _ = self.response.send(tool_result(result));
+            }
+            _ => supervisor.begin_agent_tool(
+                &self.name,
+                &self.args_json,
+                self.deadline,
+                self.response,
+            ),
+        }
+    }
+}
+
+fn agent_app_tool_definitions() -> [Value; 2] {
+    [
+        json!({
+            "name":APP_CHECKOUT_TOOL,
+            "description":"Create or reopen an editable copy of an installed ordinary App at apps/<id>/checkout. The result also provides its recent install and update events file. Read those events before editing, then edit only the checkout path with the normal file tools; App data is not copied.",
+            "parameters":{"type":"object","properties":{"id":{"type":"string","description":"Installed ordinary App id"}},"required":["id"],"additionalProperties":false}
+        }),
+        json!({
+            "name":APP_SUBMIT_TOOL,
+            "description":"After all edits are complete, validate and submit the canonical apps/<id>/checkout directory for physical user confirmation. Update app.json version before submitting. Change schemaVersion and add migrations/<n>.sql only when the SQLite schema changes.",
+            "parameters":{"type":"object","properties":{"path":{"type":"string","description":"The path returned by app.checkout"}},"required":["path"],"additionalProperties":false}
+        }),
+    ]
+}
+
+fn required_tool_string(args_json: &str, key: &str) -> Result<String> {
+    let args: Value = serde_json::from_str(args_json).with_context(|| "invalid tool arguments")?;
+    args.get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("{key} must be a non-empty string"))
+}
+
+fn tool_result(result: Result<Value>) -> ToolResult {
+    match result {
+        Ok(value) => ToolResult {
+            text: value.to_string(),
+            details: value,
+            is_error: false,
+            terminate: false,
+        },
+        Err(error) => tool_error(format!("{error:#}")),
     }
 }
 
@@ -3483,6 +3816,10 @@ mod tests {
             .unwrap()
     }
 
+    fn read_app_events(workspace: &Path, app_id: &str) -> Vec<Value> {
+        serde_json::from_slice(&std::fs::read(app_events_path(workspace, app_id)).unwrap()).unwrap()
+    }
+
     #[test]
     fn catalog_uses_each_apps_declared_tool_namespace() {
         let temp = tempfile::tempdir().unwrap();
@@ -3528,7 +3865,9 @@ mod tests {
         let call = std::thread::spawn(move || {
             tools.execute("call", "workspace.delete", r#"{"path":"agent-delete.txt"}"#)
         });
-        requests.recv().unwrap().handle(&supervisor);
+        requests.recv().unwrap().handle(&mut supervisor, |_, _| {
+            anyhow::bail!("unexpected app.submit")
+        });
         assert!(!call.join().unwrap().is_error);
         assert!(!agent_file.exists());
         assert!(supervisor.active_projection_is_stale());
@@ -3699,7 +4038,7 @@ mod tests {
             .eval(
                 "scaled-view",
                 r#"
-                  globalThis.__actionLabelWidth = View.measureText("REFRESH NOW", { fontSize: "lg", fontWeight: "bold" });
+                  globalThis.__actionLabelWidth = View.measureText("REFRESH NOW", { fontSize: "md", fontWeight: "bold" });
                   View.mount(() => View.Screen({
                     style: { align: "start", gap: 16 },
                     children: [
@@ -4167,7 +4506,7 @@ mod tests {
     }
 
     #[test]
-    fn app_tool_request_carries_the_single_80_second_deadline() {
+    fn agent_tool_request_carries_the_single_80_second_deadline() {
         assert_eq!(APP_ACTION_TIMEOUT, Duration::from_secs(80));
         let temp = tempfile::tempdir().unwrap();
         install_fixture(
@@ -4379,6 +4718,97 @@ mod tests {
     }
 
     #[test]
+    fn app_checkout_copies_source_once_without_copying_data() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("device");
+        let catalog = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
+        let mut supervisor =
+            AppSupervisor::new(&workspace, TEST_VIEWPORT, catalog, Arc::new(NoServices)).unwrap();
+        let initial = temp.path().join("notes-v1");
+        stage_notes_app(&initial, "1.0.0", 1, false);
+        supervisor.apply_app(&initial, BTreeMap::new()).unwrap();
+        std::fs::write(workspace.join("apps/notes/data/keep.txt"), "keep me").unwrap();
+
+        let (response, result) = mpsc::channel();
+        AgentToolRequest {
+            name: APP_CHECKOUT_TOOL.to_owned(),
+            args_json: json!({"id":"notes"}).to_string(),
+            deadline: new_action_deadline(),
+            response,
+        }
+        .handle(&mut supervisor, |_, _| {
+            anyhow::bail!("unexpected app.submit")
+        });
+        let result = result.recv().unwrap();
+        assert!(!result.is_error, "{}", result.text);
+        assert_eq!(
+            result.details["recentEventsPath"],
+            ".system/app-events/notes.json"
+        );
+        let path = result.details["path"].as_str().unwrap().to_owned();
+        assert_eq!(path, "apps/notes/checkout");
+        let checkout = workspace.join(&path);
+        assert!(checkout.join("app.json").is_file());
+        assert!(!checkout.join("data").exists());
+
+        std::fs::write(checkout.join("view.js"), "agent edit").unwrap();
+        supervisor.checkout_app("notes").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(checkout.join("view.js")).unwrap(),
+            "agent edit"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("apps/notes/data/keep.txt")).unwrap(),
+            "keep me"
+        );
+    }
+
+    #[test]
+    fn app_submit_moves_the_checkout_to_the_existing_installer() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("device");
+        let catalog = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
+        let mut supervisor =
+            AppSupervisor::new(&workspace, TEST_VIEWPORT, catalog, Arc::new(NoServices)).unwrap();
+        let initial = temp.path().join("notes-v1");
+        stage_notes_app(&initial, "1.0.0", 1, false);
+        supervisor.apply_app(&initial, BTreeMap::new()).unwrap();
+        let path = supervisor.checkout_app("notes").unwrap();
+        let checkout = workspace.join(&path);
+        let install_root = workspace.join(".system/install");
+        let error = supervisor
+            .submit_app_checkout(&path, &install_root)
+            .err()
+            .expect("unchanged App version must be rejected");
+        assert!(error.to_string().contains("must change version"));
+        assert!(checkout.is_dir());
+
+        let mut descriptor: Value =
+            serde_json::from_slice(&std::fs::read(checkout.join("app.json")).unwrap()).unwrap();
+        descriptor["version"] = json!("1.1.0");
+        std::fs::write(
+            checkout.join("app.json"),
+            serde_json::to_vec_pretty(&descriptor).unwrap(),
+        )
+        .unwrap();
+
+        let (staged, review) = supervisor
+            .submit_app_checkout(&path, &install_root)
+            .unwrap();
+
+        assert!(review.update);
+        assert_eq!(review.current_version.as_deref(), Some("1.0.0"));
+        assert_eq!(staged.descriptor.version, "1.1.0");
+        assert!(staged.release_dir.starts_with(&install_root));
+        assert!(staged.release_dir.join("app.json").is_file());
+        assert!(!checkout.exists());
+        assert_eq!(
+            supervisor.catalog().descriptor("notes").unwrap().version,
+            "1.0.0"
+        );
+    }
+
+    #[test]
     fn update_requires_and_runs_the_schema_migration() {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("device");
@@ -4388,6 +4818,16 @@ mod tests {
         let initial = temp.path().join("notes-v1");
         stage_notes_app(&initial, "1.0.0", 1, false);
         supervisor.apply_app(&initial, BTreeMap::new()).unwrap();
+        let events = read_app_events(&workspace, "notes");
+        assert_eq!(
+            (
+                &events[0]["operation"],
+                &events[0]["version"],
+                &events[0]["status"]
+            ),
+            (&json!("install"), &json!("1.0.0"), &json!("succeeded"))
+        );
+        assert!(events[0]["occurredAt"].is_string());
         {
             let mut database = supervisor.databases["notes"].lock().unwrap();
             let handle = database.open("notes");
@@ -4401,6 +4841,13 @@ mod tests {
         stage_notes_app(&missing, "2.0.0", 2, false);
         let error = supervisor.apply_app(&missing, BTreeMap::new()).unwrap_err();
         assert!(error.to_string().contains("migrations/2.sql"));
+        let events = read_app_events(&workspace, "notes");
+        assert_eq!(events[1]["operation"], "update");
+        assert_eq!(events[1]["status"], "failed");
+        assert!(events[1]["error"]
+            .as_str()
+            .unwrap()
+            .contains("migrations/2.sql"));
         assert_eq!(
             supervisor.catalog().descriptor("notes").unwrap().version,
             "1.0.0"
@@ -4430,6 +4877,11 @@ mod tests {
         };
         assert_eq!(read_note(&supervisor).text, "keep me");
         assert!(supervisor.apply_app(&failing, BTreeMap::new()).is_err());
+        let events = read_app_events(&workspace, "notes");
+        assert_eq!(events[2]["status"], "failed");
+        assert!(events[2]["error"]
+            .as_str()
+            .is_some_and(|error| !error.is_empty()));
         let result = read_note(&supervisor);
         assert!(!result.is_error, "{}", result.text);
         assert_eq!(result.text, "keep me");
@@ -4448,6 +4900,11 @@ mod tests {
         let update = temp.path().join("notes-v2");
         stage_notes_app(&update, "2.0.0", 2, true);
         supervisor.apply_app(&update, BTreeMap::new()).unwrap();
+        let events = read_app_events(&workspace, "notes");
+        assert_eq!(events[3]["operation"], "update");
+        assert_eq!(events[3]["version"], "2.0.0");
+        assert_eq!(events[3]["status"], "succeeded");
+        assert!(events[3].get("error").is_none());
         let mut database = supervisor.databases["notes"].lock().unwrap();
         let handle = database.open("notes");
         let result: Value =
@@ -4563,6 +5020,7 @@ mod tests {
             "secret".to_owned(),
         )]);
         supervisor.apply_app(&staging, credentials.clone()).unwrap();
+        assert!(app_events_path(&workspace, "robinhood").is_file());
         supervisor.open("robinhood").unwrap();
         std::fs::write(
             workspace.join("apps/robinhood/data/user-state"),
@@ -4601,6 +5059,7 @@ mod tests {
         assert!(!supervisor.revisions.contains_key("robinhood"));
         assert!(supervisor.schedules.schedules.is_empty());
         assert!(!workspace.join("apps/robinhood").exists());
+        assert!(!app_events_path(&workspace, "robinhood").exists());
         assert!(services.credentials.lock().unwrap().is_empty());
         assert_eq!(
             *services.removed_apps.lock().unwrap(),

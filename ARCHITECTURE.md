@@ -12,7 +12,7 @@ development tool:
 | --- | --- | --- |
 | Reference hardware | `firmware/esp32-p4` | ESP32-P4 is the first fully supported Pocket Pi target |
 | Supported hardware | `firmware/esp32-s3` | Waveshare ESP32-S3-Touch-LCD-4.3 with a 480x800 logical viewport |
-| Development simulator | `hosts/esp32-p4-sim` | Runs the ESP32-P4 product contracts on macOS; not a desktop product or hardware target |
+| Development simulator | `hosts/esp32-sim` | Runs the shared ESP32 product contracts on macOS; not a desktop product or hardware target |
 
 All compositions use the same resident `pi-agent-core` System App and ordinary
 App source. The firmware targets share the AgentOS host loop in
@@ -25,13 +25,16 @@ The authoritative detailed design is
 ## Ownership
 
 - `crates/pocket-pi-agentos` owns the in-memory `InstalledAppIndex`, runtime
-  lifecycle, foreground selection, schedules, App Tool routing, and App-scoped
-  FS/SQLite mounts. There is no separate persistent App Catalog service.
+  lifecycle, foreground selection, schedules, App Tool routing, Agent
+  checkout/submit, and App-scoped FS/SQLite mounts. There is no separate
+  persistent App Catalog service.
 - `tools/xtask` builds the firmware-embedded System App and packages ordinary
   Apps without moving product logic into the AgentOS runtime or host adapters.
 - HTTP and UART are package ingress adapters. Both hand the complete `.pocketapp`
   to the Installer, which alone validates, stores credentials and activates
-  runtime metadata at the single `apps/<id>/release` path.
+  runtime metadata at the single `apps/<id>/release` path. Agent submit moves
+  `apps/<id>/checkout` into the same Installer staging and confirmation path;
+  it is not another updater.
 - `crates/pocket-pi-embedded` provides the bounded JavaScript Agent Loop bridge.
   In AgentOS hosts, the loop is loaded from the Pi Agent System App release into
   the same PocketJS Guest as its Root View.
@@ -72,6 +75,12 @@ does not introduce a second lifecycle manager or affect the resident Pi Agent.
 Ordinary Apps receive capability-scoped data roots. Pi Agent alone owns the
 top-level `/workspace` and cross-App Tool Registry.
 
+For ordinary App iteration, `app.checkout` copies only the live source to
+`apps/<id>/checkout`; the Agent edits that directory with the existing workspace
+Tools. `app.submit` validates and renames it into Installer staging, then opens
+the physical confirmation screen while the Agent completes normally. App data
+and credentials never enter the checkout.
+
 ## Repository map
 
 ```text
@@ -80,7 +89,7 @@ crates/pocket-pi-agentos/   App Supervisor and AgentOS contracts
 crates/pocket-pi-embedded/  embedded pi-agent-core bridge and host traits
 crates/pocket-pi-tools/     native workspace/shell/time/schedule Tools
 crates/pocket-pi-protocols/ provider codecs
-hosts/esp32-p4-sim/         macOS development simulator for ESP32-P4 contracts
+hosts/esp32-sim/            macOS development simulator for shared ESP32 contracts
 firmware/esp32-common/      shared ESP-IDF AgentOS host loop and services
 firmware/esp32-p4/          first supported target and reference implementation
 firmware/esp32-s3/          Waveshare ESP32-S3-Touch-LCD-4.3 board host
@@ -99,9 +108,9 @@ cargo xtask package app exa path/to/exa-credentials.json
 cargo xtask package app robinhood path/to/robinhood-credentials.json
 cargo xtask build esp32-p4
 cargo xtask build esp32-s3
-cargo xtask build esp32-p4-sim
-cargo xtask run esp32-p4-sim
-cargo xtask snapshot esp32-p4-sim
+cargo xtask build esp32-sim
+cargo xtask run esp32-sim
+cargo xtask snapshot esp32-sim
 ```
 
 Simulator proof, firmware compilation, and physical-board proof are separate

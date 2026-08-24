@@ -2,7 +2,7 @@
 
 Pocket Pi is a device runtime, not an App running on a general-purpose OS.
 ESP32-P4 is the reference hardware host, ESP32-S3 is a supported hardware host,
-and `hosts/esp32-p4-sim` is a development and product-contract simulator rather
+and `hosts/esp32-sim` is a development and product-contract simulator rather
 than a separate product.
 
 Ordinary Apps are installed and executed as raw JavaScript source. The device
@@ -202,10 +202,13 @@ it exactly once before passing it to PocketJS. `full`, flex weights, opacity,
 rotation and other unitless values are unchanged.
 
 Fonts keep using the shared fixed atlas slots so text is never made unreadable
-by display scaling. Every `Pressable` keeps at least a 40x40 physical-pixel hit
-target. `ActionButton` additionally keeps at least 48 physical pixels of height
-and enough width for its measured label plus 16 physical pixels of padding on
-each side. These are shared component invariants, not App or board breakpoints.
+by display scaling. `fontSize` is `sm`, `md`, `lg` or `xl` (16, 18, 20 or 24
+physical pixels), and each size supports `regular` and `bold`. `View.Text`
+defaults to `md regular`. Every `Pressable` keeps at least a 40x40 physical-pixel
+hit target. `ActionButton` additionally keeps at least 48 physical pixels of
+height and enough width for its measured label plus 16 physical pixels of
+padding on each side. These are shared component invariants, not App or board
+breakpoints.
 
 The same logical viewport coordinate system is used for rendering and touch.
 Rust does not choose App page layouts. Apps compose semantic `Row`, `Column`
@@ -248,9 +251,10 @@ its local `text.js`; only its resident Agent loop remains a built `agent.js`.
 The native seed adds `plan.json`. These System files are not accepted in an
 ordinary `.pocketapp`.
 
-App `version` identifies the source release shown to the user. Integer
-`schemaVersion` identifies only the SQLite shape and changes only when that
-shape changes. The two versions deliberately do not advance together.
+App `version` identifies the source release shown to the user and must change
+for every update; the runtime does not impose an ordering on that string.
+Integer `schemaVersion` identifies only the SQLite shape and changes only when
+that shape changes. The two versions deliberately do not advance together.
 
 ## Install, update and uninstall
 
@@ -280,13 +284,50 @@ update through the same supervisor path:
 
 `.update/release` exists only after physical confirmation and is the complete
 recovery signal. If power is lost, boot reruns any uncommitted SQLite migration
-and finishes the source swap. There is no persistent installation record,
-release history or rollback mechanism. Explicit uninstall still removes all
-App-owned state.
+and finishes the source swap. The runtime keeps the latest 16 terminal install
+and update events in `.system/app-events/<id>.json`, including bounded failure
+text. This is diagnostic context, not release history or a rollback mechanism.
+Explicit uninstall removes both App-owned state and this event file.
 
 Migration files contain only schema/data statements. The runtime owns the
 transaction and `PRAGMA user_version`; Apps must not put transaction control or
 set `user_version` inside `migrations/N.sql`.
+
+### Agent-driven App iteration
+
+The Pi Agent gets two lifecycle Tools; ordinary file editing continues to use
+the existing workspace Tools:
+
+1. `app.checkout({id})` copies the installed source release once to
+   `apps/<id>/checkout` and returns that path together with
+   `.system/app-events/<id>.json`. Calling it again reopens the same checkout
+   without overwriting Agent work.
+2. The Agent reads and edits that directory, advances `app.json` `version`, and
+   changes `schemaVersion` plus `migrations/N.sql` only for a SQLite shape
+   change.
+3. `app.submit({path})` validates the canonical checkout against the installed
+   App, then renames it to `.system/install/<job>/release` and opens the same
+   physical review UI used by HTTP and UART packages.
+4. Confirmation runs the existing `AppSupervisor::apply_app` update path.
+   Dismissal discards the staged candidate.
+
+The ordinary App root therefore has only four meaningful locations:
+
+```text
+apps/<id>/
+├── release/       live source
+├── checkout/      editable candidate, present only before submit
+├── data/          durable App data and SQLite
+└── tmp/           disposable App files
+```
+
+Checkout never copies `data/`, `tmp/` or credentials. Submit is a same-filesystem
+rename, not another source copy. `.update/` is still created only after physical
+confirmation by the existing crash-safe updater. The generic workspace Tools
+remain capable of writing under `apps/`; that capability is not a second update
+contract, and the Agent reads the returned recent events before iterating through
+checkout and submit. Event timestamps are UTC when the device clock is
+synchronized and `null` before then; the runtime never invents an epoch time.
 
 ## Minimal native capability surface
 
@@ -327,10 +368,14 @@ The core contracts are exercised in `crates/pocket-pi-agentos/src/lib.rs`:
 - code-only update preserves SQLite data and native credentials.
 - schema update rejects missing steps and preserves rows through migration.
 - boot completes an approved update interrupted before activation.
+- Agent checkout copies only source, preserves an existing checkout and never
+  copies App data.
+- Agent submit moves the validated checkout into shared Installer staging
+  without changing the live App before confirmation.
 - Schedule success is recorded only after its Action actually completes.
 - Projection and SQLite errors propagate instead of becoming an empty View.
 - uninstall removes App-owned routing, Guests, schedules, credentials and data.
 
-`hosts/esp32-p4-sim` adds end-to-end tests for Exa and Robinhood Action writes,
+`hosts/esp32-sim` adds end-to-end tests for Exa and Robinhood Action writes,
 fixed Views and install/restart restoration. Simulator evidence does not replace
 an ESP32 build, boot or physical touch/network acceptance test.
