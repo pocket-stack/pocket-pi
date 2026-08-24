@@ -7,6 +7,7 @@ repository.workspace = true
 description = "Small pi-agent-core runtime for embedded Pocket Pi hosts"
 
 [dependencies]
+log.workspace = true
 pocket-mod.workspace = true
 pocket-pi-protocols.workspace = true
 # pocket-mod re-exports these types but does not enable target bindings.

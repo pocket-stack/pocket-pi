@@ -2006,6 +2006,7 @@ dependencies = [
 name = "pocket-pi-embedded"
 version = "0.1.0"
 dependencies = [
+ "log",
  "pocket-mod",
  "pocket-pi-protocols",
  "rquickjs",

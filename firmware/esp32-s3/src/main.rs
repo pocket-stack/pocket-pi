@@ -24,6 +24,8 @@ const AGENTOS_TASK_STACK_BYTES: u32 = 48 * 1024;
 fn main() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
+    let reset_reason = unsafe { esp_idf_svc::sys::esp_reset_reason() };
+    log::warn!("diag boot phase=main_start reset_reason={reset_reason}");
 
     esp_result("pi_s3_flash_dispatcher_init", unsafe {
         esp_idf_svc::sys::pi_s3_flash_dispatcher_init()

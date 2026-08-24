@@ -83,8 +83,10 @@ impl CodingTools {
     }
 
     fn read(&self, args: &serde_json::Value) -> Result<NativeToolResult, String> {
+        let started = std::time::Instant::now();
         let raw_path = required_string(args, "path")?;
         let path = self.resolve(raw_path)?;
+        log::info!("diag fs.read phase=start path={raw_path}");
         let content = read_text_file(&path)?;
         let lines: Vec<&str> = content.split('\n').collect();
         let offset = optional_usize(args, "offset")?.unwrap_or(1).max(1);
@@ -110,7 +112,7 @@ impl CodingTools {
                 "\n\n[More content available. Use offset={next_offset} to continue.]"
             ));
         }
-        Ok(NativeToolResult {
+        let result = NativeToolResult {
             text,
             details: serde_json::json!({
                 "path": display_path(&self.root, &path),
@@ -118,10 +120,19 @@ impl CodingTools {
                 "truncated": truncation
             }),
             terminate: false,
-        })
+        };
+        log::info!(
+            "diag fs.read phase=done path={raw_path} elapsed_ms={} file_bytes={} total_lines={} output_bytes={} truncated={truncation}",
+            started.elapsed().as_millis(),
+            content.len(),
+            lines.len(),
+            result.text.len()
+        );
+        Ok(result)
     }
 
     fn write(&self, call_id: &str, args: &serde_json::Value) -> Result<NativeToolResult, String> {
+        let started = std::time::Instant::now();
         let raw_path = required_string(args, "path")?;
         let content = required_string(args, "content")?;
         ensure_size(content.len() as u64)?;
@@ -130,7 +141,16 @@ impl CodingTools {
             .mutation_lock
             .lock()
             .map_err(|_| "workspace mutation lock poisoned")?;
-        atomic_write(&path, content.as_bytes(), call_id)?;
+        log::info!(
+            "diag fs.write phase=start path={raw_path} bytes={}",
+            content.len()
+        );
+        atomic_write(&path, raw_path, content.as_bytes(), call_id)?;
+        log::info!(
+            "diag fs.write phase=done path={raw_path} elapsed_ms={} bytes={}",
+            started.elapsed().as_millis(),
+            content.len()
+        );
         Ok(NativeToolResult {
             text: format!("Successfully wrote {} bytes to {raw_path}", content.len()),
             details: serde_json::json!({"path":display_path(&self.root, &path),"bytes":content.len()}),
@@ -139,6 +159,7 @@ impl CodingTools {
     }
 
     fn edit(&self, call_id: &str, args: &serde_json::Value) -> Result<NativeToolResult, String> {
+        let started = std::time::Instant::now();
         let raw_path = required_string(args, "path")?;
         let edits = args
             .get("edits")
@@ -152,6 +173,10 @@ impl CodingTools {
             .mutation_lock
             .lock()
             .map_err(|_| "workspace mutation lock poisoned")?;
+        log::info!(
+            "diag fs.edit phase=start path={raw_path} replacements={}",
+            edits.len()
+        );
         let original = read_text_file(&path)?;
         let uses_crlf = original.contains("\r\n");
         let normalized = original.replace("\r\n", "\n").replace('\r', "\n");
@@ -190,7 +215,14 @@ impl CodingTools {
             updated = updated.replace('\n', "\r\n");
         }
         ensure_size(updated.len() as u64)?;
-        atomic_write(&path, updated.as_bytes(), call_id)?;
+        atomic_write(&path, raw_path, updated.as_bytes(), call_id)?;
+        log::info!(
+            "diag fs.edit phase=done path={raw_path} elapsed_ms={} replacements={} old_bytes={} new_bytes={}",
+            started.elapsed().as_millis(),
+            edits.len(),
+            original.len(),
+            updated.len()
+        );
         Ok(NativeToolResult {
             text: format!(
                 "Successfully replaced {} block(s) in {raw_path}.",
@@ -206,8 +238,11 @@ impl CodingTools {
     }
 
     fn find(&self, args: &serde_json::Value) -> Result<NativeToolResult, String> {
+        let started = std::time::Instant::now();
         let pattern = required_string(args, "pattern")?;
-        let search = self.resolve(optional_string(args, "path").unwrap_or("."))?;
+        let raw_path = optional_string(args, "path").unwrap_or(".");
+        let search = self.resolve(raw_path)?;
+        log::info!("diag fs.find phase=start path={raw_path}");
         require_directory(&search)?;
         let limit = optional_usize(args, "limit")?
             .unwrap_or(1_000)
@@ -238,16 +273,25 @@ impl CodingTools {
         if limit_reached {
             text.push_str(&format!("\n\n[{limit} results limit reached]"));
         }
-        Ok(NativeToolResult {
+        let result = NativeToolResult {
             text,
             details: serde_json::json!({"resultLimitReached":limit_reached.then_some(limit),"truncated":truncated}),
             terminate: false,
-        })
+        };
+        log::info!(
+            "diag fs.find phase=done path={raw_path} elapsed_ms={} results={} limit_reached={limit_reached} output_truncated={truncated}",
+            started.elapsed().as_millis(),
+            paths.len()
+        );
+        Ok(result)
     }
 
     fn grep(&self, args: &serde_json::Value) -> Result<NativeToolResult, String> {
+        let started = std::time::Instant::now();
         let pattern = required_string(args, "pattern")?;
-        let search = self.resolve(optional_string(args, "path").unwrap_or("."))?;
+        let raw_path = optional_string(args, "path").unwrap_or(".");
+        let search = self.resolve(raw_path)?;
+        log::info!("diag fs.grep phase=start path={raw_path}");
         if !search.exists() {
             return Err(format!("Path not found: {}", search.display()));
         }
@@ -351,15 +395,23 @@ impl CodingTools {
         if !notices.is_empty() {
             text.push_str(&format!("\n\n[{}]", notices.join(". ")));
         }
-        Ok(NativeToolResult {
+        let result = NativeToolResult {
             text,
             details: serde_json::json!({"matchLimitReached":limit_reached.then_some(limit),"linesTruncated":lines_truncated,"truncated":truncated}),
             terminate: false,
-        })
+        };
+        log::info!(
+            "diag fs.grep phase=done path={raw_path} elapsed_ms={} matches={matches} limit_reached={limit_reached} output_truncated={truncated}",
+            started.elapsed().as_millis()
+        );
+        Ok(result)
     }
 
     fn ls(&self, args: &serde_json::Value) -> Result<NativeToolResult, String> {
-        let path = self.resolve(optional_string(args, "path").unwrap_or("."))?;
+        let started = std::time::Instant::now();
+        let raw_path = optional_string(args, "path").unwrap_or(".");
+        let path = self.resolve(raw_path)?;
+        log::info!("diag fs.ls phase=start path={raw_path}");
         require_directory(&path)?;
         let limit = optional_usize(args, "limit")?
             .unwrap_or(500)
@@ -387,11 +439,17 @@ impl CodingTools {
         if limit_reached {
             text.push_str(&format!("\n\n[{limit} entries limit reached]"));
         }
-        Ok(NativeToolResult {
+        let result = NativeToolResult {
             text,
             details: serde_json::json!({"entryLimitReached":limit_reached.then_some(limit),"truncated":truncated}),
             terminate: false,
-        })
+        };
+        log::info!(
+            "diag fs.ls phase=done path={raw_path} elapsed_ms={} entries={} limit_reached={limit_reached} output_truncated={truncated}",
+            started.elapsed().as_millis(),
+            entries.len()
+        );
+        Ok(result)
     }
 
     fn resolve(&self, input: &str) -> Result<PathBuf, String> {
@@ -466,7 +524,8 @@ fn read_text_file(path: &Path) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| format!("File is not valid UTF-8: {}", path.display()))
 }
 
-fn atomic_write(path: &Path, bytes: &[u8], call_id: &str) -> Result<(), String> {
+fn atomic_write(path: &Path, path_label: &str, bytes: &[u8], call_id: &str) -> Result<(), String> {
+    let started = std::time::Instant::now();
     let parent = path
         .parent()
         .ok_or_else(|| "file has no parent directory".to_owned())?;
@@ -476,6 +535,10 @@ fn atomic_write(path: &Path, bytes: &[u8], call_id: &str) -> Result<(), String> 
     call_id.hash(&mut hasher);
     path.hash(&mut hasher);
     let temp = parent.join(format!(".ppi-{:016x}.tmp", hasher.finish()));
+    log::info!(
+        "diag fs.atomic_write phase=create path={path_label} bytes={}",
+        bytes.len()
+    );
     let result = (|| {
         let mut file = fs::File::create(&temp)
             .map_err(|error| format!("Cannot create temporary file: {error}"))?;
@@ -483,6 +546,7 @@ fn atomic_write(path: &Path, bytes: &[u8], call_id: &str) -> Result<(), String> 
             .map_err(|error| format!("Cannot write temporary file: {error}"))?;
         file.sync_all()
             .map_err(|error| format!("Cannot sync temporary file: {error}"))?;
+        log::info!("diag fs.atomic_write phase=synced path={path_label}");
         drop(file);
         fs::rename(&temp, path)
             .map_err(|error| format!("Cannot replace {}: {error}", path.display()))
@@ -490,6 +554,11 @@ fn atomic_write(path: &Path, bytes: &[u8], call_id: &str) -> Result<(), String> 
     if result.is_err() {
         let _ = fs::remove_file(&temp);
     }
+    log::info!(
+        "diag fs.atomic_write phase=done path={path_label} elapsed_ms={} ok={}",
+        started.elapsed().as_millis(),
+        result.is_ok()
+    );
     result
 }
 
