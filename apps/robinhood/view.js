@@ -304,7 +304,7 @@ function compactActivity(state, index) {
   const item = activityPreview(state, index);
   return View.Row({ style: { height: 80, paddingX: 20, align: "center", justify: "between" }, children: [
     View.Column({ style: { grow: 1, gap: 8 }, children: [
-      View.Text({ text: item.title, style: { fontSize: "lg", color: "heading", fontWeight: "bold" } }),
+      View.Text({ text: item.title, style: { fontSize: "md", color: "heading", fontWeight: "bold" } }),
       View.Text({ text: item.timestamp ? item.timestamp + "  ·  " + item.detail : "", style: { color: "muted" } }),
     ] }),
     View.Text({ text: item.amount ? money(item.amount) : "", style: { color: item.side === "SELL" ? "success" : "heading", fontWeight: "bold" } }),
@@ -319,7 +319,7 @@ function positionPreview(state, index) {
 function compactPosition(state, index) {
   const item = positionPreview(state, index);
   return View.Row({ style: { height: 64, paddingX: 20, align: "center", gap: 12 }, children: [
-    View.Text({ text: item.symbol, style: { grow: 1, basis: 0, fontSize: "lg", color: "heading", fontWeight: "bold" } }),
+    View.Text({ text: item.symbol, style: { grow: 1, basis: 0, fontSize: "md", color: "heading", fontWeight: "bold" } }),
     View.Text({ text: item.quantity ? item.quantity + " SH" : "", style: { grow: 1, basis: 0, color: "muted" } }),
     View.Text({ text: item.averagePrice ? "AVG " + money(item.averagePrice) : "", style: { grow: 1, basis: 0, color: "muted" } }),
   ] });
@@ -362,7 +362,7 @@ function landscapeDashboard(state, accountLabel, pnl) {
         }),
         View.Card({ style: { grow: 1, paddingX: 16, paddingTop: 8 }, children: [
           View.Row({ style: { height: 44, align: "end", justify: "between" }, children: [
-            View.Text({ text: money(dashboard.totalValue), style: { fontSize: "title", color: "heading", fontWeight: "bold" } }),
+            View.Text({ text: money(dashboard.totalValue), style: { fontSize: "xl", color: "heading", fontWeight: "bold" } }),
             View.Text({ text: state.chartTrend.change + "  (" + state.chartTrend.percent + ")", style: { color: state.chartTrend.positive ? "success" : "danger", fontWeight: "bold" } }),
           ] }),
           chart(state),
@@ -386,7 +386,7 @@ function landscapeDashboard(state, accountLabel, pnl) {
             View.Text({ text: "REALIZED P&L", style: { color: "heading", fontWeight: "bold" } }),
             View.Text({ text: state.span === "day" ? "TODAY" : "WEEK", style: { color: "muted" } }),
           ] }),
-          View.Text({ text: money(pnl), style: { fontSize: "xl", color: (number(pnl) ?? 0) >= 0 ? "success" : "danger", fontWeight: "bold" } }),
+          View.Text({ text: money(pnl), style: { fontSize: "lg", color: (number(pnl) ?? 0) >= 0 ? "success" : "danger", fontWeight: "bold" } }),
         ] }),
         View.Row({ style: { grow: 1, gap: 8 }, children: [
           View.Box({ style: { grow: 1, basis: 0, height: "full" }, children: View.StatusBar({ text: status, tone: status.startsWith("REFRESH FAILED") ? "danger" : "neutral" }) }),
@@ -420,8 +420,8 @@ function dashboardScreen(state) {
         style: { paddingX: 20, paddingTop: 16 },
         children: [
           View.Row({ style: { height: 64, align: "end", justify: "between" }, children: [
-            View.Text({ text: money(dashboard.totalValue), style: { fontSize: "title", color: "heading", fontWeight: "bold" } }),
-            View.Text({ text: state.chartTrend.change + "  (" + state.chartTrend.percent + ")", style: { fontSize: "lg", color: state.chartTrend.positive ? "success" : "danger", fontWeight: "bold" } }),
+            View.Text({ text: money(dashboard.totalValue), style: { fontSize: "xl", color: "heading", fontWeight: "bold" } }),
+            View.Text({ text: state.chartTrend.change + "  (" + state.chartTrend.percent + ")", style: { fontSize: "md", color: state.chartTrend.positive ? "success" : "danger", fontWeight: "bold" } }),
           ] }),
           chart(state),
         ],
@@ -442,10 +442,10 @@ function dashboardScreen(state) {
         style: { width: "full", height: 110, paddingX: 20, direction: "row", align: "center", justify: "between" },
         children: [
           View.Column({ style: { gap: 12 }, children: [
-            View.Text({ text: "REALIZED P&L", style: { fontSize: "xl", color: "heading", fontWeight: "bold" } }),
+            View.Text({ text: "REALIZED P&L", style: { fontSize: "lg", color: "heading", fontWeight: "bold" } }),
             View.Text({ text: "EQUITIES / " + (state.span === "day" ? "TODAY" : "WEEK"), style: { color: "muted" } }),
           ] }),
-          View.Text({ text: money(pnl), style: { fontSize: "title", color: (number(pnl) ?? 0) >= 0 ? "success" : "danger", fontWeight: "bold" } }),
+          View.Text({ text: money(pnl), style: { fontSize: "xl", color: (number(pnl) ?? 0) >= 0 ? "success" : "danger", fontWeight: "bold" } }),
         ],
       }),
       View.Row({ style: { height: 64, gap: 16 }, children: [
@@ -471,8 +471,8 @@ function accountsScreen(state) {
           style: { width: "full", height: 100, paddingX: 20, direction: "column", justify: "center", gap: 12, radius: 12, shadow: 1, background: account.number === state.selectedAccount ? "successSoft" : "surface", borderColor: account.number === state.selectedAccount ? "success" : "border", borderWidth: 1 },
           children: [
             View.Row({ style: { align: "center", justify: "between" }, children: [
-              View.Text({ text: account.label, style: { fontSize: "xl", color: "heading", fontWeight: "bold" } }),
-              View.Text({ text: "····" + account.suffix, style: { fontSize: "lg", color: "muted", fontWeight: "bold" } }),
+              View.Text({ text: account.label, style: { fontSize: "lg", color: "heading", fontWeight: "bold" } }),
+              View.Text({ text: "····" + account.suffix, style: { fontSize: "md", color: "muted", fontWeight: "bold" } }),
             ] }),
             View.Row({ style: { align: "center", justify: "between" }, children: [
               View.Badge({ label: account.status, tone: "success" }),
@@ -489,8 +489,8 @@ function accountsScreen(state) {
 function activityCard(item) {
   return View.Card({ style: { width: "full", height: 112, paddingX: 20, justify: "center", gap: 8 }, children: [
     View.Row({ style: { align: "center", justify: "between" }, children: [
-      View.Text({ text: item.title, style: { fontSize: "lg", color: "heading", fontWeight: "bold" } }),
-      View.Text({ text: money(item.amount), style: { fontSize: "lg", color: item.side === "SELL" ? "success" : "heading", fontWeight: "bold" } }),
+      View.Text({ text: item.title, style: { fontSize: "md", color: "heading", fontWeight: "bold" } }),
+      View.Text({ text: money(item.amount), style: { fontSize: "md", color: item.side === "SELL" ? "success" : "heading", fontWeight: "bold" } }),
     ] }),
     View.Text({ text: item.timestamp + "  ·  " + item.detail, style: { color: "muted" } }),
     View.Text({ text: item.state, style: { color: "success", fontWeight: "bold" } }),
@@ -514,8 +514,8 @@ function activityScreen(state) {
 function positionCard(item) {
   return View.Card({ style: { width: "full", height: 98, paddingX: 20, justify: "center", gap: 12 }, children: [
     View.Row({ style: { align: "center" }, children: [
-      View.Text({ text: item.symbol, style: { grow: 1, fontSize: "xl", color: "heading", fontWeight: "bold" } }),
-      View.Text({ text: item.quantity + " SH", style: { fontSize: "lg", color: "heading", fontWeight: "bold" } }),
+      View.Text({ text: item.symbol, style: { grow: 1, fontSize: "lg", color: "heading", fontWeight: "bold" } }),
+      View.Text({ text: item.quantity + " SH", style: { fontSize: "md", color: "heading", fontWeight: "bold" } }),
     ] }),
     View.Text({ text: "AVERAGE COST  " + money(item.averagePrice) + (item.marketValue ? "  ·  VALUE " + money(item.marketValue) : ""), style: { color: "muted" } }),
   ] });

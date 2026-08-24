@@ -12,16 +12,16 @@ components。Pi Agent 页面位于 `apps/pi-agent/view.js`，其动态文本分�
 
 | Foundation | 包含 | 当前规则 |
 | --- | --- | --- |
-| type hierarchy | app title、page title、heading、label、body、caption | 只保留 shared components 实际消费的 class recipe；ESP 主阅读文本由 14/16px 提升到 16/18px，24px title 保持不变 |
+| type hierarchy | `sm`、`md`、`lg`、`xl` × `regular`、`bold` | 16/18/20/24px；`View.Text` 默认使用 `md regular`，App 不使用语义含混的字号别名 |
 | geometry | 720x1280 portrait、800x480 landscape reference canvas | App 数字是 design unit，由共享 View SDK 统一缩放；不导出断点或设备 profile |
 | spacing | 24 design-unit screen gutter、card padding、stack gap | 直接写在当前 concrete component recipe 中，不导出无人消费的 token map |
 | surfaces | card、selected card、row、muted、shell recipes | arbitrary children 的容器保持 literal View；当前没有单独的 unused surface registry |
 | status tones | neutral、info、success、warning、danger | 由 runtime View SDK 的 `Badge`/`StatusBar` 统一表达 |
 | dynamic glyphs | curly quotes、non-breaking/en/em dash、ellipsis、bullet | 进入现有 Inter subset atlas |
 
-PocketJS 当前只提供 12 / 14 / 16 / 18 / 20 / 24 / 36px 的 baked font
-slots。Pi Design 的“稍微放大”因此采用相邻 slot：caption/label 14→16px，
-body 16→18px；不会引入 runtime font loader 或第二套字体。
+PocketJS 当前只提供 baked font slots。View SDK 从中固定使用 16 / 18 / 20 /
+24px，并为四个字号都打包 regular 与 bold；不会引入 runtime font loader 或
+第二套字体。
 
 ## Components
 

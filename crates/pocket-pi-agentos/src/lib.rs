@@ -4160,7 +4160,7 @@ mod tests {
             .eval(
                 "scaled-view",
                 r#"
-                  globalThis.__actionLabelWidth = View.measureText("REFRESH NOW", { fontSize: "lg", fontWeight: "bold" });
+                  globalThis.__actionLabelWidth = View.measureText("REFRESH NOW", { fontSize: "md", fontWeight: "bold" });
                   View.mount(() => View.Screen({
                     style: { align: "start", gap: 16 },
                     children: [

@@ -202,10 +202,13 @@ it exactly once before passing it to PocketJS. `full`, flex weights, opacity,
 rotation and other unitless values are unchanged.
 
 Fonts keep using the shared fixed atlas slots so text is never made unreadable
-by display scaling. Every `Pressable` keeps at least a 40x40 physical-pixel hit
-target. `ActionButton` additionally keeps at least 48 physical pixels of height
-and enough width for its measured label plus 16 physical pixels of padding on
-each side. These are shared component invariants, not App or board breakpoints.
+by display scaling. `fontSize` is `sm`, `md`, `lg` or `xl` (16, 18, 20 or 24
+physical pixels), and each size supports `regular` and `bold`. `View.Text`
+defaults to `md regular`. Every `Pressable` keeps at least a 40x40 physical-pixel
+hit target. `ActionButton` additionally keeps at least 48 physical pixels of
+height and enough width for its measured label plus 16 physical pixels of
+padding on each side. These are shared component invariants, not App or board
+breakpoints.
 
 The same logical viewport coordinate system is used for rendering and touch.
 Rust does not choose App page layouts. Apps compose semantic `Row`, `Column`

@@ -37,8 +37,8 @@
     danger: abgr("#ef4444"), dangerSoft: abgr("#fee2e2"), dangerOnDark: abgr("#fca5a5"),
   });
   const fontSlots = Object.freeze({
-    regular: Object.freeze({ body: 2, lg: 3, xl: 4 }),
-    bold: Object.freeze({ body: 9, lg: 10, xl: 11, title: 12 }),
+    regular: Object.freeze({ sm: 2, md: 3, lg: 4, xl: 5 }),
+    bold: Object.freeze({ sm: 9, md: 10, lg: 11, xl: 12 }),
   });
   const hostViewport = ui.__viewport;
   if (!hostViewport || !(hostViewport.w > 0) || !(hostViewport.h > 0)) {
@@ -128,7 +128,7 @@
     return element(NODE_TEXT, {
       ...props,
       text: typeof content === "function" ? content : String(content),
-      style: { color: "text", fontSize: "body", ...props.style },
+      style: { color: "text", fontSize: "md", ...props.style },
     });
   }
 
@@ -239,8 +239,8 @@
       else fail(`unsupported style ${name}`);
     }
     if (fontSize !== undefined || bold) {
-      const slot = fontSlots[bold ? "bold" : "regular"][fontSize ?? "body"];
-      if (slot === undefined) fail(`unknown font size ${String(fontSize)}`);
+      const slot = fontSlots[bold ? "bold" : "regular"][fontSize ?? "md"];
+      if (slot === undefined) fail(`unknown font size ${String(fontSize)}; expected sm, md, lg, or xl`);
       style[PROP.fontSlot] = slot;
     }
     return style;
@@ -248,7 +248,7 @@
 
   function measureText(text, style = {}) {
     if (typeof ui.measureText !== "function") fail("text measurement is unavailable");
-    const slot = nativeStyle(style)[PROP.fontSlot] ?? fontSlots.regular.body;
+    const slot = nativeStyle(style)[PROP.fontSlot] ?? fontSlots.regular.md;
     return ui.measureText(String(text), slot);
   }
 
@@ -480,12 +480,12 @@
 
   function Header(props = {}) {
     const leading = props.onBack
-      ? Pressable({ onPress: props.onBack, style: { width: 42, height: landscape ? 48 : 64, align: "center", justify: "center" }, children: Text({ text: "‹", style: { color: "white", fontSize: "title", fontWeight: "bold" } }) })
+      ? Pressable({ onPress: props.onBack, style: { width: 42, height: landscape ? 48 : 64, align: "center", justify: "center" }, children: Text({ text: "‹", style: { color: "white", fontSize: "xl", fontWeight: "bold" } }) })
       : Box({ style: { width: landscape ? 28 : 34, height: landscape ? 28 : 34, radius: 8, background: props.accent === "busy" ? "warning" : props.accent === "danger" ? "danger" : props.accent === "none" ? "shellMuted" : "success" } });
     return Row({
       style: { height: landscape ? 64 : 112, minHeight: 64 / geometryScale, paddingX: landscape ? 16 : 24, align: "center", justify: "between", background: "shell" },
       children: [
-        Row({ style: { grow: 1, align: "center", gap: 16 }, children: [leading, Text({ text: props.title, style: { color: "white", fontSize: "title", fontWeight: "bold" } })] }),
+        Row({ style: { grow: 1, align: "center", gap: 16 }, children: [leading, Text({ text: props.title, style: { color: "white", fontSize: "xl", fontWeight: "bold" } })] }),
         Column({ style: { align: "end", gap: 8 }, children: [
           Text({ text: props.metaTop ?? "", style: { color: "subtle", fontWeight: "bold" } }),
           Text({ text: props.metaBottom ?? "", style: { color: "muted" } }),
@@ -497,15 +497,15 @@
   function PageIntro(props = {}) {
     return Column({ style: { height: landscape ? 92 : 166, paddingX: landscape ? 16 : 24, paddingTop: landscape ? 12 : 24, gap: landscape ? 6 : 12 }, children: [
       Text({ text: props.eyebrow, style: { color: props.tone === "info" ? "info" : "accent", fontWeight: "bold" } }),
-      Text({ text: props.title, style: { fontSize: "title", fontWeight: "bold" } }),
-      Text({ text: props.description, style: { color: "muted", fontSize: "lg" } }),
+      Text({ text: props.title, style: { fontSize: "xl", fontWeight: "bold" } }),
+      Text({ text: props.description, style: { color: "muted", fontSize: "md" } }),
     ] });
   }
 
   function SectionHeading(props = {}) {
     const detail = props.action ? (props.detail ? `${props.detail}  ·  VIEW ALL  ›` : "VIEW ALL  ›") : props.detail ?? "";
     return Row({ style: { height: landscape ? 32 : 44, paddingX: 4, align: "center", justify: "between" }, children: [
-      Text({ text: props.title, style: { fontSize: "xl", fontWeight: "bold", color: "heading" } }),
+      Text({ text: props.title, style: { fontSize: "lg", fontWeight: "bold", color: "heading" } }),
       Text({ text: detail, style: { color: "muted", fontWeight: "bold" } }),
     ] });
   }
@@ -513,7 +513,7 @@
   function ActionButton(props = {}) {
     const background = props.disabled ? "disabled" : props.tone === "danger" ? "dangerSoft" : props.tone === "neutral" ? "border" : "accent";
     const textColor = props.disabled ? "muted" : props.tone === "danger" ? "danger" : props.tone === "neutral" ? "heading" : "white";
-    const textStyle = { color: textColor, fontSize: "lg", fontWeight: "bold" };
+    const textStyle = { color: textColor, fontSize: "md", fontWeight: "bold" };
     const content = Text({ text: props.label, style: textStyle });
     const requested = props.style ?? {};
     const style = {
@@ -535,16 +535,16 @@
 
   function EmptyState(props = {}) {
     return Card({ style: { width: "full", height: props.compact || landscape ? 150 : 430, paddingX: props.compact || landscape ? 20 : 48, align: "center", justify: "center", ...props.style }, children: [
-      props.icon ? Box({ style: { width: landscape ? 56 : 88, height: landscape ? 56 : 88, align: "center", justify: "center", radius: 12, background: props.tone === "info" ? "infoSoft" : "border" }, children: Text({ text: props.icon, style: { color: props.tone === "info" ? "info" : "muted", fontSize: "title", fontWeight: "bold" } }) }) : null,
-      Text({ text: props.title, style: { marginTop: props.icon ? 28 : 0, color: props.icon ? "heading" : "muted", fontSize: props.icon ? "title" : "lg", fontWeight: "bold" } }),
-      props.detail ? Text({ text: props.detail, style: { marginTop: 16, color: "muted", fontSize: "lg" } }) : null,
+      props.icon ? Box({ style: { width: landscape ? 56 : 88, height: landscape ? 56 : 88, align: "center", justify: "center", radius: 12, background: props.tone === "info" ? "infoSoft" : "border" }, children: Text({ text: props.icon, style: { color: props.tone === "info" ? "info" : "muted", fontSize: "xl", fontWeight: "bold" } }) }) : null,
+      Text({ text: props.title, style: { marginTop: props.icon ? 28 : 0, color: props.icon ? "heading" : "muted", fontSize: props.icon ? "xl" : "md", fontWeight: "bold" } }),
+      props.detail ? Text({ text: props.detail, style: { marginTop: 16, color: "muted", fontSize: "md" } }) : null,
     ] });
   }
 
   function MetricCard(props = {}) {
     return Card({ style: { width: "full", height: "full", paddingX: 20, paddingY: 16, gap: 12 }, children: [
       Text({ text: props.label, style: { color: "muted", fontWeight: "bold" } }),
-      Text({ text: props.value, style: { color: props.tone === "success" ? "success" : props.tone === "danger" ? "danger" : "heading", fontSize: "xl", fontWeight: "bold" } }),
+      Text({ text: props.value, style: { color: props.tone === "success" ? "success" : props.tone === "danger" ? "danger" : "heading", fontSize: "lg", fontWeight: "bold" } }),
     ] });
   }
 
@@ -592,7 +592,7 @@
     const key = (label, value, style) => Pressable({
       onPress: () => props.onKey(value),
       style: { height: landscape ? 52 : 120, align: "center", justify: "center", background: "surface", ...style },
-      children: Text({ text: label, style: { color: "heading", fontSize: "xl", fontWeight: "bold" } }),
+      children: Text({ text: label, style: { color: "heading", fontSize: "lg", fontWeight: "bold" } }),
     });
     const rows = keyboardLayers[props.layer].map((row, index) => Row({
       style: { height: landscape ? 60 : 140, gap: 8 },

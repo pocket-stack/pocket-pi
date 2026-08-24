@@ -58,7 +58,7 @@ function historyCard(item) {
     style: { width: "full", height: 126, paddingX: 20, direction: "row", align: "center", justify: "between" },
     children: [
       View.Column({ style: { grow: 1, basis: 0, gap: 8, overflow: "hidden" }, children: [
-        View.Text({ text: item.query.slice(0, 48), style: { fontSize: "lg", fontWeight: "bold", color: "heading" } }),
+        View.Text({ text: item.query.slice(0, 48), style: { fontSize: "md", fontWeight: "bold", color: "heading" } }),
         View.Text({ text: (item.top_title || item.error || "No result title").slice(0, 58), style: { color: "muted" } }),
         View.Text({ text: searchTime(item.searched_at), style: { color: "info", fontWeight: "bold" } }),
       ] }),
