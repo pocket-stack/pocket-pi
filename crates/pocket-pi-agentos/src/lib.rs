@@ -3680,11 +3680,7 @@ impl AgentToolRequest {
                     started.elapsed().as_millis(),
                     result.is_err()
                 );
-                let mut result = tool_result(result);
-                if !result.is_error {
-                    result.terminate = true;
-                }
-                let _ = self.response.send(result);
+                let _ = self.response.send(tool_result(result));
             }
             _ => {
                 log::info!(
@@ -3712,7 +3708,7 @@ fn agent_app_tool_definitions() -> [Value; 2] {
         }),
         json!({
             "name":APP_SUBMIT_TOOL,
-            "description":"After all edits are complete, validate and submit the canonical apps/<id>/checkout directory for physical user confirmation. This ends the current Agent turn. Update app.json version before submitting. Change schemaVersion and add migrations/<n>.sql only when the SQLite schema changes.",
+            "description":"After all edits are complete, validate and submit the canonical apps/<id>/checkout directory for physical user confirmation. Update app.json version before submitting. Change schemaVersion and add migrations/<n>.sql only when the SQLite schema changes.",
             "parameters":{"type":"object","properties":{"path":{"type":"string","description":"The path returned by app.checkout"}},"required":["path"],"additionalProperties":false}
         }),
     ]
