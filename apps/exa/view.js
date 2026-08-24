@@ -84,7 +84,7 @@ function render() {
     View.PageIntro({
       eyebrow: "AGENT RESEARCH MEMORY",
       title: "Search history",
-      description: "Every research.search call is saved here automatically.",
+      description: "Every research.search call is saved locally.",
       tone: "info",
     }),
     View.Column({ style: { grow: 1, paddingX: LANDSCAPE ? 16 : 24, paddingY: LANDSCAPE ? 8 : 16 }, children: state.history.length === 0
