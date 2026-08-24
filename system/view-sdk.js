@@ -448,14 +448,15 @@
     return id ? pressables.get(id).onPress() ?? "" : "";
   }
 
-  function mount(render) {
+  function mount(render, onDataChanged) {
     if (renderView) fail("View already mounted");
     if (typeof render !== "function") fail("View.mount requires a render function");
+    if (onDataChanged !== undefined && typeof onDataChanged !== "function") fail("View.mount data callback must be a function");
     renderView = render;
     dirty = true;
     PocketPi.defineView({
       tick() { renderIfDirty(); return ""; },
-      dataChanged() { renderIfDirty(); return ""; },
+      dataChanged() { onDataChanged?.(); renderIfDirty(); return ""; },
       pointerDown,
       pointerUp,
       tap(x, y) { return pressAt(x, y); },

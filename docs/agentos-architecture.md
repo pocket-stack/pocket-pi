@@ -17,7 +17,7 @@ Bundle.
 App = Data + Actions + View
 ```
 
-- **Data** is App-owned SQLite state and is the durable truth.
+- **Data** is App-owned SQLite state and files.
 - **Actions** are actor-neutral JavaScript functions. Agent Tools, UI events and
   Schedules route to the same named functions.
 - **View** is the fixed PocketJS UI shipped by the App release.
@@ -50,7 +50,7 @@ Hardware
         │   ├── Agent loop                         bundled JavaScript
         │   └── Chat / Files / Apps / Settings    raw View JavaScript
         ├── ordinary source View Guests           LRU, maximum 3
-        └── ordinary source Action Guests         LRU, maximum 3
+        └── source Action Guests                  LRU, maximum 3
 ```
 
 “PocketJS runtime” has two useful scopes:
@@ -70,14 +70,14 @@ Maximum resident JS Guests are currently:
 ```text
 1 resident Pi Agent System Guest
 + up to 3 ordinary View Guests
-+ up to 3 ordinary Action Guests
++ up to 3 source Action Guests
 = up to 7 Guests
 ```
 
 The two LRUs are deliberately independent. A closed App may retain a recent
 Action Guest, and a visible App may have no Action Guest until an Action is
-invoked. The resident System Guest is outside both LRUs and navigation never
-drops it.
+invoked. The Pi Agent's Action Guest uses the same Action LRU. The resident
+System Guest is outside both LRUs and navigation never drops it.
 
 ## Ownership and build boundaries
 
@@ -87,9 +87,9 @@ drops it.
 | PocketJS platform | pinned PocketJS crates + QuickJS, Rust/C | Firmware lifetime | Firmware build/flash |
 | AppSupervisor mechanisms | `crates/pocket-pi-agentos`, Rust | Firmware lifetime | Firmware build/flash |
 | System Framework v1 | `system/framework.js`, JavaScript | evaluated per Guest | Firmware build/flash |
-| Pi Agent System App | `apps/pi-agent`, raw View JavaScript + bundled Agent loop | resident | Firmware build/flash |
+| Pi Agent System App | `apps/pi-agent`, raw Actions/View JavaScript + bundled Agent loop | resident View/Agent + LRU Action | Firmware build/flash |
 | Ordinary App | `apps/<id>`, raw JavaScript + SQL | LRU Guests | package + install/update |
-| App Data | per-App SQLite + files | survives Guest eviction and restart | Action transaction |
+| App Data | per-App SQLite + files | survives Guest eviction and restart | Action mutation |
 
 Firmware contains the Pi Agent System App so a blank device can boot. System App
 installation and replacement are deliberately outside the current contract.
@@ -104,7 +104,7 @@ installation and replacement are deliberately outside the current contract.
 - `PocketPi.action(name, args)` for UI Action events
 - `PocketPi.command(name, args)` and `PocketPi.navigate(app)` for narrow native
   mechanisms
-- `PocketPi.data.query(...)`, `.exec(...)` and `.transaction(...)`
+- `PocketPi.data.query(...)`, `.exec(...)`, `.transaction(...)` and `.commit()`
 - `PocketPi.services.call(...)` and `PocketPi.actionContext.remainingMs()`
 - `PocketPi.projection.one(...)` and `.many(...)` for bounded SQLite bindings
 
@@ -153,6 +153,12 @@ Native owns the absolute deadline, credential-safe transport and capability
 checks. JavaScript owns provider calls, response normalization, SQLite
 transactions and returned domain results.
 
+An Action Guest that declares `data.fs` receives the same App-owned filesystem
+root as its View Guest. File Actions call `PocketPi.data.commit()` when the
+operation completes so the existing App revision invalidates the foreground
+View. The Pi Agent maps both its Files UI and the Agent-facing
+`workspace.delete` Tool to the same `deleteFile` Action.
+
 ## Data, Projection and View
 
 Each App has one native `DbModule` owner shared by its Action and View Guests.
@@ -163,6 +169,10 @@ write and calls `app.commit()` after a successful transaction.
 frame the View Guest refreshes each declared bounded Projection once. Multiple
 commits before that frame coalesce into one refresh. Closed Views do not poll
 SQLite and the Agent never calls an `update_view` tool.
+
+`View.mount(render, onDataChanged)` lets a file-backed View reread its bounded
+visible directory or page at that same revision boundary. The callback carries
+no data; the App remains responsible for reading its own filesystem state.
 
 The Pi Agent System View receives native `SystemFacts` for hardware and lifecycle
 state. Those facts are not called Projection: UI/page policy remains in the JS
@@ -233,10 +243,10 @@ credentials.json     initial-install transport input, removed before activation
 `schema.sql`, `actions.js` and `view.js` are the execution source, not build
 artifacts. `assets/` contains only manifest-declared JSON resources. Packaging
 does not require PocketJS, Bun or a compile step. The firmware-embedded System
-App uses the same shared View SDK with `app.json`, `view.js` and its local
-`text.js`; only its resident Agent loop remains a built `agent.js`. The native
-seed adds `plan.json`. These System files are not accepted in an ordinary
-`.pocketapp`.
+App uses the same shared View SDK with `app.json`, `actions.js`, `view.js` and
+its local `text.js`; only its resident Agent loop remains a built `agent.js`.
+The native seed adds `plan.json`. These System files are not accepted in an
+ordinary `.pocketapp`.
 
 App `version` identifies the source release shown to the user. Integer
 `schemaVersion` identifies only the SQLite shape and changes only when that

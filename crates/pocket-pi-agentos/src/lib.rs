@@ -30,6 +30,14 @@ const MAX_JSON_RESOURCE_BYTES: usize = 256 * 1024;
 const MAX_RESOURCE_BYTES: usize = 512 * 1024;
 const VIEW_RUNTIME_LIMIT: usize = 3;
 const ACTION_RUNTIME_LIMIT: usize = 3;
+const SYSTEM_RELEASE_FILES: [&str; 6] = [
+    "app.json",
+    "plan.json",
+    "actions.js",
+    "view.js",
+    "text.js",
+    "agent.js",
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Viewport {
@@ -396,6 +404,7 @@ fn tar_octal(field: &[u8]) -> Result<u64> {
 #[derive(Clone, Copy)]
 pub struct SystemAppBundle {
     pub descriptor_json: &'static str,
+    pub actions_js: &'static str,
     pub view_js: &'static str,
     pub text_js: &'static str,
     pub agent_js: &'static str,
@@ -404,12 +413,14 @@ pub struct SystemAppBundle {
 impl SystemAppBundle {
     pub const fn new(
         descriptor_json: &'static str,
+        actions_js: &'static str,
         view_js: &'static str,
         text_js: &'static str,
         agent_js: &'static str,
     ) -> Self {
         Self {
             descriptor_json,
+            actions_js,
             view_js,
             text_js,
             agent_js,
@@ -420,6 +431,7 @@ impl SystemAppBundle {
 pub const fn system_app_bundle() -> SystemAppBundle {
     SystemAppBundle::new(
         include_str!("../../../apps/pi-agent/app.json"),
+        include_str!("../../../apps/pi-agent/actions.js"),
         include_str!("../../../apps/pi-agent/view.js"),
         include_str!("../../../apps/pi-agent/text.js"),
         include_str!("../../../apps/pi-agent/dist/agent.js"),
@@ -806,7 +818,7 @@ fn validate_package_credentials(
 
 fn load_system_release(release_dir: &Path) -> Result<InstalledApp> {
     validate_system_release_root(release_dir)?;
-    for required in ["app.json", "plan.json", "view.js", "text.js", "agent.js"] {
+    for required in SYSTEM_RELEASE_FILES {
         anyhow::ensure!(
             release_dir.join(required).is_file(),
             "System App release is missing {required}"
@@ -850,7 +862,6 @@ fn load_system_release(release_dir: &Path) -> Result<InstalledApp> {
 }
 
 fn validate_system_release_root(release_dir: &Path) -> Result<()> {
-    let allowed = BTreeSet::from(["app.json", "plan.json", "view.js", "text.js", "agent.js"]);
     for entry in std::fs::read_dir(release_dir)? {
         let entry = entry?;
         let name = entry
@@ -859,7 +870,7 @@ fn validate_system_release_root(release_dir: &Path) -> Result<()> {
             .ok_or_else(|| anyhow!("App Bundle contains a non-UTF-8 file"))?
             .to_owned();
         anyhow::ensure!(
-            entry.file_type()?.is_file() && allowed.contains(name.as_str()),
+            entry.file_type()?.is_file() && SYSTEM_RELEASE_FILES.contains(&name.as_str()),
             "unexpected App Bundle file: {name}"
         );
     }
@@ -1225,6 +1236,7 @@ struct ActionConfig {
     framework: Arc<str>,
     net_sdk: Option<Arc<str>>,
     resources: Arc<str>,
+    fs_paths: Option<(PathBuf, PathBuf)>,
     database: SharedDb,
     revision: AppRevision,
     net: bool,
@@ -1326,14 +1338,33 @@ struct ActionRuntime {
     guest: Guest,
     net: Option<NetSurface<AppNetTransport>>,
     action_deadline: Rc<Cell<Option<Instant>>>,
+    _fs: Option<Rc<RefCell<FsModule>>>,
     _database: SharedDb,
     _revision: AppRevision,
+}
+
+fn mount_app_fs(guest: &Guest, root: &Path, tmp: &Path) -> Result<Rc<RefCell<FsModule>>> {
+    std::fs::create_dir_all(root)?;
+    let fs = Rc::new(RefCell::new(FsModule::with_quota(
+        FsStorage::Dir {
+            root: root.to_owned(),
+            tmp: tmp.to_owned(),
+        },
+        2 * 1024 * 1024,
+    )));
+    pocket_fs::mount(guest, fs.clone())?;
+    Ok(fs)
 }
 
 impl ActionRuntime {
     fn load(config: &ActionConfig, services: Arc<dyn AppServiceHost>) -> Result<Self> {
         let guest = new_app_guest().context("create App Action Guest")?;
         mount_db(&guest, config.database.clone(), true)?;
+        let fs = config
+            .fs_paths
+            .as_ref()
+            .map(|(root, tmp)| mount_app_fs(&guest, root, tmp))
+            .transpose()?;
         let action_deadline = Rc::new(Cell::new(None));
         mount_data_lifecycle(&guest, config.revision.clone(), action_deadline.clone())?;
         let net = if config.net {
@@ -1364,6 +1395,7 @@ impl ActionRuntime {
             guest,
             net,
             action_deadline,
+            _fs: fs,
             _database: config.database.clone(),
             _revision: config.revision.clone(),
         };
@@ -1654,7 +1686,6 @@ impl ViewRuntime {
         db: SharedDb,
         revision: AppRevision,
     ) -> Result<Self> {
-        std::fs::create_dir_all(fs_root)?;
         let guest = new_app_guest().context("create App View Guest")?;
         let surface = UiSurface::new(viewport.logical_size());
         let system = app.descriptor.id == ROOT_APP_ID;
@@ -1662,14 +1693,7 @@ impl ViewRuntime {
         surface.feed_pak(&pak);
         surface.mount(&guest)?;
 
-        let fs = Rc::new(RefCell::new(FsModule::with_quota(
-            FsStorage::Dir {
-                root: fs_root.to_owned(),
-                tmp: tmp_root.to_owned(),
-            },
-            2 * 1024 * 1024,
-        )));
-        pocket_fs::mount(&guest, fs.clone())?;
+        let fs = mount_app_fs(&guest, fs_root, tmp_root)?;
         mount_db(&guest, db.clone(), false)?;
         install_system_framework(
             &guest,
@@ -1946,8 +1970,8 @@ fn mount_data_lifecycle(
         ns.set(
             "commit",
             Function::new(ctx.clone(), move || -> f64 {
-                // Called only after a successful App-owned SQLite COMMIT.
-                // Release pairs with the foreground View's Acquire load.
+                // App-owned data mutations advance the foreground View revision.
+                // Release pairs with the View's Acquire load.
                 revision.fetch_add(1, Ordering::Release).saturating_add(1) as f64
             })?,
         )?;
@@ -2042,6 +2066,7 @@ impl AppSupervisor {
                             .any(|capability| capability == "net.http"))
                     .then(|| assets.net_sdk.clone()),
                     resources: app.resources.clone(),
+                    fs_paths: app_fs_paths(&workspace, descriptor),
                     database: databases
                         .get(&descriptor.id)
                         .expect("database created for descriptor")
@@ -2381,6 +2406,7 @@ impl AppSupervisor {
             framework: self.assets.framework.clone(),
             net_sdk: net.then(|| self.assets.net_sdk.clone()),
             resources: app.resources.clone(),
+            fs_paths: app_fs_paths(&self.workspace, &app.descriptor),
             database,
             revision,
             net,
@@ -2753,6 +2779,17 @@ fn data_paths(workspace: &Path, app_id: &str) -> (PathBuf, PathBuf, PathBuf) {
     }
 }
 
+fn app_fs_paths(workspace: &Path, descriptor: &AppDescriptor) -> Option<(PathBuf, PathBuf)> {
+    descriptor
+        .capabilities
+        .iter()
+        .any(|capability| capability == "data.fs")
+        .then(|| {
+            let (root, _, tmp) = data_paths(workspace, &descriptor.id);
+            (root, tmp)
+        })
+}
+
 fn prepare_source_database(app: &InstalledApp, database: &SharedDb) -> Result<()> {
     let current = database_schema_version(database, &app.descriptor.id)?;
     if current == app.descriptor.schema_version {
@@ -2961,6 +2998,10 @@ fn seed_system_app(workspace: &Path, bundle: SystemAppBundle) -> Result<()> {
         }
     }
     atomic_write(&release_dir.join("view.js"), bundle.view_js.as_bytes())?;
+    atomic_write(
+        &release_dir.join("actions.js"),
+        bundle.actions_js.as_bytes(),
+    )?;
     atomic_write(&release_dir.join("text.js"), bundle.text_js.as_bytes())?;
     atomic_write(&release_dir.join("agent.js"), bundle.agent_js.as_bytes())?;
     atomic_write(
@@ -3466,6 +3507,57 @@ mod tests {
         assert!(view_command_allowed("exa", "apps.open"));
         assert!(!view_command_allowed("exa", "device.restart"));
         assert!(view_command_allowed(ROOT_APP_ID, "device.restart"));
+    }
+
+    #[test]
+    fn system_file_delete_routes_ui_and_agent_through_one_action() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let catalog = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
+        let mut supervisor = AppSupervisor::new(
+            &workspace,
+            TEST_VIEWPORT,
+            catalog.clone(),
+            Arc::new(NoServices),
+        )
+        .unwrap();
+
+        let agent_file = workspace.join("agent-delete.txt");
+        std::fs::write(&agent_file, "temporary").unwrap();
+        let (tools, requests) = RoutedToolHost::new(Arc::new(NoTools), catalog);
+        let call = std::thread::spawn(move || {
+            tools.execute("call", "workspace.delete", r#"{"path":"agent-delete.txt"}"#)
+        });
+        requests.recv().unwrap().handle(&supervisor);
+        assert!(!call.join().unwrap().is_error);
+        assert!(!agent_file.exists());
+        assert!(supervisor.active_projection_is_stale());
+        supervisor.frame().unwrap();
+        assert!(!supervisor.active_projection_is_stale());
+
+        let ui_file = workspace.join("ui-delete.txt");
+        std::fs::write(&ui_file, "temporary").unwrap();
+        let queued =
+            supervisor.invoke_active_action("deleteFile", &json!({"path":"ui-delete.txt"}));
+        assert!(!queued.is_error);
+        while supervisor.services_busy() {
+            std::thread::yield_now();
+        }
+
+        assert!(!ui_file.exists());
+        assert!(supervisor.active_projection_is_stale());
+        supervisor.frame().unwrap();
+        assert!(!supervisor.active_projection_is_stale());
+
+        let directory = workspace.join("keep-directory");
+        std::fs::create_dir(&directory).unwrap();
+        let queued =
+            supervisor.invoke_active_action("deleteFile", &json!({"path":"keep-directory"}));
+        assert!(!queued.is_error);
+        while supervisor.services_busy() {
+            std::thread::yield_now();
+        }
+        assert!(directory.is_dir());
     }
 
     #[test]
@@ -4125,6 +4217,7 @@ mod tests {
                 framework: Arc::from(system_framework()),
                 net_sdk: None,
                 resources: Arc::from("{}"),
+                fs_paths: None,
                 database: Arc::new(Mutex::new(DbModule::new(DbStorage::Memory))),
                 revision: Arc::new(AtomicU32::new(0)),
                 net: false,
@@ -4730,6 +4823,7 @@ PocketPi.defineActions({ run() { return "ok"; } });
                     framework: Arc::from(include_str!("../../../system/framework.js")),
                     net_sdk: None,
                     resources: Arc::from("{}"),
+                    fs_paths: None,
                     database,
                     revision: Arc::new(AtomicU32::new(0)),
                     net: false,
