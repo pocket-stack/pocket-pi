@@ -2014,7 +2014,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pocket-pi-esp32-p4-sim"
+name = "pocket-pi-esp32-sim"
 version = "0.1.0"
 dependencies = [
  "anyhow",

@@ -2,7 +2,7 @@
 
 Pocket Pi is a device runtime, not an App running on a general-purpose OS.
 ESP32-P4 is the reference hardware host, ESP32-S3 is a supported hardware host,
-and `hosts/esp32-p4-sim` is a development and product-contract simulator rather
+and `hosts/esp32-sim` is a development and product-contract simulator rather
 than a separate product.
 
 Ordinary Apps are installed and executed as raw JavaScript source. The device
@@ -376,6 +376,6 @@ The core contracts are exercised in `crates/pocket-pi-agentos/src/lib.rs`:
 - Projection and SQLite errors propagate instead of becoming an empty View.
 - uninstall removes App-owned routing, Guests, schedules, credentials and data.
 
-`hosts/esp32-p4-sim` adds end-to-end tests for Exa and Robinhood Action writes,
+`hosts/esp32-sim` adds end-to-end tests for Exa and Robinhood Action writes,
 fixed Views and install/restart restoration. Simulator evidence does not replace
 an ESP32 build, boot or physical touch/network acceptance test.

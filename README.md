@@ -21,9 +21,9 @@ Pocket Pi builds on:
 
 **ESP32-P4 is the first fully supported hardware target and the current
 reference implementation.** ESP32-S3 is also supported through the Waveshare
-ESP32-S3-Touch-LCD-4.3 firmware host. The macOS ESP32-P4 simulator is a
-development and product-contract testing tool; it is not a desktop Pocket Pi
-product or a hardware emulator.
+ESP32-S3-Touch-LCD-4.3 firmware host. The macOS ESP32 simulator is a development
+and product-contract testing tool; it is not a desktop Pocket Pi product or a
+hardware emulator.
 
 > **Project status:** the Waveshare ESP32-P4 reference target and Waveshare
 > ESP32-S3-Touch-LCD-4.3 target both run the shared AgentOS/App stack. See
@@ -65,7 +65,7 @@ The current firmware targets are **Waveshare ESP32-P4-WIFI6-Touch-LCD-5** and
 ### Build the device and development simulator
 
 ```sh
-cargo xtask build esp32-p4-sim
+cargo xtask build esp32-sim
 cargo xtask build esp32-p4
 cargo xtask build esp32-s3
 ```
@@ -209,12 +209,12 @@ Runtimes. It does not retain App data or provide rollback. The resident Pi Agent
 System App cannot be uninstalled. Uninstall also deletes that App's recent event
 file.
 
-### 2. Develop with the ESP32-P4 simulator on macOS
+### 2. Develop with the ESP32 simulator on macOS
 
 The simulator defaults to the Mac's existing Codex Coding Plan login:
 
 ```sh
-cargo xtask run esp32-p4-sim \
+cargo xtask run esp32-sim \
   --backend codex \
   --workspace target/esp32-workspace
 ```
@@ -223,34 +223,34 @@ Direct API-key backends are also available:
 
 ```sh
 OPENAI_API_KEY=... \
-  cargo xtask run esp32-p4-sim --backend openai --model gpt-5.6
+  cargo xtask run esp32-sim --backend openai --model gpt-5.6
 
 OPENROUTER_API_KEY=... \
-  cargo xtask run esp32-p4-sim \
+  cargo xtask run esp32-sim \
   --backend openrouter --model openai/gpt-5.6
 
 ANTHROPIC_API_KEY=... \
-  cargo xtask run esp32-p4-sim \
+  cargo xtask run esp32-sim \
   --backend anthropic --model claude-sonnet-4-6
 
 DEEPSEEK_API_KEY=... DEEPSEEK_THINKING_LEVEL=xhigh \
-  cargo xtask run esp32-p4-sim --backend deepseek
+  cargo xtask run esp32-sim --backend deepseek
 ```
 
-The window defaults to the ESP32-P4 product's 720x1280 logical viewport. Pass a
-different viewport to exercise the same App source on another screen shape;
+The window defaults to the 720x1280 reference viewport. Pass a different
+viewport to exercise the same App source on another screen shape;
 mouse input is mapped through the same hit-testing code as physical touch
 input:
 
 ```sh
-cargo xtask run esp32-p4-sim --viewport 800x480
-cargo xtask run esp32-p4-sim --viewport 480x800
+cargo xtask run esp32-sim --viewport 800x480
+cargo xtask run esp32-sim --viewport 480x800
 ```
 
 Generate a deterministic UI snapshot with:
 
 ```sh
-cargo xtask snapshot esp32-p4-sim
+cargo xtask snapshot esp32-sim
 ```
 
 ## Model backends
@@ -317,7 +317,7 @@ crates/pocket-pi-embedded/    bounded Agent Loop bridge used by device runtimes
 crates/pocket-pi-tools/       portable workspace, shell, time and schedule tools
 crates/pocket-pi-protocols/   model request, response and streaming codecs
 crates/pocket-pi-agentos/     App Supervisor, System App lifecycle and App contracts
-hosts/esp32-p4-sim/           macOS development simulator for ESP32-P4 contracts
+hosts/esp32-sim/              macOS development simulator for shared ESP32 contracts
 firmware/esp32-common/        shared ESP-IDF AgentOS host loop and services
 firmware/esp32-p4/            first supported device and reference implementation
 firmware/esp32-s3/            Waveshare ESP32-S3-Touch-LCD-4.3 board host
@@ -330,7 +330,7 @@ tools/uart-model-bridge.py    optional development-only model bridge
 
 Dependencies point inward: hosts depend on shared runtimes, tools, UI and
 protocols; those shared crates do not depend on a host. Hardware APIs remain in
-the firmware, simulator adapters remain in `hosts/esp32-p4-sim`, and optional
+the firmware, simulator adapters remain in `hosts/esp32-sim`, and optional
 external services remain Apps.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for ownership and lifecycle boundaries,

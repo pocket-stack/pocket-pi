@@ -68,7 +68,7 @@ fn parse_args() -> Result<Args> {
     let mut screenshot = None;
     let mut prompt = None;
     let mut workspace =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/esp32-p4-sim/workspace");
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/esp32-sim/workspace");
     let mut app = ROOT_APP_ID.to_owned();
     let mut root_tap = None;
     let mut viewport = DEFAULT_VIEWPORT;
@@ -148,7 +148,7 @@ impl PlatformTools for SimPlatform {
     fn device_status(&self) -> Value {
         json!({
             "status":"ok",
-            "board":"esp32-p4-sim",
+            "board":"esp32-sim",
             "agentOs":true,
             "jsRuntime":"QuickJS via PocketJS",
             "simulated":true

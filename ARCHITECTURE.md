@@ -12,7 +12,7 @@ development tool:
 | --- | --- | --- |
 | Reference hardware | `firmware/esp32-p4` | ESP32-P4 is the first fully supported Pocket Pi target |
 | Supported hardware | `firmware/esp32-s3` | Waveshare ESP32-S3-Touch-LCD-4.3 with a 480x800 logical viewport |
-| Development simulator | `hosts/esp32-p4-sim` | Runs the ESP32-P4 product contracts on macOS; not a desktop product or hardware target |
+| Development simulator | `hosts/esp32-sim` | Runs the shared ESP32 product contracts on macOS; not a desktop product or hardware target |
 
 All compositions use the same resident `pi-agent-core` System App and ordinary
 App source. The firmware targets share the AgentOS host loop in
@@ -89,7 +89,7 @@ crates/pocket-pi-agentos/   App Supervisor and AgentOS contracts
 crates/pocket-pi-embedded/  embedded pi-agent-core bridge and host traits
 crates/pocket-pi-tools/     native workspace/shell/time/schedule Tools
 crates/pocket-pi-protocols/ provider codecs
-hosts/esp32-p4-sim/         macOS development simulator for ESP32-P4 contracts
+hosts/esp32-sim/            macOS development simulator for shared ESP32 contracts
 firmware/esp32-common/      shared ESP-IDF AgentOS host loop and services
 firmware/esp32-p4/          first supported target and reference implementation
 firmware/esp32-s3/          Waveshare ESP32-S3-Touch-LCD-4.3 board host
@@ -108,9 +108,9 @@ cargo xtask package app exa path/to/exa-credentials.json
 cargo xtask package app robinhood path/to/robinhood-credentials.json
 cargo xtask build esp32-p4
 cargo xtask build esp32-s3
-cargo xtask build esp32-p4-sim
-cargo xtask run esp32-p4-sim
-cargo xtask snapshot esp32-p4-sim
+cargo xtask build esp32-sim
+cargo xtask run esp32-sim
+cargo xtask snapshot esp32-sim
 ```
 
 Simulator proof, firmware compilation, and physical-board proof are separate

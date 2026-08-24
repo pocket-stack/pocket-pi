@@ -46,24 +46,22 @@ fn main() -> Result<()> {
                 .args(["run", "esp", "./tools/cargo-esp32s3", "build", "--release"]),
             "building ESP32-S3 firmware",
         ),
-        (Some("build"), Some("esp32-p4-sim")) => {
-            cargo(&root, ["build", "-p", "pocket-pi-esp32-p4-sim"])
+        (Some("build"), Some("esp32-sim")) => cargo(&root, ["build", "-p", "pocket-pi-esp32-sim"]),
+        (Some("run"), Some("esp32-sim")) => {
+            cargo_with_args(&root, ["run", "-p", "pocket-pi-esp32-sim", "--"], &rest)
         }
-        (Some("run"), Some("esp32-p4-sim")) => {
-            cargo_with_args(&root, ["run", "-p", "pocket-pi-esp32-p4-sim", "--"], &rest)
-        }
-        (Some("snapshot"), Some("esp32-p4-sim")) => {
-            let output = root.join("artifacts/screenshots/esp32-p4-sim.png");
+        (Some("snapshot"), Some("esp32-sim")) => {
+            let output = root.join("artifacts/screenshots/esp32-sim.png");
             std::fs::create_dir_all(output.parent().unwrap())?;
             cargo_with_args(
                 &root,
-                ["run", "-p", "pocket-pi-esp32-p4-sim", "--"],
+                ["run", "-p", "pocket-pi-esp32-sim", "--"],
                 &["--screenshot".into(), output.display().to_string()],
             )
         }
         _ => {
             eprintln!(
-                "usage:\n  cargo xtask build pi-agent|view-sdk|esp32-p4|esp32-s3|esp32-p4-sim\n  cargo xtask package app <id> [credentials.json]\n  cargo xtask run esp32-p4-sim [args]\n  cargo xtask snapshot esp32-p4-sim"
+                "usage:\n  cargo xtask build pi-agent|view-sdk|esp32-p4|esp32-s3|esp32-sim\n  cargo xtask package app <id> [credentials.json]\n  cargo xtask run esp32-sim [args]\n  cargo xtask snapshot esp32-sim"
             );
             bail!("unknown xtask command")
         }
