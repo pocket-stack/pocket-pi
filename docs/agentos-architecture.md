@@ -284,9 +284,10 @@ update through the same supervisor path:
 
 `.update/release` exists only after physical confirmation and is the complete
 recovery signal. If power is lost, boot reruns any uncommitted SQLite migration
-and finishes the source swap. There is no persistent installation record,
-release history or rollback mechanism. Explicit uninstall still removes all
-App-owned state.
+and finishes the source swap. The runtime keeps the latest 16 terminal install
+and update events in `.system/app-events/<id>.json`, including bounded failure
+text. This is diagnostic context, not release history or a rollback mechanism.
+Explicit uninstall removes both App-owned state and this event file.
 
 Migration files contain only schema/data statements. The runtime owns the
 transaction and `PRAGMA user_version`; Apps must not put transaction control or
@@ -298,8 +299,9 @@ The Pi Agent gets two lifecycle Tools; ordinary file editing continues to use
 the existing workspace Tools:
 
 1. `app.checkout({id})` copies the installed source release once to
-   `apps/<id>/checkout` and returns that path. Calling it again reopens the same
-   checkout without overwriting Agent work.
+   `apps/<id>/checkout` and returns that path together with
+   `.system/app-events/<id>.json`. Calling it again reopens the same checkout
+   without overwriting Agent work.
 2. The Agent reads and edits that directory, advances `app.json` `version`, and
    changes `schemaVersion` plus `migrations/N.sql` only for a SQLite shape
    change.
@@ -323,7 +325,9 @@ Checkout never copies `data/`, `tmp/` or credentials. Submit is a same-filesyste
 rename, not another source copy. `.update/` is still created only after physical
 confirmation by the existing crash-safe updater. The generic workspace Tools
 remain capable of writing under `apps/`; that capability is not a second update
-contract, and the Agent prompt directs App iteration through checkout and submit.
+contract, and the Agent reads the returned recent events before iterating through
+checkout and submit. Event timestamps are UTC when the device clock is
+synchronized and `null` before then; the runtime never invents an epoch time.
 
 ## Minimal native capability surface
 

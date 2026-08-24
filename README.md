@@ -194,16 +194,20 @@ bridge does not reset a running Pocket Pi.
 The resident Pi Agent can update an already installed ordinary App without a
 new transport or package format. It calls `app.checkout`, edits the returned
 `apps/<id>/checkout` directory with its normal file Tools, advances the App
-version, and calls `app.submit`. Submit moves that source into the same installer
-staging used above and opens the same review screen; nothing changes until the
-user confirms on Pocket Pi. Checkout does not copy App data, temporary files or
-credentials, and code-only edits do not change `schemaVersion`.
+version, and calls `app.submit`. Checkout also returns
+`.system/app-events/<id>.json`, which contains the latest install and update
+outcomes so a retry can see the previous failure. Submit moves that source into
+the same installer staging used above and opens the same review screen; nothing
+changes until the user confirms on Pocket Pi. Checkout does not copy App data,
+temporary files or credentials, and code-only edits do not change
+`schemaVersion`.
 
 To remove an ordinary App, open **Apps**, tap **UNINSTALL APP**, then tap the
 `X` on that App's row. Uninstall removes the App release, SQLite/data files,
 schedules, credentials, native session state and cached View/Action
 Runtimes. It does not retain App data or provide rollback. The resident Pi Agent
-System App cannot be uninstalled.
+System App cannot be uninstalled. Uninstall also deletes that App's recent event
+file.
 
 ### 2. Develop with the ESP32-P4 simulator on macOS
 

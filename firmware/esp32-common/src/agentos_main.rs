@@ -559,6 +559,10 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
                                 }
                                 Some("apps.dismissInstall") => {
                                     if let Some(staged) = pending_install.take() {
+                                        supervisor.record_app_dismissal(
+                                            &staged.descriptor,
+                                            install_ui.as_ref().is_some_and(|ui| ui.update),
+                                        );
                                         if let Some(path) = staged.release_dir.parent() {
                                             let _ = std::fs::remove_dir_all(path);
                                         }

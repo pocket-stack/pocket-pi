@@ -488,6 +488,10 @@ impl Product {
                     }
                     Some("apps.dismissInstall") => {
                         if let Some(staged) = self.pending_install.take() {
+                            self.supervisor.record_app_dismissal(
+                                &staged.descriptor,
+                                self.install_ui.as_ref().is_some_and(|ui| ui.update),
+                            );
                             if let Some(path) = staged.release_dir.parent() {
                                 let _ = std::fs::remove_dir_all(path);
                             }
