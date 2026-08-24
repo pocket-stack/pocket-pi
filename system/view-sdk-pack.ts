@@ -5,6 +5,6 @@ const fontSlots = [
   "text-base", "text-lg", "text-xl", "text-2xl", "text-base font-bold",
   "text-lg font-bold", "text-xl font-bold", "text-2xl font-bold",
 ];
-const glyphs = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~ ‘’“”—…·•‹›↑↓$%";
+const glyphs = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~ ‘’“”—…·•‹›↑↓→$%";
 void fontSlots;
 void glyphs;
