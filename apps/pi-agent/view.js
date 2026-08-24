@@ -240,14 +240,12 @@
       onPress: () => uninstallMode.get() ? "" : PocketPi.navigate(app.id),
       style: { width: "full", height: 150, paddingX: 24, direction: "row", align: "center", gap: 20, background: "surface" },
       children: [
-        View.Row({ style: { grow: 1, align: "center", gap: 20 }, children: [
-          View.Box({ style: { width: 68, height: 68, align: "center", justify: "center", background: "accentSoft" }, children:
-            View.Text({ text: app.title.slice(0, 1).toUpperCase(), style: { color: "accent", fontSize: "xl", fontWeight: "bold" } }) }),
-          View.Column({ style: { grow: 1, gap: 8 }, children: [
-            View.Text({ text: app.title, style: { fontSize: "xl", fontWeight: "bold" } }),
-            View.Text({ text: app.description, style: { color: "muted", fontSize: "lg" } }),
-            app.scheduleEveryMinutes ? View.Text({ text: `UPDATES EVERY ${app.scheduleEveryMinutes} MINUTES`, style: { color: "muted" } }) : null,
-          ] }),
+        View.Box({ style: { width: 68, height: 68, align: "center", justify: "center", background: "accentSoft" }, children:
+          View.Text({ text: app.title.slice(0, 1).toUpperCase(), style: { color: "accent", fontSize: "xl", fontWeight: "bold" } }) }),
+        View.Column({ style: { grow: 1, basis: 0, gap: 8, overflow: "hidden" }, children: [
+          View.Text({ text: app.title, style: { fontSize: "xl", fontWeight: "bold" } }),
+          View.Text({ text: app.description, style: { color: "muted", fontSize: "lg" } }),
+          app.scheduleEveryMinutes ? View.Text({ text: `UPDATES EVERY ${app.scheduleEveryMinutes} MINUTES`, style: { color: "muted" } }) : null,
         ] }),
         uninstallMode.get()
           ? deleteButton(app.id, busy, () => PocketPi.command("apps.uninstall", { app: app.id }))
@@ -299,9 +297,10 @@
   function networkRow(network) {
     return View.Pressable({
       onPress: () => selectNetwork(network),
-      style: { width: "full", height: LANDSCAPE ? 72 : 84, paddingX: 20, direction: "row", align: "center", justify: "between", background: "surface" },
+      style: { width: "full", height: LANDSCAPE ? 72 : 84, paddingX: 20, direction: "row", align: "center", gap: 12, background: "surface" },
       children: [
-        View.Text({ text: network.ssid, style: { fontSize: "lg", fontWeight: "bold" } }),
+        View.Column({ style: { grow: 1, basis: 0, overflow: "hidden" }, children:
+          View.Text({ text: network.ssid, style: { fontSize: "lg", fontWeight: "bold" } }) }),
         View.Text({ text: `${network.rssiDbm} DBM  ${network.secured ? "LOCK" : "OPEN"}`, style: { color: "muted" } }),
       ],
     });
@@ -316,7 +315,7 @@
       View.Text({ text: psramText.get, style: { color: "subtle", fontWeight: "bold" } }),
     ] });
     const wifiSummary = View.Row({ style: { height: LANDSCAPE ? 132 : 154, paddingX: 20, align: "center", gap: 16, background: "surface" }, children: [
-      View.Column({ style: { grow: 1, gap: LANDSCAPE ? 8 : 12 }, children: [
+      View.Column({ style: { grow: 1, basis: 0, gap: LANDSCAPE ? 8 : 12, overflow: "hidden" }, children: [
         View.Text({ text: "WI-FI", style: { fontSize: "lg", fontWeight: "bold" } }),
         View.Text({ text: wifiSsid.get, style: { color: "accent", fontSize: "lg", fontWeight: "bold" } }),
         View.Text({ text: wifiDetail.get, style: { color: "muted" } }),
