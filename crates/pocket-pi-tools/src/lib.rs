@@ -6,7 +6,6 @@ mod workspace;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
 
 use pocket_pi_embedded::{ToolHost, ToolResult};
 use serde_json::{json, Value};
@@ -99,38 +98,14 @@ impl ToolHost for CoreToolHost {
     }
 
     fn execute(&self, call_id: &str, name: &str, args_json: &str) -> ToolResult {
-        let started = Instant::now();
-        log::info!(
-            "diag tool.host phase=start name={name} args_bytes={} call_id_bytes={}",
-            args_json.len(),
-            call_id.len()
-        );
         let args = match serde_json::from_str::<Value>(args_json) {
             Ok(Value::Object(args)) => Value::Object(args),
-            Ok(_) => {
-                log::warn!(
-                    "diag tool.host phase=done name={name} elapsed_ms={} error=true reason=arguments_not_object",
-                    started.elapsed().as_millis()
-                );
-                return ToolResult::error("tool arguments must be a JSON object");
-            }
-            Err(error) => {
-                log::warn!(
-                    "diag tool.host phase=done name={name} elapsed_ms={} error=true reason=invalid_json error_bytes={}",
-                    started.elapsed().as_millis(),
-                    error.to_string().len()
-                );
-                return ToolResult::error(format!("invalid tool arguments: {error}"));
-            }
+            Ok(_) => return ToolResult::error("tool arguments must be a JSON object"),
+            Err(error) => return ToolResult::error(format!("invalid tool arguments: {error}")),
         };
         match self.execute_value(call_id, name, &args) {
             Ok(result) => {
-                log::info!(
-                    "diag tool.host phase=done name={name} elapsed_ms={} error=false terminate={} result_bytes={}",
-                    started.elapsed().as_millis(),
-                    result.terminate,
-                    result.text.len()
-                );
+                log::info!("Native tool {name} completed");
                 ToolResult {
                     text: result.text,
                     details: result.details,
@@ -139,11 +114,7 @@ impl ToolHost for CoreToolHost {
                 }
             }
             Err(error) => {
-                log::warn!(
-                    "diag tool.host phase=done name={name} elapsed_ms={} error=true error_bytes={}",
-                    started.elapsed().as_millis(),
-                    error.len()
-                );
+                log::warn!("Native tool {name} failed: {error}");
                 ToolResult::error(error)
             }
         }

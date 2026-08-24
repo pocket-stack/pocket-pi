@@ -47,12 +47,6 @@ struct Message {
     text: String,
 }
 
-struct AgentTurnDiagnostics {
-    id: u64,
-    started: Instant,
-    response_bytes: usize,
-}
-
 struct InstallUi {
     state: &'static str,
     descriptor: AppDescriptor,
@@ -146,37 +140,8 @@ fn telemetry_facts(cpu_percent: Option<u8>) -> SystemTelemetryFacts {
     }
 }
 
-fn log_runtime_checkpoint(scope: &str, phase: &str, started: &Instant) {
-    let internal_caps =
-        esp_idf_svc::sys::MALLOC_CAP_INTERNAL | esp_idf_svc::sys::MALLOC_CAP_8BIT;
-    let internal_free =
-        unsafe { esp_idf_svc::sys::heap_caps_get_free_size(internal_caps) };
-    let internal_largest =
-        unsafe { esp_idf_svc::sys::heap_caps_get_largest_free_block(internal_caps) };
-    let internal_min =
-        unsafe { esp_idf_svc::sys::heap_caps_get_minimum_free_size(internal_caps) };
-    let psram_free = unsafe {
-        esp_idf_svc::sys::heap_caps_get_free_size(esp_idf_svc::sys::MALLOC_CAP_SPIRAM)
-    };
-    let psram_largest = unsafe {
-        esp_idf_svc::sys::heap_caps_get_largest_free_block(esp_idf_svc::sys::MALLOC_CAP_SPIRAM)
-    };
-    let psram_min = unsafe {
-        esp_idf_svc::sys::heap_caps_get_minimum_free_size(esp_idf_svc::sys::MALLOC_CAP_SPIRAM)
-    };
-    let stack_high_water_words =
-        unsafe { esp_idf_svc::sys::uxTaskGetStackHighWaterMark2(core::ptr::null_mut()) };
-    log::info!(
-        "diag runtime scope={scope} phase={phase} elapsed_ms={} internal_free={internal_free} internal_largest={internal_largest} internal_min={internal_min} psram_free={psram_free} psram_largest={psram_largest} psram_min={psram_min} stack_high_water_words={stack_high_water_words}",
-        started.elapsed().as_millis()
-    );
-}
-
 pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
-    let boot_started = Instant::now();
-    log_runtime_checkpoint("boot", "run_start", &boot_started);
     let _workspace = storage::mount_workspace()?;
-    log_runtime_checkpoint("boot", "workspace_mounted", &boot_started);
     let nvs = EspDefaultNvsPartition::take()?;
 
     let uart = Arc::new(
@@ -320,7 +285,6 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
             .boot_agent(&config.to_string(), backend, Arc::new(routed_tools))
             .map_err(anyhow::Error::msg)
     })?;
-    log_runtime_checkpoint("boot", "agent_booted", &boot_started);
 
     log::info!("Pocket Pi AgentOS hardware boot: {}", H::BOARD_NAME);
     let mut display = match H::init_display(&supervisor) {
@@ -359,7 +323,6 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
     let mut pending_install: Option<StagedApp> = None;
     let mut install_ui: Option<InstallUi> = None;
     let mut install_requested = false;
-    let mut post_install_started: Option<Instant> = None;
     let mut pending_uninstall: Option<String> = None;
     let mut uninstall_error: Option<String> = None;
     let mut last_tick = Instant::now();
@@ -369,10 +332,6 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
     let mut last_wifi_poll = Instant::now();
     let mut last_uart_install_poll = Instant::now();
     let mut last_wifi_connected = wifi.as_ref().is_some_and(|wifi| wifi.is_connected());
-    let mut next_agent_turn_id = 1u64;
-    let mut active_agent_turn: Option<AgentTurnDiagnostics> = None;
-
-    log_runtime_checkpoint("boot", "event_loop_start", &boot_started);
 
     loop {
         if last_uart_install_poll.elapsed() >= Duration::from_millis(250)
@@ -432,12 +391,6 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
         }
         while let Ok(request) = agent_rx.try_recv() {
             request.handle(&mut supervisor, |supervisor, path| {
-                let submit_started = Instant::now();
-                log::info!(
-                    "diag update.host phase=submit_start path_bytes={}",
-                    path.len()
-                );
-                log_runtime_checkpoint("update.host", "submit_start", &submit_started);
                 anyhow::ensure!(pending_install.is_none(), "another install is pending");
                 anyhow::ensure!(pending_uninstall.is_none(), "an App uninstall is pending");
                 anyhow::ensure!(!supervisor.services_busy(), "App services are busy");
@@ -450,13 +403,6 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
                 let result = (|| -> anyhow::Result<Value> {
                     let (staged, review) =
                         supervisor.submit_app_checkout(path, &install_root)?;
-                    log::info!(
-                        "diag update.host phase=submit_staged app={} version={} update={}",
-                        staged.descriptor.id,
-                        staged.descriptor.version,
-                        review.update
-                    );
-                    log_runtime_checkpoint("update.host", "submit_staged", &submit_started);
                     supervisor
                         .open(pocket_pi_agentos::ROOT_APP_ID)
                         .expect("resident Pi Agent remains available");
@@ -479,12 +425,6 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
                 if result.is_err() {
                     install_slot.store(false, Ordering::Release);
                 }
-                log::info!(
-                    "diag update.host phase=submit_done elapsed_ms={} error={}",
-                    submit_started.elapsed().as_millis(),
-                    result.is_err()
-                );
-                log_runtime_checkpoint("update.host", "submit_done", &submit_started);
                 result
             });
             redraw = true;
@@ -541,18 +481,6 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
                                         .is_some_and(|ui| ui.state == "review") =>
                                 {
                                     if let Some(ui) = &mut install_ui {
-                                        let confirmation_started = Instant::now();
-                                        log::info!(
-                                            "diag update.host phase=confirmed app={} version={} update={}",
-                                            ui.descriptor.id,
-                                            ui.descriptor.version,
-                                            ui.update
-                                        );
-                                        log_runtime_checkpoint(
-                                            "update.host",
-                                            "confirmed",
-                                            &confirmation_started,
-                                        );
                                         ui.state = "installing";
                                     }
                                     install_requested = true;
@@ -737,9 +665,6 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
         }
 
         if system_dirty {
-            if let Some(started) = post_install_started.as_ref() {
-                log_runtime_checkpoint("update.host", "system_update_start", started);
-            }
             let facts = system_facts(
                 &messages,
                 agent_status,
@@ -754,9 +679,6 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
                 telemetry.facts.as_ref(),
             );
             supervisor.update_system(&facts)?;
-            if let Some(started) = post_install_started.as_ref() {
-                log_runtime_checkpoint("update.host", "system_update_done", started);
-            }
             system_dirty = false;
             redraw = true;
         }
@@ -771,9 +693,6 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
         // most CPU0 time to FreeRTOS and navigation is not queued behind
         // redundant Agent/App tick calls.
         if redraw || last_runtime_pump.elapsed() >= Duration::from_millis(50) {
-            if let Some(started) = post_install_started.as_ref() {
-                log_runtime_checkpoint("update.host", "frame_render_start", started);
-            }
             for event in supervisor.frame_render(redraw)? {
                 let show_event = match &event {
                     AgentEvent::ResponseText(_) => H::SHOW_MODEL_PROGRESS,
@@ -782,7 +701,6 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
                 match event {
                     AgentEvent::Ready => {
                         log::info!("Pi Agent System App ready with App Tool registry");
-                        log_runtime_checkpoint("agent.turn", "ready", &boot_started);
                         if uart_poc {
                             unsafe {
                                 esp_idf_svc::sys::esp_log_level_set(
@@ -800,46 +718,17 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
                         messages[0].text = format!("{} Pi Agent is ready.", H::BOARD_ID);
                     }
                     AgentEvent::ResponseText(text) => {
-                        if let Some(turn) = active_agent_turn.as_mut() {
-                            turn.response_bytes = turn.response_bytes.saturating_add(text.len());
-                        }
                         if let Some(message) = messages.last_mut() {
                             message.text.push_str(&text);
                         }
                     }
                     AgentEvent::Done => {
                         log::info!("Pi Agent turn completed");
-                        if let Some(turn) = active_agent_turn.take() {
-                            log::info!(
-                                "diag agent.turn phase=done turn_id={} elapsed_ms={} response_bytes={}",
-                                turn.id,
-                                turn.started.elapsed().as_millis(),
-                                turn.response_bytes
-                            );
-                            log_runtime_checkpoint("agent.turn", "done", &turn.started);
-                        } else {
-                            log::warn!("diag agent.turn phase=done_without_active_turn");
-                        }
                         agent_status = "IDLE";
                         busy = false;
                     }
                     AgentEvent::Failed(error) => {
                         log::error!("Pi Agent failed: {error}");
-                        if let Some(turn) = active_agent_turn.take() {
-                            log::warn!(
-                                "diag agent.turn phase=failed turn_id={} elapsed_ms={} response_bytes={} error_bytes={}",
-                                turn.id,
-                                turn.started.elapsed().as_millis(),
-                                turn.response_bytes,
-                                error.len()
-                            );
-                            log_runtime_checkpoint("agent.turn", "failed", &turn.started);
-                        } else {
-                            log::warn!(
-                                "diag agent.turn phase=failed_without_active_turn error_bytes={}",
-                                error.len()
-                            );
-                        }
                         if let Some(message) = messages.last_mut() {
                             message.text = format!("Agent failed: {error}");
                         }
@@ -850,9 +739,6 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
                 if show_event {
                     system_dirty = true;
                 }
-            }
-            if let Some(started) = post_install_started.as_ref() {
-                log_runtime_checkpoint("update.host", "frame_render_done", started);
             }
             last_runtime_pump = Instant::now();
         }
@@ -879,56 +765,20 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
         }
 
         if redraw {
-            if let Some(started) = post_install_started.as_ref() {
-                log_runtime_checkpoint("update.host", "display_render_start", started);
-            }
             if let Some(display) = display.as_mut() {
                 display.render(&supervisor)?;
             }
-            if let Some(started) = post_install_started.as_ref() {
-                log_runtime_checkpoint("update.host", "display_render_done", started);
-            }
             redraw = false;
-            post_install_started = None;
         }
 
         if !touch_was_down && !system_dirty {
             if let Some(prompt) = pending_prompt.take() {
-                let turn = AgentTurnDiagnostics {
-                    id: next_agent_turn_id,
-                    started: Instant::now(),
-                    response_bytes: 0,
-                };
-                next_agent_turn_id = next_agent_turn_id.wrapping_add(1).max(1);
-                log::info!(
-                    "diag agent.turn phase=dispatch_start turn_id={} prompt_bytes={}",
-                    turn.id,
-                    prompt.len()
-                );
-                log_runtime_checkpoint("agent.turn", "dispatch_start", &turn.started);
-                active_agent_turn = Some(turn);
                 if let Err(error) = supervisor.prompt_agent(&prompt) {
-                    if let Some(turn) = active_agent_turn.take() {
-                        log::warn!(
-                            "diag agent.turn phase=dispatch_failed turn_id={} elapsed_ms={} error_bytes={}",
-                            turn.id,
-                            turn.started.elapsed().as_millis(),
-                            error.to_string().len()
-                        );
-                        log_runtime_checkpoint("agent.turn", "dispatch_failed", &turn.started);
-                    }
                     messages.last_mut().unwrap().text = format!("Agent is unavailable: {error:#}");
                     busy = false;
                     agent_status = "FAULTED";
                     system_dirty = true;
                     redraw = true;
-                } else if let Some(turn) = active_agent_turn.as_ref() {
-                    log::info!(
-                        "diag agent.turn phase=dispatched turn_id={} elapsed_ms={}",
-                        turn.id,
-                        turn.started.elapsed().as_millis()
-                    );
-                    log_runtime_checkpoint("agent.turn", "dispatched", &turn.started);
                 }
             }
         }
@@ -938,18 +788,11 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
         if install_requested {
             install_requested = false;
             if let Some(staged) = pending_install.take() {
-                let operation_started = Instant::now();
                 let operation = if install_ui.as_ref().is_some_and(|ui| ui.update) {
                     "update"
                 } else {
                     "install"
                 };
-                log::info!(
-                    "diag update.host phase=apply_start operation={operation} app={} version={}",
-                    staged.descriptor.id,
-                    staged.descriptor.version
-                );
-                log_runtime_checkpoint("update.host", "apply_start", &operation_started);
                 let cleanup = staged
                     .release_dir
                     .parent()
@@ -957,12 +800,6 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
                 let result = with_psram_pthread_config(ACTION_STACK_BYTES, 1, || {
                     supervisor.apply_app(&staged.release_dir, staged.credentials)
                 });
-                log::info!(
-                    "diag update.host phase=apply_done operation={operation} elapsed_ms={} error={}",
-                    operation_started.elapsed().as_millis(),
-                    result.is_err()
-                );
-                log_runtime_checkpoint("update.host", "apply_done", &operation_started);
                 match &result {
                     Ok(descriptor) => {
                         log::info!(
@@ -974,17 +811,7 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
                     Err(error) => log::error!("App {operation} failed: {error:#}"),
                 }
                 if let Some(path) = cleanup {
-                    log::info!("diag update.host phase=staging_cleanup_start");
                     let _ = std::fs::remove_dir_all(path);
-                    log::info!(
-                        "diag update.host phase=staging_cleanup_done elapsed_ms={}",
-                        operation_started.elapsed().as_millis()
-                    );
-                    log_runtime_checkpoint(
-                        "update.host",
-                        "staging_cleanup_done",
-                        &operation_started,
-                    );
                 }
                 if let Some(ui) = &mut install_ui {
                     match result {
@@ -995,8 +822,6 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
                         }
                     }
                 }
-                log_runtime_checkpoint("update.host", "result_published", &operation_started);
-                post_install_started = Some(operation_started);
                 system_dirty = true;
                 redraw = true;
             }

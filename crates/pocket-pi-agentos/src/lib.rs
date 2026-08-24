@@ -111,9 +111,6 @@ unsafe impl pocket_mod::qjs::allocator::Allocator for PsramAllocator {
 const PSRAM_CAPS: u32 = 4 | 1024;
 
 #[cfg(target_os = "espidf")]
-const INTERNAL_CAPS: u32 = 4 | 2048;
-
-#[cfg(target_os = "espidf")]
 unsafe extern "C" {
     fn heap_caps_malloc(size: usize, caps: u32) -> *mut core::ffi::c_void;
     fn heap_caps_calloc(count: usize, size: usize, caps: u32) -> *mut core::ffi::c_void;
@@ -124,31 +121,6 @@ unsafe extern "C" {
     ) -> *mut core::ffi::c_void;
     fn heap_caps_free(ptr: *mut core::ffi::c_void);
     fn heap_caps_get_allocated_size(ptr: *mut core::ffi::c_void) -> usize;
-    fn heap_caps_get_free_size(caps: u32) -> usize;
-    fn heap_caps_get_largest_free_block(caps: u32) -> usize;
-    fn heap_caps_get_minimum_free_size(caps: u32) -> usize;
-}
-
-#[cfg(target_os = "espidf")]
-fn log_app_checkpoint(scope: &str, app_id: &str, phase: &str, started: Instant) {
-    let internal_free = unsafe { heap_caps_get_free_size(INTERNAL_CAPS) };
-    let internal_largest = unsafe { heap_caps_get_largest_free_block(INTERNAL_CAPS) };
-    let internal_min = unsafe { heap_caps_get_minimum_free_size(INTERNAL_CAPS) };
-    let psram_free = unsafe { heap_caps_get_free_size(PSRAM_CAPS) };
-    let psram_largest = unsafe { heap_caps_get_largest_free_block(PSRAM_CAPS) };
-    let psram_min = unsafe { heap_caps_get_minimum_free_size(PSRAM_CAPS) };
-    log::info!(
-        "diag app.lifecycle scope={scope} phase={phase} app={app_id} elapsed_ms={} internal_free={internal_free} internal_largest={internal_largest} internal_min={internal_min} psram_free={psram_free} psram_largest={psram_largest} psram_min={psram_min}",
-        started.elapsed().as_millis()
-    );
-}
-
-#[cfg(not(target_os = "espidf"))]
-fn log_app_checkpoint(scope: &str, app_id: &str, phase: &str, started: Instant) {
-    log::info!(
-        "diag app.lifecycle scope={scope} phase={phase} app={app_id} elapsed_ms={}",
-        started.elapsed().as_millis()
-    );
 }
 
 #[cfg(target_os = "espidf")]
@@ -1249,7 +1221,6 @@ impl ActionSource {
 
 struct ActionRequest {
     run_id: u64,
-    queued_at: Instant,
     app_id: String,
     source: ActionSource,
     action: String,
@@ -1558,11 +1529,6 @@ impl ActionRunner {
                     let request = match message {
                         ActionMessage::Run(request) => request,
                         ActionMessage::RemoveApp { app_id, done } => {
-                            let remove_started = Instant::now();
-                            log::info!(
-                                "diag app.action phase=remove_start app={app_id} runtime_count={}",
-                                runtimes.len()
-                            );
                             let result = worker_configs
                                 .lock()
                                 .map_err(|_| anyhow!("App Action config lock was poisoned"))
@@ -1571,25 +1537,10 @@ impl ActionRunner {
                                     runtimes
                                         .retain(|(runtime_app_id, _)| runtime_app_id != &app_id);
                                 });
-                            log::info!(
-                                "diag app.action phase=remove_done app={app_id} elapsed_ms={} error={} runtime_count={}",
-                                remove_started.elapsed().as_millis(),
-                                result.is_err(),
-                                runtimes.len()
-                            );
                             let _ = done.send(result);
                             continue;
                         }
                     };
-                    let action_started = Instant::now();
-                    log::info!(
-                        "diag app.action phase=start run_id={} app={} action={} source={} queue_ms={}",
-                        request.run_id,
-                        request.app_id,
-                        request.action,
-                        request.source.as_str(),
-                        request.queued_at.elapsed().as_millis()
-                    );
                     let result = (|| -> Result<ToolResult> {
                         let runtime = match take_runtime(&mut runtimes, &request.app_id) {
                             Some(runtime) => runtime,
@@ -1632,16 +1583,6 @@ impl ActionRunner {
                             tool_error(format!("{}: {error:#}", request.action))
                         }
                     };
-                    log::info!(
-                        "diag app.action phase=done run_id={} app={} action={} source={} elapsed_ms={} error={} result_bytes={}",
-                        request.run_id,
-                        request.app_id,
-                        request.action,
-                        request.source.as_str(),
-                        action_started.elapsed().as_millis(),
-                        result.is_error,
-                        result.text.len()
-                    );
                     worker_pending.fetch_sub(1, Ordering::AcqRel);
                     match request.completion {
                         ActionCompletion::Schedule(schedule_id) => {
@@ -1678,15 +1619,9 @@ impl ActionRunner {
         completion: ActionCompletion,
     ) -> Result<u64> {
         let run_id = u64::from(self.next_run_id.fetch_add(1, Ordering::Relaxed));
-        log::info!(
-            "diag app.action phase=queued run_id={run_id} app={app_id} action={action} source={} pending_before={}",
-            source.as_str(),
-            self.pending.load(Ordering::Acquire)
-        );
         self.pending.fetch_add(1, Ordering::AcqRel);
         if let Err(error) = self.tx.try_send(ActionMessage::Run(ActionRequest {
             run_id,
-            queued_at: Instant::now(),
             app_id: app_id.to_owned(),
             source,
             action: action.to_owned(),
@@ -1695,11 +1630,6 @@ impl ActionRunner {
             completion,
         })) {
             self.pending.fetch_sub(1, Ordering::AcqRel);
-            log::warn!(
-                "diag app.action phase=queue_failed run_id={run_id} app={app_id} action={action} source={} error_bytes={}",
-                source.as_str(),
-                error.to_string().len()
-            );
             return Err(anyhow!("queue App Action: {error}"));
         }
         Ok(run_id)
@@ -1714,9 +1644,6 @@ impl ActionRunner {
     }
 
     fn register(&self, config: ActionConfig) -> Result<()> {
-        let started = Instant::now();
-        let app_id = config.app_id.clone();
-        log::info!("diag app.action phase=register_start app={app_id}");
         let mut configs = self
             .configs
             .lock()
@@ -1727,11 +1654,6 @@ impl ActionRunner {
             config.app_id
         );
         configs.insert(config.app_id.clone(), config);
-        log::info!(
-            "diag app.action phase=register_done app={app_id} elapsed_ms={} config_count={}",
-            started.elapsed().as_millis(),
-            configs.len()
-        );
         Ok(())
     }
 
@@ -1742,26 +1664,14 @@ impl ActionRunner {
     }
 
     fn remove_app(&self, app_id: &str) -> Result<()> {
-        let started = Instant::now();
-        log::info!("diag app.action phase=remove_queued app={app_id}");
         let (done, response) = mpsc::channel();
-        if let Err(error) = self.tx.send(ActionMessage::RemoveApp {
-            app_id: app_id.to_owned(),
-            done,
-        }) {
-            log::warn!(
-                "diag app.action phase=remove_send_failed app={app_id} elapsed_ms={}",
-                started.elapsed().as_millis()
-            );
-            return Err(error).context("stop App Action runtime");
-        }
-        let result = response.recv().context("App Action runner stopped")?;
-        log::info!(
-            "diag app.action phase=remove_acknowledged app={app_id} elapsed_ms={} error={}",
-            started.elapsed().as_millis(),
-            result.is_err()
-        );
-        result
+        self.tx
+            .send(ActionMessage::RemoveApp {
+                app_id: app_id.to_owned(),
+                done,
+            })
+            .context("stop App Action runtime")?;
+        response.recv().context("App Action runner stopped")?
     }
 }
 
@@ -2236,8 +2146,6 @@ impl AppSupervisor {
     }
 
     pub fn checkout_app(&self, app_id: &str) -> Result<String> {
-        let started = Instant::now();
-        log_app_checkpoint("checkout", app_id, "start", started);
         ensure_safe_component(app_id, "App id")?;
         anyhow::ensure!(app_id != ROOT_APP_ID, "cannot checkout the System App");
         let app = self
@@ -2252,7 +2160,6 @@ impl AppSupervisor {
                     metadata.file_type().is_dir(),
                     "App checkout is not a directory"
                 );
-                log_app_checkpoint("checkout", app_id, "reopen_existing", started);
                 return Ok(format!("apps/{app_id}/checkout"));
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -2261,19 +2168,14 @@ impl AppSupervisor {
 
         let temporary = app_root.join(".checkout-tmp");
         if temporary.exists() {
-            log_app_checkpoint("checkout", app_id, "remove_stale_temp", started);
             std::fs::remove_dir_all(&temporary)?;
         }
-        log_app_checkpoint("checkout", app_id, "copy_start", started);
         let copied = copy_directory(&app.release_dir, &temporary);
         if let Err(error) = copied {
-            log_app_checkpoint("checkout", app_id, "copy_failed", started);
             let _ = std::fs::remove_dir_all(&temporary);
             return Err(error);
         }
-        log_app_checkpoint("checkout", app_id, "copy_done", started);
         std::fs::rename(&temporary, &checkout).context("publish App checkout")?;
-        log_app_checkpoint("checkout", app_id, "published", started);
         Ok(format!("apps/{app_id}/checkout"))
     }
 
@@ -2282,21 +2184,13 @@ impl AppSupervisor {
         requested_path: &str,
         install_root: &Path,
     ) -> Result<(StagedApp, AppInstallReview)> {
-        let started = Instant::now();
-        log::info!(
-            "diag app.lifecycle scope=submit phase=start requested_path_bytes={}",
-            requested_path.len()
-        );
         let (app_id, checkout) = self.resolve_checkout(requested_path)?;
-        log_app_checkpoint("submit", &app_id, "resolved", started);
         anyhow::ensure!(
             checkout.symlink_metadata()?.file_type().is_dir(),
             "App checkout is not a directory"
         );
         let candidate = load_source_release(&checkout, &app_id)?;
-        log_app_checkpoint("submit", &app_id, "source_loaded", started);
         let review = self.validate_app_change(&candidate, &BTreeMap::new())?;
-        log_app_checkpoint("submit", &app_id, "validated", started);
         let staged = StagedApp {
             descriptor: candidate.descriptor,
             release_dir: checkout.clone(),
@@ -2312,14 +2206,11 @@ impl AppSupervisor {
                 .to_string(),
         );
         std::fs::create_dir(&job)?;
-        log_app_checkpoint("submit", &app_id, "job_created", started);
         let release_dir = job.join("release");
         if let Err(error) = std::fs::rename(&checkout, &release_dir) {
-            log_app_checkpoint("submit", &app_id, "rename_failed", started);
             let _ = std::fs::remove_dir(&job);
             return Err(error).context("submit App checkout");
         }
-        log_app_checkpoint("submit", &app_id, "staged", started);
         Ok((
             StagedApp {
                 release_dir,
@@ -2573,9 +2464,7 @@ impl AppSupervisor {
         mut candidate: InstalledApp,
         app_root: &Path,
     ) -> Result<AppDescriptor> {
-        let started = Instant::now();
         let app_id = candidate.descriptor.id.clone();
-        log_app_checkpoint("update", &app_id, "start", started);
         let installed = self
             .catalog
             .app(&app_id)
@@ -2590,22 +2479,12 @@ impl AppSupervisor {
             .get(&app_id)
             .cloned()
             .expect("installed App has a revision");
-        log::info!(
-            "diag app.update contract app={app_id} current_version={} candidate_version={} current_schema={} candidate_schema={}",
-            installed.descriptor.version,
-            candidate.descriptor.version,
-            installed.descriptor.schema_version,
-            candidate.descriptor.schema_version
-        );
-
         let rehearsal_root = staging_release.with_extension("rehearsal");
         if rehearsal_root.exists() {
-            log_app_checkpoint("update", &app_id, "remove_stale_rehearsal", started);
             std::fs::remove_dir_all(&rehearsal_root)?;
         }
         let rehearsal = (|| -> Result<()> {
             std::fs::create_dir_all(&rehearsal_root)?;
-            log_app_checkpoint("update", &app_id, "rehearsal_created", started);
             // Existing Guests cache this handle and must keep working if the
             // rehearsal fails. apply_app already guarantees the App is idle.
             let (_, db_root, _) = data_paths(&self.workspace, &app_id);
@@ -2614,69 +2493,53 @@ impl AppSupervisor {
                 rehearsal_root.join(format!("{app_id}.sqlite")),
             )
             .context("copy App database for migration rehearsal")?;
-            log_app_checkpoint("update", &app_id, "rehearsal_database_copied", started);
             let rehearsal_database = Arc::new(Mutex::new(DbModule::new(DbStorage::Dir(
                 rehearsal_root.clone(),
             ))));
             migrate_source_database(&candidate, &rehearsal_database)?;
-            log_app_checkpoint("update", &app_id, "rehearsal_migrated", started);
             let rehearsal_revision = Arc::new(AtomicU32::new(0));
             let _ =
                 self.load_candidate_runtime(&candidate, rehearsal_database, rehearsal_revision)?;
-            log_app_checkpoint("update", &app_id, "rehearsal_runtime_loaded", started);
             Ok(())
         })();
         let cleanup = std::fs::remove_dir_all(&rehearsal_root);
         rehearsal?;
         cleanup?;
-        log_app_checkpoint("update", &app_id, "rehearsal_cleaned", started);
 
         let update_root = app_root.join(".update");
         anyhow::ensure!(!update_root.exists(), "App update is already in progress");
         std::fs::create_dir_all(&update_root)?;
-        log_app_checkpoint("update", &app_id, "journal_created", started);
         let candidate_release = update_root.join("release");
         std::fs::rename(staging_release, &candidate_release).context("move staged App update")?;
-        log_app_checkpoint("update", &app_id, "candidate_staged", started);
         candidate = load_source_release(&candidate_release, &app_id)?;
-        log_app_checkpoint("update", &app_id, "candidate_reloaded", started);
         if let Err(error) = migrate_source_database(&candidate, &database) {
-            log_app_checkpoint("update", &app_id, "live_migration_failed", started);
             let _ = std::fs::remove_dir_all(&update_root);
             return Err(error);
         }
-        log_app_checkpoint("update", &app_id, "live_migration_done", started);
 
         self.action_runner.remove_app(&app_id)?;
-        log_app_checkpoint("update", &app_id, "old_action_removed", started);
         let was_active = self.active_app.as_deref() == Some(&app_id);
         if was_active {
             self.active_app = None;
         }
         self.runtimes
             .retain(|(runtime_app_id, _)| runtime_app_id != &app_id);
-        log_app_checkpoint("update", &app_id, "old_view_removed", started);
 
         let old_release = update_root.join("old-release");
         std::fs::rename(app_root.join("release"), &old_release)
             .context("preserve current App release")?;
-        log_app_checkpoint("update", &app_id, "old_release_preserved", started);
         std::fs::rename(&candidate_release, app_root.join("release"))
             .context("activate updated App release")?;
-        log_app_checkpoint("update", &app_id, "candidate_activated", started);
         candidate = load_source_release(&app_root.join("release"), &app_id)?;
-        log_app_checkpoint("update", &app_id, "active_source_loaded", started);
 
         let (has_actions, runtime) =
             self.load_candidate_runtime(&candidate, database.clone(), revision.clone())?;
-        log_app_checkpoint("update", &app_id, "active_runtime_loaded", started);
         if has_actions {
             self.action_runner.register(self.action_config(
                 &candidate,
                 database.clone(),
                 revision,
             ))?;
-            log_app_checkpoint("update", &app_id, "new_action_registered", started);
         }
 
         let old_tools = installed
@@ -2705,15 +2568,12 @@ impl AppSupervisor {
             agent
                 .replace_tools(&self.system.guest, next)
                 .map_err(anyhow::Error::msg)?;
-            log_app_checkpoint("update", &app_id, "agent_tools_replaced", started);
         }
 
         let schedule_path = app_root.join("data/.system/schedules.json");
         self.schedules
             .replace(&candidate.descriptor, schedule_path)?;
-        log_app_checkpoint("update", &app_id, "schedules_replaced", started);
         self.catalog.replace_validated(candidate.clone());
-        log_app_checkpoint("update", &app_id, "catalog_replaced", started);
         make_runtime_room(
             &mut self.runtimes,
             VIEW_RUNTIME_LIMIT,
@@ -2721,11 +2581,9 @@ impl AppSupervisor {
         );
         self.runtimes.push((app_id.clone(), runtime));
         if was_active {
-            self.active_app = Some(app_id.clone());
+            self.active_app = Some(app_id);
         }
-        log_app_checkpoint("update", &app_id, "runtime_published", started);
         std::fs::remove_dir_all(&update_root).context("clean completed App update")?;
-        log_app_checkpoint("update", &app_id, "complete", started);
         Ok(candidate.descriptor)
     }
 
@@ -3287,39 +3145,24 @@ fn validate_update_contract(
 }
 
 fn recover_app_updates(workspace: &Path) -> Result<()> {
-    let recovery_started = Instant::now();
-    log::info!("diag app.recovery phase=scan_start");
     let apps_root = workspace.join("apps");
     let Ok(entries) = std::fs::read_dir(&apps_root) else {
-        log::info!(
-            "diag app.recovery phase=scan_done elapsed_ms={} pending=0",
-            recovery_started.elapsed().as_millis()
-        );
         return Ok(());
     };
-    let mut pending = 0usize;
     for entry in entries {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
             continue;
         }
-        let app_label = entry.file_name().to_string_lossy().into_owned();
         let app_root = entry.path();
         let update_root = app_root.join(".update");
         if !update_root.is_dir() {
             continue;
         }
-        pending += 1;
-        let app_started = Instant::now();
-        log::warn!("diag app.recovery phase=pending_found app={app_label}");
         let release = app_root.join("release");
         let candidate_release = update_root.join("release");
         let old_release = update_root.join("old-release");
         if old_release.is_dir() {
-            log::warn!(
-                "diag app.recovery phase=old_release_found app={app_label} active_release={}",
-                release.is_dir()
-            );
             if !release.is_dir() {
                 anyhow::ensure!(
                     candidate_release.is_dir(),
@@ -3329,18 +3172,10 @@ fn recover_app_updates(workspace: &Path) -> Result<()> {
                     .context("complete App release swap")?;
             }
             std::fs::remove_dir_all(&update_root).context("clean completed App update")?;
-            log::warn!(
-                "diag app.recovery phase=completed_swap_cleaned app={app_label} elapsed_ms={}",
-                app_started.elapsed().as_millis()
-            );
             continue;
         }
         if !candidate_release.is_dir() {
             std::fs::remove_dir_all(&update_root).context("clean empty App update")?;
-            log::warn!(
-                "diag app.recovery phase=empty_update_cleaned app={app_label} elapsed_ms={}",
-                app_started.elapsed().as_millis()
-            );
             continue;
         }
         let app_id = entry
@@ -3348,7 +3183,6 @@ fn recover_app_updates(workspace: &Path) -> Result<()> {
             .to_str()
             .ok_or_else(|| anyhow!("installed App id is not UTF-8"))?
             .to_owned();
-        log::warn!("diag app.recovery phase=resuming_update app={app_id}");
         let installed = load_source_release(&release, &app_id)?;
         let candidate = load_source_release(&candidate_release, &app_id)?;
         let (_, db_root, _) = data_paths(workspace, &app_id);
@@ -3359,15 +3193,7 @@ fn recover_app_updates(workspace: &Path) -> Result<()> {
         std::fs::rename(&release, &old_release).context("preserve current App release")?;
         std::fs::rename(&candidate_release, &release).context("activate updated App release")?;
         std::fs::remove_dir_all(&update_root).context("clean completed App update")?;
-        log::warn!(
-            "diag app.recovery phase=update_resumed app={app_id} elapsed_ms={}",
-            app_started.elapsed().as_millis()
-        );
     }
-    log::info!(
-        "diag app.recovery phase=scan_done elapsed_ms={} pending={pending}",
-        recovery_started.elapsed().as_millis()
-    );
     Ok(())
 }
 
@@ -3490,35 +3316,18 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
-    let started = Instant::now();
-    log::info!(
-        "diag fs.copy_tree phase=start source={} destination={}",
-        source.display(),
-        destination.display()
-    );
     std::fs::create_dir(destination)?;
-    let mut entries = 0usize;
-    let mut bytes = 0u64;
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
-        entries += 1;
         let target = destination.join(entry.file_name());
         let kind = entry.file_type()?;
         if kind.is_dir() {
             copy_directory(&entry.path(), &target)?;
         } else {
             anyhow::ensure!(kind.is_file(), "App source contains a non-file entry");
-            let file_bytes = entry.metadata()?.len();
             std::fs::copy(entry.path(), target)?;
-            bytes += file_bytes;
         }
     }
-    log::info!(
-        "diag fs.copy_tree phase=done source={} destination={} elapsed_ms={} direct_entries={entries} direct_file_bytes={bytes}",
-        source.display(),
-        destination.display(),
-        started.elapsed().as_millis()
-    );
     Ok(())
 }
 
@@ -3561,35 +3370,11 @@ impl ToolHost for RoutedToolHost {
     }
 
     fn execute(&self, call_id: &str, name: &str, args_json: &str) -> ToolResult {
-        let started = Instant::now();
         if !matches!(name, APP_CHECKOUT_TOOL | APP_SUBMIT_TOOL)
             && self.catalog.route_for_tool(name).is_none()
         {
-            log::info!(
-                "diag tool.route phase=start name={name} route=native args_bytes={} call_id_bytes={}",
-                args_json.len(),
-                call_id.len()
-            );
-            let result = self.native.execute(call_id, name, args_json);
-            log::info!(
-                "diag tool.route phase=done name={name} route=native elapsed_ms={} error={} terminate={} result_bytes={}",
-                started.elapsed().as_millis(),
-                result.is_error,
-                result.terminate,
-                result.text.len()
-            );
-            return result;
+            return self.native.execute(call_id, name, args_json);
         }
-        let route = if matches!(name, APP_CHECKOUT_TOOL | APP_SUBMIT_TOOL) {
-            "lifecycle"
-        } else {
-            "app_action"
-        };
-        log::info!(
-            "diag tool.route phase=start name={name} route={route} args_bytes={} call_id_bytes={}",
-            args_json.len(),
-            call_id.len()
-        );
         let (response, response_rx) = mpsc::channel();
         let deadline = new_action_deadline();
         if self
@@ -3602,36 +3387,15 @@ impl ToolHost for RoutedToolHost {
             })
             .is_err()
         {
-            log::error!(
-                "diag tool.route phase=send_failed name={name} route={route} elapsed_ms={}",
-                started.elapsed().as_millis()
-            );
             return tool_error("App Supervisor is unavailable");
         }
         loop {
             if Instant::now() >= deadline {
-                log::error!(
-                    "diag tool.route phase=timeout name={name} route={route} elapsed_ms={}",
-                    started.elapsed().as_millis()
-                );
                 return tool_error(format!("App Tool timed out after {APP_ACTION_TIMEOUT:?}"));
             }
             match response_rx.try_recv() {
-                Ok(result) => {
-                    log::info!(
-                        "diag tool.route phase=done name={name} route={route} elapsed_ms={} error={} terminate={} result_bytes={}",
-                        started.elapsed().as_millis(),
-                        result.is_error,
-                        result.terminate,
-                        result.text.len()
-                    );
-                    return result;
-                }
+                Ok(result) => return result,
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    log::error!(
-                        "diag tool.route phase=disconnected name={name} route={route} elapsed_ms={}",
-                        started.elapsed().as_millis()
-                    );
                     return tool_error("App Action response channel closed");
                 }
                 Err(mpsc::TryRecvError::Empty) => yield_scheduler_tick(),
@@ -3646,12 +3410,6 @@ impl AgentToolRequest {
         supervisor: &mut AppSupervisor,
         submit: impl FnOnce(&mut AppSupervisor, &str) -> Result<Value>,
     ) {
-        let started = Instant::now();
-        log::info!(
-            "diag tool.supervisor phase=start name={} args_bytes={}",
-            self.name,
-            self.args_json.len()
-        );
         match self.name.as_str() {
             APP_CHECKOUT_TOOL => {
                 let result = required_tool_string(&self.args_json, "id").and_then(|app_id| {
@@ -3663,38 +3421,19 @@ impl AgentToolRequest {
                         })
                     })
                 });
-                log::info!(
-                    "diag tool.supervisor phase=done name={} elapsed_ms={} error={}",
-                    self.name,
-                    started.elapsed().as_millis(),
-                    result.is_err()
-                );
                 let _ = self.response.send(tool_result(result));
             }
             APP_SUBMIT_TOOL => {
                 let result = required_tool_string(&self.args_json, "path")
                     .and_then(|path| submit(supervisor, &path));
-                log::info!(
-                    "diag tool.supervisor phase=done name={} elapsed_ms={} error={}",
-                    self.name,
-                    started.elapsed().as_millis(),
-                    result.is_err()
-                );
                 let _ = self.response.send(tool_result(result));
             }
-            _ => {
-                log::info!(
-                    "diag tool.supervisor phase=enqueue_app_action name={} elapsed_ms={}",
-                    self.name,
-                    started.elapsed().as_millis()
-                );
-                supervisor.begin_agent_tool(
-                    &self.name,
-                    &self.args_json,
-                    self.deadline,
-                    self.response,
-                )
-            }
+            _ => supervisor.begin_agent_tool(
+                &self.name,
+                &self.args_json,
+                self.deadline,
+                self.response,
+            ),
         }
     }
 }

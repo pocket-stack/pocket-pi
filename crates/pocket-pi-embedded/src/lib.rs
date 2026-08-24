@@ -1,6 +1,5 @@
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::Instant;
 
 use pocket_mod::qjs::{CatchResultExt, Function, Object};
 use pocket_mod::Guest;
@@ -75,13 +74,7 @@ impl GuestAgent {
         tools: Arc<dyn ToolHost>,
         agent_source: &str,
     ) -> Result<Self, String> {
-        let mount_started = Instant::now();
         let config_json = config_with_tools(config_json, tools.definitions())?;
-        log::info!(
-            "diag agent.loop phase=mount_start config_bytes={} source_bytes={}",
-            config_json.len(),
-            agent_source.len()
-        );
         let (host_tx, host_rx) = mpsc::channel::<serde_json::Value>();
         let host_rx = Arc::new(Mutex::new(host_rx));
         let next_request = Arc::new(AtomicI32::new(1));
@@ -92,50 +85,26 @@ impl GuestAgent {
             .stack_size(MODEL_WORKER_STACK_BYTES)
             .spawn(move || {
                 while let Ok((id, request)) = model_rx.recv() {
-                    let started = Instant::now();
-                    let request_bytes = request.len();
-                    let mut stream_events = 0usize;
-                    let mut thinking_bytes = 0usize;
-                    let mut text_bytes = 0usize;
-                    log::info!(
-                        "diag agent.model phase=start request_id={id} request_bytes={request_bytes}"
-                    );
                     let worker_tx = model_host_tx.clone();
-                    let completion = {
-                        let mut emit = |event| {
-                            let event = match event {
-                                ModelStreamEvent::Thinking(delta) => {
-                                    stream_events += 1;
-                                    thinking_bytes += delta.len();
-                                    serde_json::json!({
-                                        "type":"model_progress",
-                                        "id":id,
-                                        "thinkingDelta":delta,
-                                        "textDelta":"",
-                                    })
-                                }
-                                ModelStreamEvent::Text(delta) => {
-                                    stream_events += 1;
-                                    text_bytes += delta.len();
-                                    serde_json::json!({
-                                        "type":"model_progress",
-                                        "id":id,
-                                        "thinkingDelta":"",
-                                        "textDelta":delta,
-                                    })
-                                }
-                            };
-                            let _ = worker_tx.send(event);
+                    let mut emit = |event| {
+                        let event = match event {
+                            ModelStreamEvent::Thinking(delta) => serde_json::json!({
+                                "type":"model_progress",
+                                "id":id,
+                                "thinkingDelta":delta,
+                                "textDelta":"",
+                            }),
+                            ModelStreamEvent::Text(delta) => serde_json::json!({
+                                "type":"model_progress",
+                                "id":id,
+                                "thinkingDelta":"",
+                                "textDelta":delta,
+                            }),
                         };
-                        backend.complete(&request, &mut emit)
+                        let _ = worker_tx.send(event);
                     };
-                    match completion {
+                    match backend.complete(&request, &mut emit) {
                         Ok(result) => {
-                            log::info!(
-                                "diag agent.model phase=done request_id={id} elapsed_ms={} result_bytes={} stream_events={stream_events} thinking_bytes={thinking_bytes} text_bytes={text_bytes}",
-                                started.elapsed().as_millis(),
-                                result.len()
-                            );
                             let _ = worker_tx.send(serde_json::json!({
                                 "type":"model_done",
                                 "id":id,
@@ -143,11 +112,6 @@ impl GuestAgent {
                             }));
                         }
                         Err(error) => {
-                            log::warn!(
-                                "diag agent.model phase=failed request_id={id} elapsed_ms={} stream_events={stream_events} thinking_bytes={thinking_bytes} text_bytes={text_bytes} error_bytes={}",
-                                started.elapsed().as_millis(),
-                                error.len()
-                            );
                             let _ = worker_tx.send(serde_json::json!({
                                 "type":"model_error",
                                 "id":id,
@@ -171,14 +135,7 @@ impl GuestAgent {
                             let next_request = next_request.clone();
                             move |request: String| -> i32 {
                                 let id = next_request.fetch_add(1, Ordering::Relaxed);
-                                log::info!(
-                                    "diag agent.model phase=queued request_id={id} request_bytes={}",
-                                    request.len()
-                                );
                                 if model_tx.send((id, request)).is_err() {
-                                    log::error!(
-                                        "diag agent.model phase=queue_failed request_id={id}"
-                                    );
                                     let _ = host_tx.send(serde_json::json!({
                                         "type":"model_error",
                                         "id":id,
@@ -197,12 +154,6 @@ impl GuestAgent {
                             let next_request = next_request.clone();
                             move |call_id: String, name: String, args: String| -> i32 {
                                 let id = next_request.fetch_add(1, Ordering::Relaxed);
-                                let queued_at = Instant::now();
-                                log::info!(
-                                    "diag agent.tool phase=queued request_id={id} name={name} args_bytes={} call_id_bytes={}",
-                                    args.len(),
-                                    call_id.len()
-                                );
                                 let tools = tools.clone();
                                 let host_tx = host_tx.clone();
                                 let worker_tx = host_tx.clone();
@@ -210,19 +161,7 @@ impl GuestAgent {
                                     .name(format!("pi-tool-{id}"))
                                     .stack_size(TOOL_WORKER_STACK_BYTES)
                                     .spawn(move || {
-                                        let started = Instant::now();
-                                        log::info!(
-                                            "diag agent.tool phase=start request_id={id} name={name} queue_ms={}",
-                                            queued_at.elapsed().as_millis()
-                                        );
                                         let result = tools.execute(&call_id, &name, &args);
-                                        log::info!(
-                                            "diag agent.tool phase=done request_id={id} name={name} elapsed_ms={} error={} terminate={} result_bytes={}",
-                                            started.elapsed().as_millis(),
-                                            result.is_error,
-                                            result.terminate,
-                                            result.text.len()
-                                        );
                                         let _ = worker_tx.send(serde_json::json!({
                                             "type":"tool_done",
                                             "id":id,
@@ -230,10 +169,6 @@ impl GuestAgent {
                                         }));
                                     });
                                 if let Err(error) = spawn {
-                                    log::error!(
-                                        "diag agent.tool phase=spawn_failed request_id={id} error_bytes={}",
-                                        error.to_string().len()
-                                    );
                                     let result = ToolResult {
                                         text: format!("spawn tool worker: {error}"),
                                         is_error: true,
@@ -276,27 +211,11 @@ impl GuestAgent {
         call_agent::<_, ()>(guest, "boot", (config_json,))?;
         guest.drain_jobs();
 
-        log::info!(
-            "diag agent.loop phase=mount_done elapsed_ms={}",
-            mount_started.elapsed().as_millis()
-        );
-
         Ok(Self)
     }
 
     pub fn prompt(&self, guest: &Guest, text: &str) -> Result<(), String> {
-        log::info!(
-            "diag agent.loop phase=prompt_start prompt_bytes={}",
-            text.len()
-        );
-        let started = Instant::now();
-        let result = call_agent(guest, "prompt", (text.to_owned(),));
-        log::info!(
-            "diag agent.loop phase=prompt_dispatched elapsed_ms={} ok={}",
-            started.elapsed().as_millis(),
-            result.is_ok()
-        );
-        result
+        call_agent(guest, "prompt", (text.to_owned(),))
     }
 
     pub fn replace_tools(
@@ -351,22 +270,6 @@ impl GuestAgent {
                 )),
                 _ => {}
             }
-        }
-        if !events.is_empty() {
-            let response_bytes = events
-                .iter()
-                .filter_map(|event| match event {
-                    AgentEvent::ResponseText(text) => Some(text.len()),
-                    _ => None,
-                })
-                .sum::<usize>();
-            let terminal = events
-                .iter()
-                .any(|event| matches!(event, AgentEvent::Done | AgentEvent::Failed(_)));
-            log::info!(
-                "diag agent.loop phase=events count={} response_bytes={response_bytes} terminal={terminal}",
-                events.len()
-            );
         }
         Ok(events)
     }
