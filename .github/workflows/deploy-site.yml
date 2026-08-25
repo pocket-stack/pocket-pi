@@ -1,0 +1,36 @@
+name: Deploy pi.pocketlab.build
+
+# Keep production deployment explicit. This publishes only the independent
+# pocketpi Worker and the pi.pocketlab.build custom domain declared in Wrangler.
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-pocketpi-site
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.10
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Validate site
+        run: bun run lint && bun run test
+
+      - name: Deploy PocketPi site to Cloudflare
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: bunx wrangler deploy

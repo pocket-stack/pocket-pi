@@ -1,0 +1,19 @@
+{
+  // PocketPi site — an assets-only Worker, isolated from the existing
+  // pocketlab and pocketjs Workers. This Worker owns only pi.pocketlab.build.
+  "name": "pocketpi",
+  "compatibility_date": "2026-08-25",
+  "workers_dev": true,
+  "preview_urls": true,
+  "assets": {
+    "directory": "./dist/client",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "404-page"
+  },
+  "routes": [
+    {
+      "pattern": "pi.pocketlab.build",
+      "custom_domain": true
+    }
+  ]
+}
