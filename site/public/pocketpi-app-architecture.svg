@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 440" width="760" height="440" role="img" aria-labelledby="title description" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">
+  <title id="title">One App, two actors, one durable truth</title>
+  <desc id="description">A human uses a fixed View and Pi Agent uses public Tools. Both invoke the same actor-neutral Actions over App-owned SQLite data.</desc>
+  <rect x="0" y="0" width="760" height="440" rx="12" fill="#0b0f1a"/>
+  <text x="24" y="32" fill="#94a3b8" font-size="14">one App, two actors, one durable truth</text>
+  <text x="116" y="63" fill="#f1f5f9" font-size="16" font-weight="700" text-anchor="middle">Human</text>
+  <text x="644" y="63" fill="#f1f5f9" font-size="16" font-weight="700" text-anchor="middle">Pi Agent</text>
+  <rect x="16" y="78" width="728" height="338" rx="12" fill="#0e1626" stroke="#334155" stroke-width="1.5"/>
+  <text x="36" y="103" fill="#64748b" font-size="13">APP RELEASE</text>
+  <rect x="34" y="122" width="228" height="68" rx="10" fill="#111827" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="148" y="148" fill="#f1f5f9" font-size="16" font-weight="700" text-anchor="middle">Fixed View</text>
+  <text x="148" y="169" fill="#94a3b8" font-size="13" text-anchor="middle">human surface · UI intents</text>
+  <rect x="498" y="122" width="228" height="68" rx="10" fill="#111827" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="612" y="148" fill="#f1f5f9" font-size="16" font-weight="700" text-anchor="middle">Public Tools</text>
+  <text x="612" y="169" fill="#94a3b8" font-size="13" text-anchor="middle">Agent surface · typed calls</text>
+  <line x1="116" y1="68" x2="116" y2="122" stroke="#475569" stroke-width="1.5"/>
+  <line x1="644" y1="68" x2="644" y2="122" stroke="#475569" stroke-width="1.5"/>
+  <rect x="260" y="210" width="240" height="76" rx="10" fill="#111827" stroke="#38bdf8" stroke-width="1.5"/>
+  <text x="380" y="237" fill="#f1f5f9" font-size="16" font-weight="700" text-anchor="middle">Action</text>
+  <text x="380" y="259" fill="#94a3b8" font-size="12" text-anchor="middle">actor-neutral domain operation</text>
+  <text x="380" y="278" fill="#64748b" font-size="11" text-anchor="middle">validate, normalize, transact</text>
+  <line x1="198" y1="190" x2="282" y2="210" stroke="#475569" stroke-width="1.5"/>
+  <line x1="562" y1="190" x2="478" y2="210" stroke="#475569" stroke-width="1.5"/>
+  <text x="238" y="204" fill="#64748b" font-size="12" text-anchor="middle" stroke="#0e1626" stroke-width="6" paint-order="stroke">intent</text>
+  <text x="522" y="204" fill="#64748b" font-size="12" text-anchor="middle" stroke="#0e1626" stroke-width="6" paint-order="stroke">Tool call</text>
+  <rect x="260" y="316" width="240" height="70" rx="10" fill="#111827" stroke="#34d399" stroke-width="1.5"/>
+  <text x="380" y="344" fill="#f1f5f9" font-size="16" font-weight="700" text-anchor="middle">App-owned SQLite</text>
+  <text x="380" y="365" fill="#94a3b8" font-size="13" text-anchor="middle">one durable truth</text>
+  <line x1="380" y1="286" x2="380" y2="316" stroke="#475569" stroke-width="1.5"/>
+  <text x="411" y="302" fill="#64748b" font-size="12">COMMIT</text>
+  <rect x="34" y="316" width="204" height="70" rx="10" fill="#111827" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="136" y="344" fill="#f1f5f9" font-size="14" text-anchor="middle">bounded projection</text>
+  <text x="136" y="365" fill="#94a3b8" font-size="11" text-anchor="middle">revision changed? → query</text>
+  <line x1="260" y1="351" x2="238" y2="351" stroke="#475569" stroke-width="1.5"/>
+  <line x1="136" y1="316" x2="136" y2="190" stroke="#475569" stroke-width="1.5"/>
+  <text x="149" y="300" fill="#64748b" font-size="12">read</text>
+  <rect x="522" y="316" width="204" height="70" rx="10" fill="#111827" stroke="#64748b" stroke-width="1.5"/>
+  <text x="624" y="344" fill="#f1f5f9" font-size="14" text-anchor="middle">structured result</text>
+  <text x="624" y="365" fill="#94a3b8" font-size="12" text-anchor="middle">returned to the Agent</text>
+  <path d="M500 248 C516 266 516 333 522 351" fill="none" stroke="#475569" stroke-width="1.5"/>
+</svg>
