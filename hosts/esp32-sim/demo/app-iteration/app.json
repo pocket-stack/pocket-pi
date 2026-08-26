@@ -1,0 +1,25 @@
+{
+  "format": 1,
+  "frameworkApi": 1,
+  "id": "demo",
+  "title": "Demo",
+  "description": "One Action writes one SQLite value",
+  "version": "1.0.0",
+  "schemaVersion": 1,
+  "capabilities": ["data.sqlite"],
+  "resources": {},
+  "toolNamespace": "demo",
+  "tools": [
+    {
+      "name": "demo.setValue",
+      "action": "setValue",
+      "description": "Set the Demo App's SQLite value through its current Action.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    }
+  ],
+  "schedules": []
+}

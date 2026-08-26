@@ -1,383 +1,188 @@
-# Pocket Pi
+# PocketPi
 
-Pocket Pi is a complete Agent-native runtime for embedded and dedicated
-devices. It makes the Agent a resident system actor instead of a user-launched
-application on a general-purpose desktop or mobile OS. One device runtime
-combines a persistent Pi Agent, local `/workspace`, native tools, schedules,
-Agent-native Apps, local SQLite state and a PocketJS UI.
+[![CI](https://github.com/pocket-stack/pocket-pi/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/pocket-stack/pocket-pi/actions/workflows/ci.yml)
+[![Site](https://img.shields.io/github/actions/workflow/status/pocket-stack/pocket-pi/deploy-site.yml?branch=main&label=site)](https://pi.pocketlab.build)
+[![License](https://img.shields.io/github/license/pocket-stack/pocket-pi)](LICENSE)
 
-> **Development warning:** Pocket Pi is evolving rapidly. Breaking changes land
-> frequently while the runtime, App contract and hardware integration are being
-> built; do not assume compatibility between revisions yet.
+**PocketPi is an agent-native runtime for embedded devices.**
 
-Pocket Pi builds on:
+### What it means
 
-- [`pi-agent-core`](https://github.com/badlogic/pi-mono) for the Agent Loop and
-  Tool Call harness;
-- [PocketJS](https://github.com/pocket-stack/pocketjs) and QuickJS for embedded
-  Apps and device UI;
-- native target hosts for storage, credentials, networking, rendering, device
-  capabilities and lifecycle.
+- Powered by [PocketJS](https://github.com/pocket-stack/pocketjs), PocketPi lets developers build installable, updatable apps in JavaScript without touching the underlying firmware or hardware-specific code.
+- The complete Pi Agent core harness runs as a resident part of the system, ready to use its tools and operate the app environment.
+- Every app treats people and agents as first-class users: people use views, agents use tools, and both act through the same actions over the same data.
 
-**ESP32-P4 is the first fully supported hardware target and the current
-reference implementation.** ESP32-S3 is also supported through the Waveshare
-ESP32-S3-Touch-LCD-4.3 firmware host. The macOS ESP32 simulator is a development
-and product-contract testing tool; it is not a desktop Pocket Pi product or a
-hardware emulator.
+<p align="center">
+  <a href="https://pi.pocketlab.build">Website</a> ·
+  <a href="https://pi.pocketlab.build/docs">Documentation</a> ·
+  <a href="https://pi.pocketlab.build/docs/getting-started">Getting started</a> ·
+  <a href="https://pi.pocketlab.build/docs/app-quickstart">Build an app</a>
+</p>
 
-> **Project status:** the Waveshare ESP32-P4 reference target and Waveshare
-> ESP32-S3-Touch-LCD-4.3 target both run the shared AgentOS/App stack. See
-> [Current validation](#current-validation) for build and physical evidence.
+<p align="center">
+  <a href=".github/assets/pocketpi-app-iteration-demo.mp4">
+    <img src=".github/assets/pocketpi-app-iteration-demo.gif" width="220" alt="The Pi Agent updates a demo app in the PocketPi ESP32 simulator, with an on-device review step and preserved SQLite data">
+  </a>
+</p>
 
-## One complete device runtime
+<p align="center"><sub>In this demo, the Pi Agent changes an app's action and view while its SQLite data survives the update. The user reviews and activates the candidate in the device UI. Click for the high-quality video.</sub></p>
 
-The current runtime runs upstream `pi-agent-core` in QuickJS and implements Pi
-tools as bounded native capabilities. Its architecture preserves the Pi Harness
-contracts while adding the device-level responsibilities Pocket Pi owns:
+> **Project status:** PocketPi is under active development and intentionally
+> makes breaking changes while its runtime and app contract evolve. The shared
+> stack currently runs on the Waveshare ESP32-P4 and ESP32-S3 touch devices.
 
-- the model decides when to call a tool;
-- tools have explicit schemas and return structured results;
-- the Agent loop is separate from model transports and platform APIs;
-- workspace and schedules are durable device capabilities;
-- Apps are Data + actor-neutral Actions + a fixed human-facing View; Agent
-  Tools, UI events and Schedules route to the same Actions;
-- the native host owns credentials, transport, hardware and lifecycle.
+## What can you build?
 
-The companion simulator runs the same AgentOS, App source, UI, Tool
-registry and workspace contracts while replacing hardware adapters with macOS
-implementations. It is not an ESP32 CPU/peripheral emulator, and simulator
-success never replaces physical-device acceptance.
+PocketPi apps are independently installable source packages. They can be
+installed and updated without reflashing the firmware.
 
-## Quick start
+| Use case | What PocketPi provides |
+|---|---|
+| Research and connected utilities | Bounded native services, app tools, local history and a dedicated touch view |
+| Personal dashboards and workflows | app-owned SQLite, actions shared by UI and agent, and durable schedules |
+| Device-specific interfaces | A retained view SDK designed for small touch displays instead of a browser DOM |
+| agent-developed apps | Source inspection, isolated editing, runtime rehearsal, human review and atomic app updates |
 
-### Prerequisites
+The repository includes an Exa research app and a Robinhood portfolio app as
+examples of the same app model applied to very different domains.
 
-- Rust stable for the development simulator;
-- Bun for rebuilding the embedded JavaScript guest;
-- a logged-in `codex` CLI for the simulator's local Codex backend;
-- the esp-rs/ESP-IDF toolchains and `espflash` for physical targets; ESP32-P4
-  uses `nightly-2026-05-01`, while ESP32-S3 uses the `esp` toolchain declared
-  by its firmware directory.
+## One app, two actors
 
-The current firmware targets are **Waveshare ESP32-P4-WIFI6-Touch-LCD-5** and
-**Waveshare ESP32-S3-Touch-LCD-4.3**.
+An app is **data + actions + view**.
 
-### Build the device and development simulator
+<p align="center">
+  <img src="site/public/pocketpi-app-architecture.svg" width="760" alt="A human view and Pi Agent tools invoke the same app actions over app-owned SQLite data">
+</p>
 
-```sh
-cargo xtask build esp32-sim
-cargo xtask build esp32-p4
-cargo xtask build esp32-s3
-```
+- **data** is durable app-owned SQLite and files.
+- **actions** are actor-neutral operations called by tools, UI events or
+  schedules.
+- **view** is the fixed human-facing projection, assembled from the PocketPi
+  view SDK.
+- **tools** give the agent a typed, bounded surface over the same actions.
 
-These commands use the generated Pi Agent bundle and View SDK resources
-committed to this repository. A separate PocketJS checkout is needed only when
-regenerating View SDK resources:
+This keeps the product understandable from both sides: the UI is not generated
+ad hoc, and agent behavior does not bypass the app's domain logic.
 
-```sh
-cargo xtask build pi-agent
+## How the runtime fits together
 
-git clone https://github.com/pocket-stack/pocketjs.git ../pocketjs
-git -C ../pocketjs checkout e12cf12f82cc60b636368119d49a06eb9ed2a3d5
-POCKETJS_ROOT=../pocketjs cargo xtask build view-sdk
-```
+<p align="center">
+  <img src="site/public/pocketpi-system-architecture.svg" width="760" alt="PocketPi system architecture from hardware and native host through PocketJS to the resident Pi Agent and ordinary apps">
+</p>
 
-`POCKETJS_ROOT` is an optional developer override. Normal simulator and
-firmware builds never inspect or modify a neighboring PocketJS checkout.
+[PocketJS](https://github.com/pocket-stack/pocketjs) is the JavaScript runtime
+substrate: one QuickJS execution platform, a native rendering core and bounded
+host modules. PocketPi adds the resident Pi Agent, workspace, schedules, app
+lifecycle and product model above it.
 
-Firmware embeds and seeds the Pi Agent System App release so a blank device can
-boot. Its View and Agent loop run in one resident Guest; its Actions use the
-shared Action LRU. Ordinary Apps use the installable container:
+The native host retains trusted mechanisms such as credentials, networking,
+storage roots, hardware access and guest lifecycle. Ordinary apps remain
+isolated guests with replaceable JavaScript source and durable data outside the
+guest heap. The current agent loop and tool call harness is provided by
+[`pi-agent-core`](https://github.com/badlogic/pi-mono).
 
-```sh
-cargo xtask package app exa path/to/exa-credentials.json
-cargo xtask package app robinhood path/to/robinhood-credentials.json
-```
+Read the [runtime mental model](https://pi.pocketlab.build/docs/mental-model)
+or the repository's [architecture reference](ARCHITECTURE.md) for the ownership
+and lifecycle boundaries.
 
-Packages are written to `target/pocketapps/<id>.pocketapp`. The firmware image
-contains Pi Agent and native device mechanisms, but no ordinary App. Ordinary
-Apps can be installed without rebuilding or flashing Firmware. Apps without
-declared credentials omit the final argument. To update an installed App,
-package it without credentials; Pocket Pi preserves the native values already
-stored for that App:
+## Run PocketPi locally
+
+The macOS `esp32-sim` runs the same AgentOS, app source, tool catalog, workspace
+and view contracts as the physical targets, with development adapters in place
+of board hardware. It is a product-contract simulator, not a desktop PocketPi
+product or an ESP32 CPU/peripheral emulator.
+
+Prerequisites: macOS, Rust stable and a logged-in `codex` CLI. Bun is needed
+only when regenerating the Pi Agent or view SDK assets.
 
 ```sh
-cargo xtask package app exa
-```
+git clone https://github.com/pocket-stack/pocket-pi.git
+cd pocket-pi
 
-### 1. Pocket Pi on physical ESP32 hardware
-
-Build and flash ESP32-P4:
-
-```sh
-cargo xtask build esp32-p4
-
-DEVICE_PORT=/dev/cu.usbmodem...
-espflash flash --baud 921600 --port "$DEVICE_PORT" \
-  --partition-table firmware/esp32-p4/partitions.csv \
-  firmware/esp32-p4/target/riscv32imafc-esp-espidf/release/pocket-pi-p4
-```
-
-Build and flash ESP32-S3:
-
-```sh
-cargo xtask build esp32-s3
-
-DEVICE_PORT=/dev/cu.usbmodem...
-espflash flash --baud 921600 --port "$DEVICE_PORT" \
-  --partition-table firmware/esp32-s3/partitions.csv \
-  firmware/esp32-s3/target/xtensa-esp32s3-espidf/release/pocket-pi-s3
-```
-
-Provision the board once with a direct wireless model backend. DeepSeek is the
-default provider and uses `deepseek-v4-flash` unless `--model` is supplied:
-
-```sh
-python3 tools/uart-provision.py "$DEVICE_PORT" \
-  --provider deepseek --provision-wifi
-```
-
-The command reads the DeepSeek key from macOS Keychain when available, otherwise
-it prompts without echoing the value. It stores model provider, model, thinking
-level and API key in native NVS. Wi-Fi credentials use the existing Wi-Fi NVS
-store and can later be changed from Settings. Subsequent boots load both stores
-directly and do not wait for a Mac or UART bridge.
-
-Other direct providers are selected explicitly:
-
-```sh
-python3 tools/uart-provision.py "$DEVICE_PORT" \
-  --provider openai --model gpt-5-mini
-```
-
-For bring-up on an unprovisioned development board only, the optional model
-bridge can route requests to a logged-in Mac Codex or Claude Code. It is not
-part of standalone startup and is never stored as the device backend:
-
-```sh
-python3 tools/uart-model-bridge.py "$DEVICE_PORT" --provider codex \
-  --prompt 'Use write, read, schedule.set and schedule.list.'
-```
-
-Use `espflash monitor` only for boot diagnostics. It controls DTR/RTS on the
-board's WCH USB bridge, so it must not run between an App upload and the
-on-device confirmation. Restore a normal boot after exiting:
-
-```sh
-espflash monitor --port "$DEVICE_PORT"
-espflash reset --port "$DEVICE_PORT" --non-interactive
-```
-
-To install over the local network, open `http://<device-ip>/` from a computer or
-phone and upload the `.pocketapp`. When local peer access is unavailable, upload
-the same artifact over USB UART:
-
-```sh
-python3 tools/uart-install.py "$DEVICE_PORT" \
-  target/pocketapps/exa.pocketapp
-```
-
-Both transports stop at the same review screen; installation or update starts only after
-confirmation on Pocket Pi. Confirm before opening `espflash monitor`; otherwise
-its control-line sequence can reset the board and discard the pending review.
-The first install must carry each credential declared by the App. An update
-must omit credentials and keep the same native permissions; installed values
-remain in native NVS and are not exposed through the App filesystem or Agent
-workspace. App `version` is release metadata. SQLite `schemaVersion` advances
-separately, using conventional `migrations/<target>.sql` files such as
-`migrations/6.sql` for schema 5 to 6. Downgrades and missing steps are rejected.
-Neither HTTP nor UART writes App storage, credentials or runtime state directly.
-UART upload does not reset the board or change its model configuration.
-The UART CLIs leave DTR/RTS inactive before closing the port so the USB serial
-bridge does not reset a running Pocket Pi.
-
-The resident Pi Agent can update an already installed ordinary App without a
-new transport or package format. It calls `app.checkout`, edits the returned
-`apps/<id>/checkout` directory with its normal file Tools, advances the App
-version, and calls `app.submit`. Checkout also returns
-`.system/app-events/<id>.json`, which contains the latest install and update
-outcomes so a retry can see the previous failure. Submit moves that source into
-the same installer staging used above and opens the same review screen; nothing
-changes until the user confirms on Pocket Pi. Checkout does not copy App data,
-temporary files or credentials, and code-only edits do not change
-`schemaVersion`.
-
-To remove an ordinary App, open **Apps**, tap **UNINSTALL APP**, then tap the
-`X` on that App's row. Uninstall removes the App release, SQLite/data files,
-schedules, credentials, native session state and cached View/Action
-Runtimes. It does not retain App data or provide rollback. The resident Pi Agent
-System App cannot be uninstalled. Uninstall also deletes that App's recent event
-file.
-
-### 2. Develop with the ESP32 simulator on macOS
-
-The simulator defaults to the Mac's existing Codex Coding Plan login:
-
-```sh
 cargo xtask run esp32-sim \
   --backend codex \
   --workspace target/esp32-workspace
 ```
 
-Direct API-key backends are also available:
+Reuse the workspace path to preserve agent files, installed apps and app data
+between launches. See [Getting started](https://pi.pocketlab.build/docs/getting-started)
+for provider options and the first verified run.
+
+### Replay the app-iteration demo
+
+The README walkthrough uses a deterministic simulator scenario. It exercises
+the real app checkout, file edits, submission, review, installation, action,
+SQLite and view paths while replacing model latency with a recorded tool call
+sequence.
 
 ```sh
-OPENAI_API_KEY=... \
-  cargo xtask run esp32-sim --backend openai --model gpt-5.6
-
-OPENROUTER_API_KEY=... \
-  cargo xtask run esp32-sim \
-  --backend openrouter --model openai/gpt-5.6
-
-ANTHROPIC_API_KEY=... \
-  cargo xtask run esp32-sim \
-  --backend anthropic --model claude-sonnet-4-6
-
-DEEPSEEK_API_KEY=... DEEPSEEK_THINKING_LEVEL=xhigh \
-  cargo xtask run esp32-sim --backend deepseek
+cargo run -p pocket-pi-esp32-sim -- --demo app-iteration
 ```
 
-The window defaults to the 720x1280 reference viewport. Pass a different
-viewport to exercise the same App source on another screen shape;
-mouse input is mapped through the same hit-testing code as physical touch
-input:
+## Build an app
 
-```sh
-cargo xtask run esp32-sim --viewport 800x480
-cargo xtask run esp32-sim --viewport 480x800
+An ordinary app is a small source tree:
+
+```text
+my-app/
+├── app.json        # identity, capabilities, tools and native services
+├── schema.sql      # initial SQLite schema
+├── migrations/     # optional ordered data upgrades
+├── actions.js      # domain operations shared by every actor
+└── view.js         # human UI assembled from the view SDK
 ```
 
-Generate a deterministic UI snapshot with:
+The JavaScript is loaded directly by the runtime; ordinary app changes do not
+need a Node.js bundle, a TypeScript compiler or a firmware rebuild. Start with
+the [app quickstart](https://pi.pocketlab.build/docs/app-quickstart), then use
+the [complete app guide](https://pi.pocketlab.build/docs/app-guide) for data,
+actions, tools, view, services and testing.
 
-```sh
-cargo xtask snapshot esp32-sim
-```
+## Hardware
 
-## Model backends
+The shared runtime has been implemented and physically validated on:
 
-Backends belong to their host composition, not to the Agent core:
+- **Waveshare ESP32-P4-WIFI6-Touch-LCD-5** — ESP32-P4NRW32, 32 MB PSRAM,
+  5-inch 720 × 1280 touch display;
+- **Waveshare ESP32-S3-Touch-LCD-4.3** — ESP32-S3-WROOM-1-N16R8, 8 MB PSRAM,
+  4.3-inch 800 × 480 touch display.
 
-| Host | Supported backends |
-|---|---|
-| ESP32 simulator | local Codex, OpenAI, OpenRouter, Anthropic, DeepSeek V4 |
-| Physical ESP32-P4 and ESP32-S3 | standalone wireless OpenAI, OpenRouter, Anthropic or DeepSeek V4 |
-
-The optional development-only `UartBackend` and the standalone
-`WirelessBackend` implement the same model-completion contract. Wireless
-providers may emit progress events internally; the development bridge coalesces
-provider chunks into one final framed result before it reaches an unprovisioned
-device. Provider request/streaming codecs live in
-`pocket-pi-protocols`; serial framing, desktop CLIs and ESP-IDF HTTPS stay in
-their platform layers.
-
-DeepSeek defaults to `deepseek-v4-flash` with thinking level `high`. Set
-`DEEPSEEK_THINKING_LEVEL=xhigh` in the simulator, or pass
-`--thinking-level xhigh` while provisioning the physical board, to request the
-provider's `max` reasoning effort.
-
-## Embedded Agent capabilities
-
-The simulator and physical firmware register the same tools:
-
-- workspace files: `read`, `write`, `edit`, `find`, `grep`, `ls`;
-- `workspace.delete`, routed through the Pi Agent System App's `deleteFile`
-  Action;
-- bounded shell commands through `bash`;
-- `device.status` and `time.now`;
-- `workspace.context` for durable Agent-managed memory;
-- `schedule.set`, `schedule.list`, `schedule.cancel` and `schedule.clear` for
-  one-off or recurring wake prompts.
-
-The embedded `bash` tool is an allowlisted command dispatcher, not a POSIX
-shell. It provides useful device and workspace operations without pretending
-that an ESP32 has processes, pipes, package management or a Unix filesystem.
-
-On physical hardware, workspace files and schedules persist in LittleFS. Wi-Fi
-configuration persists in NVS. The Agent can use its workspace to organize
-memory and can create or revise its own recurring schedules.
-
-The shared [PocketJS](https://github.com/pocket-stack/pocketjs) device UI
-includes:
-
-- Chat with provider replies, recent-turn history and a full-message reader;
-- Files with workspace metadata, file viewing and scrolling;
-- Apps with install discovery and destructive uninstall mode;
-- Settings with Wi-Fi scanning, selection and password entry;
-- touch keyboard and next-schedule status.
-
-The embedded AgentOS ships Pi Agent as its resident System App. Robinhood and
-Exa use the same installable package as every ordinary App. Each ordinary App
-owns its Tool catalog, Actions, SQLite Data and fixed PocketJS View;
-hosts provide only scoped credentials, transport and hardware adapters.
+Follow the dedicated [ESP32-P4](https://pi.pocketlab.build/docs/esp32-p4) or
+[ESP32-S3](https://pi.pocketlab.build/docs/esp32-s3) guide for toolchains,
+provisioning, flashing and the current physical validation boundary.
 
 ## Repository map
 
 ```text
-crates/pocket-pi-embedded/    bounded Agent Loop bridge used by device runtimes
-crates/pocket-pi-tools/       portable workspace, shell, time and schedule tools
-crates/pocket-pi-protocols/   model request, response and streaming codecs
-crates/pocket-pi-agentos/     App Supervisor, System App lifecycle and App contracts
-hosts/esp32-sim/              macOS development simulator for shared ESP32 contracts
-firmware/esp32-common/        shared ESP-IDF AgentOS host loop and services
-firmware/esp32-p4/            first supported device and reference implementation
-firmware/esp32-s3/            Waveshare ESP32-S3-Touch-LCD-4.3 board host
-tools/uart_io.py              shared raw UART read/write helpers
-tools/uart-provision.py       one-time wireless model provisioning
-tools/uart-install.py         App package ingress over UART
-tools/uart_bridge/            development-only Codex/Claude adapters
-tools/uart-model-bridge.py    optional development-only model bridge
+apps/                       Pi Agent system app and example ordinary apps
+crates/pocket-pi-agentos/   app supervision, lifecycle and runtime contracts
+crates/pocket-pi-embedded/  embedded agent loop bridge
+crates/pocket-pi-tools/     workspace, time, shell and schedule tools
+hosts/esp32-sim/            macOS product-contract simulator
+firmware/esp32-common/      shared ESP-IDF host services
+firmware/esp32-p4/          ESP32-P4 board host
+firmware/esp32-s3/          ESP32-S3 board host
+site/                       PocketPi website and documentation
+tools/xtask/                build, package and snapshot commands
 ```
 
-Dependencies point inward: hosts depend on shared runtimes, tools, UI and
-protocols; those shared crates do not depend on a host. Hardware APIs remain in
-the firmware, simulator adapters remain in `hosts/esp32-sim`, and optional
-external services remain Apps.
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for ownership and lifecycle boundaries,
-[docs/agentos-architecture.md](docs/agentos-architecture.md) for the viewport
-contract, and [docs/esp32-p4-port.md](docs/esp32-p4-port.md) for the reference
-target and board-port responsibilities.
-
-## Current validation
-
-On **2026-08-24**, the workspace completed 57 Rust tests, passed workspace
-Clippy with warnings denied, and built the simulator plus both ESP32-P4 and
-ESP32-S3 release firmware. The core suite covers viewport propagation, geometry
-scaling, minimum touch targets, App lifecycle, SQLite ownership and model/tool
-contracts.
-
-ESP32-P4 remains the reference target with physical coverage for Agent,
-workspace, schedules, App install/update/uninstall, display/touch, Wi-Fi and
-direct model-provider operation. Physical ESP32-S3 validation covers boot,
-480x800 logical scanout, GT911 touch, integrated Wi-Fi, workspace Tool Calls,
-ordinary App installation and an Exa request. Long-running latency, display
-stability and memory-pressure testing remain separate acceptance work.
-
-Simulator and cross-build success do not substitute for physical-board
-acceptance on either target.
-
-## Development checks
+## Development
 
 ```sh
 cargo test --workspace
 bun test apps/pi-agent/text.test.js
 cargo clippy --workspace --all-targets -- -D warnings
+
+cargo xtask build esp32-sim
+cargo xtask build esp32-p4
+cargo xtask build esp32-s3
 ```
 
-CI runs the workspace build, Rust/App behavior tests and clippy checks. LCD scanout, touch,
-LittleFS, Wi-Fi/NVS, memory pressure and real UART/wireless behavior still
-require physical-board acceptance.
-
-## Non-goals
-
-- providing a macOS/Windows/Linux desktop Pocket Pi product;
-- providing a generic `pi-agent-core` SDK or standalone harness;
-- Emulating the ESP32 CPU or peripherals on macOS;
-- exposing arbitrary desktop shell or Node APIs on the microcontroller;
-- coupling model providers, UI, trading services or research services into Pi
-  Agent Loop core;
-- claiming that an API codec compile proves a live provider connection.
+Simulator and cross-build success do not replace physical acceptance for LCD,
+touch, LittleFS, NVS, Wi-Fi, memory pressure or live device transport. See the
+[validation status](https://pi.pocketlab.build/docs/validation-status) for the
+current evidence boundary.
 
 ## License
 
-MIT.
+MIT
