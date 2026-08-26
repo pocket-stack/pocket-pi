@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
@@ -36,12 +36,17 @@ struct Args {
     root_tap: Option<(u16, u16)>,
     viewport: Viewport,
     backend: BackendChoice,
+    demo: bool,
 }
 
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = parse_args()?;
-    prepare_workspace(&args.workspace)?;
+    if args.demo {
+        prepare_app_iteration_demo(&args.workspace)?;
+    } else {
+        prepare_workspace(&args.workspace)?;
+    }
     if let Some(path) = args.screenshot {
         headless(
             path,
@@ -60,11 +65,26 @@ fn main() -> Result<()> {
             args.root_tap,
             args.viewport,
             args.backend,
+            args.demo,
         )
     }
 }
 
 fn parse_args() -> Result<Args> {
+    let raw_args = std::env::args().skip(1).collect::<Vec<_>>();
+    if raw_args == ["--demo", "app-iteration"] {
+        return Ok(Args {
+            screenshot: None,
+            prompt: None,
+            workspace: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/esp32-sim/demos/app-iteration"),
+            app: "demo".into(),
+            root_tap: None,
+            viewport: Viewport::new(480, 800),
+            backend: BackendChoice::Demo,
+            demo: true,
+        });
+    }
     let mut screenshot = None;
     let mut prompt = None;
     let mut workspace =
@@ -74,7 +94,7 @@ fn parse_args() -> Result<Args> {
     let mut viewport = DEFAULT_VIEWPORT;
     let mut backend = std::env::var("POCKET_PI_BACKEND").unwrap_or_else(|_| "codex".into());
     let mut model = None;
-    let mut args = std::env::args().skip(1);
+    let mut args = raw_args.into_iter();
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--screenshot" => screenshot = Some(PathBuf::from(next(&mut args, "--screenshot")?)),
@@ -107,6 +127,7 @@ fn parse_args() -> Result<Args> {
         root_tap,
         viewport,
         backend: BackendChoice::from_name(&backend, model).map_err(anyhow::Error::msg)?,
+        demo: false,
     })
 }
 
@@ -139,6 +160,38 @@ fn prepare_workspace(root: &Path) -> Result<()> {
     if !notes.exists() {
         std::fs::write(notes, "Pi Agent owns this top-level workspace.\n")?;
     }
+    Ok(())
+}
+
+fn prepare_app_iteration_demo(workspace: &Path) -> Result<()> {
+    if workspace.exists() {
+        std::fs::remove_dir_all(workspace)?;
+    }
+    prepare_workspace(workspace)?;
+    let staging = workspace.join(".demo-seed");
+    std::fs::create_dir_all(&staging)?;
+    for (name, source) in [
+        ("app.json", include_str!("../demo/app-iteration/app.json")),
+        (
+            "schema.sql",
+            include_str!("../demo/app-iteration/schema.sql"),
+        ),
+        (
+            "actions.js",
+            include_str!("../demo/app-iteration/actions.js"),
+        ),
+        ("view.js", include_str!("../demo/app-iteration/view.js")),
+    ] {
+        std::fs::write(staging.join(name), source)?;
+    }
+    let catalog = InstalledAppIndex::load(workspace, system_app_bundle())?;
+    let mut supervisor = AppSupervisor::new(
+        workspace,
+        Viewport::new(480, 800),
+        catalog,
+        Arc::new(SimAppServices),
+    )?;
+    supervisor.apply_app(&staging, BTreeMap::new())?;
     Ok(())
 }
 
@@ -375,6 +428,7 @@ impl Product {
             BackendChoice::Codex { model } => {
                 format!("Codex / {}", model.as_deref().unwrap_or("coding-plan"))
             }
+            BackendChoice::Demo => "DEMO REPLAY".into(),
         };
         let services: Arc<dyn AppServiceHost> = Arc::new(SimAppServices);
         let catalog = InstalledAppIndex::load(&workspace, system_app_bundle())?;
@@ -950,6 +1004,140 @@ fn headless(
     Ok(())
 }
 
+enum DemoStep {
+    Pause(Duration),
+    MoveTo((u16, u16), Duration),
+    Click((u16, u16)),
+    SendPrompt,
+    WaitFor(DemoCondition),
+}
+
+enum DemoCondition {
+    InstallState(&'static str),
+    InstallDismissed,
+    ActiveApp(&'static str),
+    AgentIdle,
+    ServicesIdle,
+}
+
+struct DemoPlayback {
+    steps: VecDeque<DemoStep>,
+    started: Instant,
+    cursor_origin: (u16, u16),
+    pressed: bool,
+}
+
+impl DemoPlayback {
+    fn new() -> Self {
+        Self {
+            steps: VecDeque::from([
+                DemoStep::Pause(Duration::from_millis(4_000)),
+                DemoStep::MoveTo((28, 42), Duration::from_millis(450)),
+                DemoStep::Click((28, 42)),
+                DemoStep::Pause(Duration::from_millis(350)),
+                DemoStep::SendPrompt,
+                DemoStep::Pause(Duration::from_millis(600)),
+                DemoStep::WaitFor(DemoCondition::InstallState("review")),
+                DemoStep::Pause(Duration::from_millis(250)),
+                DemoStep::MoveTo((240, 722), Duration::from_millis(450)),
+                DemoStep::WaitFor(DemoCondition::AgentIdle),
+                DemoStep::Click((240, 722)),
+                DemoStep::WaitFor(DemoCondition::InstallState("success")),
+                DemoStep::Pause(Duration::from_millis(350)),
+                DemoStep::MoveTo((240, 722), Duration::from_millis(250)),
+                DemoStep::Click((240, 722)),
+                DemoStep::WaitFor(DemoCondition::InstallDismissed),
+                DemoStep::Pause(Duration::from_secs(5)),
+                DemoStep::MoveTo((300, 760), Duration::from_millis(450)),
+                DemoStep::Click((300, 760)),
+                DemoStep::Pause(Duration::from_millis(350)),
+                DemoStep::MoveTo((240, 170), Duration::from_millis(450)),
+                DemoStep::Click((240, 170)),
+                DemoStep::WaitFor(DemoCondition::ActiveApp("demo")),
+                DemoStep::Pause(Duration::from_millis(900)),
+                DemoStep::MoveTo((240, 744), Duration::from_millis(500)),
+                DemoStep::Click((240, 744)),
+                DemoStep::WaitFor(DemoCondition::ServicesIdle),
+                DemoStep::Pause(Duration::from_millis(1_800)),
+            ]),
+            started: Instant::now(),
+            cursor_origin: (240, 400),
+            pressed: false,
+        }
+    }
+
+    fn advance(&mut self, state: &mut WindowState) -> Result<()> {
+        let Some(step) = self.steps.front() else {
+            return Ok(());
+        };
+        let elapsed = self.started.elapsed();
+        let complete = match step {
+            DemoStep::Pause(duration) => elapsed >= *duration,
+            DemoStep::MoveTo(target, duration) => {
+                let progress = (elapsed.as_secs_f32() / duration.as_secs_f32()).min(1.0);
+                let ease = progress * progress * (3.0 - 2.0 * progress);
+                let x = self.cursor_origin.0 as f32
+                    + (target.0 as f32 - self.cursor_origin.0 as f32) * ease;
+                let y = self.cursor_origin.1 as f32
+                    + (target.1 as f32 - self.cursor_origin.1 as f32) * ease;
+                set_demo_cursor(state, (x.round() as u16, y.round() as u16));
+                progress >= 1.0
+            }
+            DemoStep::Click(target) => {
+                set_demo_cursor(state, *target);
+                if !self.pressed {
+                    state.touch_down = true;
+                    state.product.pointer_down(target.0, target.1)?;
+                    self.pressed = true;
+                    false
+                } else if elapsed >= Duration::from_millis(140) {
+                    state.product.pointer_up()?;
+                    state.touch_down = false;
+                    self.pressed = false;
+                    true
+                } else {
+                    false
+                }
+            }
+            DemoStep::SendPrompt => {
+                state.product.send_prompt(
+                    "Change the button to store updated instead of clicked, and make the Built by Pi badge green."
+                        .into(),
+                );
+                true
+            }
+            DemoStep::WaitFor(condition) => match condition {
+                DemoCondition::InstallState(expected) => state
+                    .product
+                    .install_ui
+                    .as_ref()
+                    .is_some_and(|install| install.state == *expected),
+                DemoCondition::InstallDismissed => state.product.install_ui.is_none(),
+                DemoCondition::ActiveApp(expected) => {
+                    state.product.supervisor.active_id() == *expected
+                }
+                DemoCondition::AgentIdle => !state.product.busy,
+                DemoCondition::ServicesIdle => !state.product.supervisor.services_busy(),
+            },
+        };
+        if complete {
+            self.steps.pop_front();
+            self.started = Instant::now();
+            self.cursor_origin = state.cursor;
+        }
+        Ok(())
+    }
+}
+
+fn set_demo_cursor(state: &mut WindowState, cursor: (u16, u16)) {
+    state.cursor = cursor;
+    let x = cursor.0 as f64 * state.config.width as f64 / state.viewport.width as f64;
+    let y = cursor.1 as f64 * state.config.height as f64 / state.viewport.height as f64;
+    let _ = state
+        .window
+        .set_cursor_position(winit::dpi::PhysicalPosition::new(x, y));
+}
+
 struct WindowState {
     window: Arc<Window>,
     gpu: Gpu,
@@ -960,6 +1148,7 @@ struct WindowState {
     viewport: Viewport,
     cursor: (u16, u16),
     touch_down: bool,
+    demo: Option<DemoPlayback>,
 }
 
 struct WindowApp {
@@ -969,6 +1158,7 @@ struct WindowApp {
     initial_root_tap: Option<(u16, u16)>,
     viewport: Viewport,
     backend: Option<BackendChoice>,
+    demo: bool,
     state: Option<WindowState>,
     error: Option<anyhow::Error>,
 }
@@ -980,6 +1170,7 @@ fn windowed(
     root_tap: Option<(u16, u16)>,
     viewport: Viewport,
     backend: BackendChoice,
+    demo: bool,
 ) -> Result<()> {
     let event_loop = EventLoop::new()?;
     let mut app = WindowApp {
@@ -989,6 +1180,7 @@ fn windowed(
         initial_root_tap: root_tap,
         viewport,
         backend: Some(backend),
+        demo,
         state: None,
         error: None,
     };
@@ -1046,13 +1238,18 @@ impl WindowApp {
             renderer,
             product,
             viewport: self.viewport,
-            cursor: (0, 0),
+            cursor: if self.demo { (240, 400) } else { (0, 0) },
             touch_down: false,
+            demo: self.demo.then(DemoPlayback::new),
         })
     }
 
     fn redraw(state: &mut WindowState) -> Result<()> {
         state.product.poll()?;
+        if let Some(mut demo) = state.demo.take() {
+            demo.advance(state)?;
+            state.demo = Some(demo);
+        }
         let frame = match state.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {

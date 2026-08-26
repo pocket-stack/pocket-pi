@@ -1,5 +1,6 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,6 +19,7 @@ pub enum BackendChoice {
     Codex {
         model: Option<String>,
     },
+    Demo,
 }
 
 impl BackendChoice {
@@ -68,6 +70,7 @@ impl BackendChoice {
                 ..
             } => (provider.id(), model.as_str(), thinking_level.as_str()),
             Self::Codex { model } => ("codex", model.as_deref().unwrap_or("coding-plan"), "high"),
+            Self::Demo => ("demo", "app-iteration", "high"),
         };
         json!({
             "provider": provider,
@@ -84,6 +87,105 @@ impl BackendChoice {
                 provider, api_key, ..
             } => Arc::new(WirelessBackend { provider, api_key }),
             Self::Codex { model } => Arc::new(CodexBackend { model }),
+            Self::Demo => Arc::new(DemoBackend {
+                calls: AtomicUsize::new(0),
+            }),
+        }
+    }
+}
+
+struct DemoBackend {
+    calls: AtomicUsize,
+}
+
+impl ModelBackend for DemoBackend {
+    fn complete(
+        &self,
+        _request_json: &str,
+        on_event: &mut dyn FnMut(ModelStreamEvent),
+    ) -> Result<String, String> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(140));
+        let tool_call = |name: &str, arguments: Value| {
+            json!({
+                "thinking":"",
+                "text":"",
+                "toolCalls":[{"id":format!("demo_{call}"),"name":name,"arguments":arguments}],
+                "usage":{"input":0,"output":0,"totalTokens":0},
+                "stopReason":"toolUse"
+            })
+            .to_string()
+        };
+        match call {
+            0 => Ok(tool_call("app.checkout", json!({"id":"demo"}))),
+            1 => Ok(tool_call(
+                "read",
+                json!({"path":".system/app-events/demo.json"}),
+            )),
+            2 => Ok(tool_call(
+                "read",
+                json!({"path":"apps/demo/checkout/app.json"}),
+            )),
+            3 => Ok(tool_call(
+                "read",
+                json!({"path":"apps/demo/checkout/actions.js"}),
+            )),
+            4 => Ok(tool_call(
+                "read",
+                json!({"path":"apps/demo/checkout/view.js"}),
+            )),
+            5 => Ok(tool_call(
+                "edit",
+                json!({
+                    "path":"apps/demo/checkout/app.json",
+                    "edits":[{"oldText":"\"version\": \"1.0.0\"","newText":"\"version\": \"1.1.0\""}]
+                }),
+            )),
+            6 => Ok(tool_call(
+                "edit",
+                json!({
+                    "path":"apps/demo/checkout/actions.js",
+                    "edits":[{
+                        "oldText":"PocketPi.data.exec(\"UPDATE state SET value = 'clicked'\");\n    return { value: \"clicked\" };",
+                        "newText":"PocketPi.data.exec(\"UPDATE state SET value = 'updated'\");\n    return { value: \"updated\" };"
+                    }]
+                }),
+            )),
+            7 => Ok(tool_call(
+                "edit",
+                json!({
+                    "path":"apps/demo/checkout/view.js",
+                    "edits":[
+                        {"oldText":"View.Badge({ label: \"BUILT BY PI\", tone: \"info\" })","newText":"View.Badge({ label: \"BUILT BY PI\", tone: \"success\" })"},
+                        {"oldText":"label: \"SET CLICKED\"","newText":"label: \"SET UPDATED\""}
+                    ]
+                }),
+            )),
+            8 => Ok(tool_call(
+                "app.submit",
+                json!({"path":"apps/demo/checkout"}),
+            )),
+            9 => {
+                std::thread::sleep(Duration::from_millis(1_800));
+                let parts = [
+                    "Update submitted. ",
+                    "The existing SQLite value stays in place, ",
+                    "while the Action and View change after confirmation.",
+                ];
+                for part in parts {
+                    on_event(ModelStreamEvent::Text(part.into()));
+                    std::thread::sleep(Duration::from_millis(180));
+                }
+                Ok(json!({
+                    "thinking":"",
+                    "text":parts.concat(),
+                    "toolCalls":[],
+                    "usage":{"input":0,"output":0,"totalTokens":0},
+                    "stopReason":"stop"
+                })
+                .to_string())
+            }
+            _ => Err("the app-iteration demo turn is already complete".into()),
         }
     }
 }
