@@ -108,17 +108,6 @@ Reuse the workspace path to preserve agent files, installed apps and app data
 between launches. See [Getting started](https://pi.pocketlab.build/docs/getting-started)
 for provider options and the first verified run.
 
-### Replay the app-iteration demo
-
-The README walkthrough uses a deterministic simulator scenario. It exercises
-the real app checkout, file edits, submission, review, installation, action,
-SQLite and view paths while replacing model latency with a recorded tool call
-sequence.
-
-```sh
-cargo run -p pocket-pi-esp32-sim -- --demo app-iteration
-```
-
 ## Build an app
 
 An ordinary app is a small source tree:
