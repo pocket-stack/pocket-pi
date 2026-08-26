@@ -97,7 +97,8 @@ test("renders representative first-party routes with source-grounded content", a
     ["/docs/current-boundaries", /after PRs #17 through #20/],
     ["/docs/esp32-s3", /ESP32-S3-WROOM-1-N16R8/],
     ["/docs/getting-started", /You do not need a PocketJS checkout to start using PocketPi/i],
-    ["/blog", /Taking a Step Further Towards an Agent-Native Runtime/],
+    ["/blog", /Making Pocket Pi an Agent-Native App Development Environment/],
+    ["/blog/agent-native-app-development-environment", /The development environment is the closed loop/],
     ["/changelog", /Support ordinary App updates/],
   ];
 
@@ -177,11 +178,22 @@ test("uses page-specific Docs metadata and contains no invented editorial record
   assert.doesNotMatch(html, /og\.png/i);
 
   const blog = await (await render("/blog")).text();
+  assert.match(blog, /href="\/blog\/agent-native-app-development-environment"/);
   assert.match(blog, /https:\/\/pocketjs\.dev\/blog\/agent-native-runtime-embedded-systems\//);
   assert.match(blog, /https:\/\/pocketjs\.dev\/blog\/pocket-pi-agent-native-runtime\//);
   assert.match(blog, /https:\/\/pocketjs\.dev\/blog\/pocket-pi-on-esp32-p4\//);
   assert.doesNotMatch(blog, /Current archive|From the next article|Published on PocketJS/i);
   assert.doesNotMatch(blog, /August 20, 2026|The Agent lives on the device/i);
+
+  const article = await (await render("/blog/agent-native-app-development-environment")).text();
+  assert.match(article, /<title>Making Pocket Pi an Agent-Native App Development Environment · PocketPi Blog<\/title>/i);
+  assert.match(article, /pocketpi-device\/screens\/main\.png/);
+  assert.match(article, /pocketpi-device\/screens\/files\.png/);
+  assert.match(article, /agent-native-app-development-environment\/update-review\.png/);
+  assert.match(article, /physical-before-after\.png/);
+  assert.match(article, /minimal closed loop required for an Agent to develop software/);
+  assert.match(article, /commit it as one coherent new App version/);
+  assert.doesNotMatch(article, /What the demo proves/i);
 
   const docs = await (await render("/docs")).text();
   assert.match(docs, /Documentation map/);
