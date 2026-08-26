@@ -8,11 +8,20 @@ export const metadata: Metadata = {
 
 const posts = [
   {
+    date: "August 25, 2026",
+    iso: "2026-08-25",
+    title: "Making Pocket Pi an Agent-Native App Development Environment",
+    description: "How PocketPi lets Pi Agent inspect, modify, validate and commit an App whose source and lifecycle live on an ESP32-S3.",
+    href: "/blog/agent-native-app-development-environment",
+    external: false,
+  },
+  {
     date: "August 15, 2026",
     iso: "2026-08-15",
     title: "Taking a Step Further Towards an Agent-Native Runtime on Embedded Systems",
     description: "Protected native mechanisms, one PocketJS substrate, bounded Guests, durable App Data and an explicit System Framework.",
     href: "https://pocketjs.dev/blog/agent-native-runtime-embedded-systems/",
+    external: true,
   },
   {
     date: "August 11, 2026",
@@ -20,6 +29,7 @@ const posts = [
     title: "Designing Apps for Humans and Agents in an Agent-Native Runtime",
     description: "Deriving App = Data + Actions + View from the shared needs of human interaction, Agent tools and schedules.",
     href: "https://pocketjs.dev/blog/pocket-pi-agent-native-runtime/",
+    external: true,
   },
   {
     date: "August 6, 2026",
@@ -27,6 +37,7 @@ const posts = [
     title: "Just Enough Node: Porting the Pi Coding Agent to the ESP32-P4",
     description: "How a Node-shaped runtime, compact Pi Agent profile, native tools and PocketJS UI brought a complete Agent onto a microcontroller.",
     href: "https://pocketjs.dev/blog/pocket-pi-on-esp32-p4/",
+    external: true,
   },
 ];
 
@@ -46,7 +57,13 @@ export default function BlogPage() {
 
         <div className="blog-story-list">
           {posts.map((post, index) => (
-            <a className={`blog-story${index === 0 ? " blog-story-featured" : ""}`} href={post.href} key={post.href} target="_blank" rel="noreferrer">
+            <a
+              className={`blog-story${index === 0 ? " blog-story-featured" : ""}`}
+              href={post.href}
+              key={post.href}
+              target={post.external ? "_blank" : undefined}
+              rel={post.external ? "noreferrer" : undefined}
+            >
               <div className="blog-story-meta">
                 <time dateTime={post.iso}>{post.date}</time>
               </div>
@@ -54,7 +71,7 @@ export default function BlogPage() {
                 <h2>{post.title}</h2>
                 <p>{post.description}</p>
               </div>
-              <span className="blog-story-action">Read article <span aria-hidden="true">↗</span></span>
+              <span className="blog-story-action">Read article <span aria-hidden="true">{post.external ? "↗" : "→"}</span></span>
             </a>
           ))}
         </div>
