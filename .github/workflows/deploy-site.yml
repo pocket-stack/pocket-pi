@@ -1,8 +1,10 @@
 name: Deploy pi.pocketlab.build
 
-# Keep production deployment explicit. This publishes only the independent
-# pocketpi Worker and the pi.pocketlab.build custom domain declared in Wrangler.
+# Publish only the independent pocketpi Worker and the pi.pocketlab.build
+# custom domain declared in Wrangler.
 on:
+  push:
+    branches: [main]
   workflow_dispatch: {}
 
 concurrency:
