@@ -12,7 +12,7 @@ declare global {
         prompt(text: string): void;
         tick(): void;
         drain(): string;
-        replaceTools(definitions: string): void;
+        replaceAppContext(definitions: string, installedApps: string): void;
       }
     | undefined;
 }

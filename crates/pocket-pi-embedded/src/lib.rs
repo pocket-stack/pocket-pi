@@ -7,7 +7,10 @@ pub use pocket_pi_protocols::model::ModelStreamEvent;
 
 const PRELUDE: &str = include_str!("../js/prelude.js");
 pub const MODEL_WORKER_STACK_BYTES: usize = 64 * 1024;
+#[cfg(target_os = "espidf")]
 const TOOL_WORKER_STACK_BYTES: usize = 16 * 1024;
+#[cfg(not(target_os = "espidf"))]
+const TOOL_WORKER_STACK_BYTES: usize = 64 * 1024;
 
 pub trait ModelBackend: Send + Sync {
     fn complete(
@@ -218,15 +221,18 @@ impl GuestAgent {
         call_agent(guest, "prompt", (text.to_owned(),))
     }
 
-    pub fn replace_tools(
+    pub fn replace_app_context(
         &self,
         guest: &Guest,
         definitions: Vec<serde_json::Value>,
+        installed_apps: serde_json::Value,
     ) -> Result<(), String> {
         validate_tool_definitions(&definitions)?;
         let definitions = serde_json::to_string(&definitions)
             .map_err(|error| format!("serialize Agent tools: {error}"))?;
-        call_agent(guest, "replaceTools", (definitions,))
+        let installed_apps = serde_json::to_string(&installed_apps)
+            .map_err(|error| format!("serialize installed Apps: {error}"))?;
+        call_agent(guest, "replaceAppContext", (definitions, installed_apps))
     }
 
     pub fn tick(&self, guest: &Guest) -> Result<Vec<AgentEvent>, String> {
@@ -556,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn one_model_worker_preserves_thinking_and_sequential_tools() {
+    fn current_turn_keeps_tools_and_completed_turn_discards_their_trace() {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let threads = Arc::new(Mutex::new(Vec::new()));
         let executed = Arc::new(Mutex::new(Vec::new()));
@@ -598,10 +604,11 @@ mod tests {
         let threads = threads.lock().unwrap();
         assert_eq!(threads.len(), 2);
         assert_eq!(threads[0], threads[1]);
-        let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0]["options"]["reasoning"], "high");
-        let messages = requests[1]["context"]["messages"].as_array().unwrap();
+        drop(threads);
+        let captured = requests.lock().unwrap();
+        assert_eq!(captured.len(), 2);
+        assert_eq!(captured[0]["options"]["reasoning"], "high");
+        let messages = captured[1]["context"]["messages"].as_array().unwrap();
         let assistant = messages
             .iter()
             .find(|message| message["role"] == "assistant")
@@ -624,6 +631,42 @@ mod tests {
                 .count(),
             2
         );
+        drop(captured);
+
+        agent.prompt(&guest, "follow up").unwrap();
+        let mut done = false;
+        for _ in 0..200 {
+            done |= agent
+                .tick(&guest)
+                .unwrap()
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Done));
+            if done {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(done);
+
+        let requests = requests.lock().unwrap();
+        let messages = requests[2]["context"]["messages"].as_array().unwrap();
+        assert!(messages.iter().any(|message| {
+            message["role"] == "user" && message["content"].to_string().contains("run both")
+        }));
+        assert!(messages.iter().any(|message| {
+            message["role"] == "assistant"
+                && message["content"].as_array().is_some_and(|content| {
+                    content
+                        .iter()
+                        .any(|block| block["type"] == "text" && block["text"] == "complete")
+                })
+        }));
+        assert!(!messages.iter().any(|message| {
+            message["role"] == "toolResult"
+                || message["content"]
+                    .as_array()
+                    .is_some_and(|content| content.iter().any(|block| block["type"] == "toolCall"))
+        }));
     }
 
     struct RecordingBackend(Arc<Mutex<Vec<serde_json::Value>>>);
@@ -650,7 +693,7 @@ mod tests {
     }
 
     #[test]
-    fn replacing_tools_keeps_the_guest_and_conversation() {
+    fn replacing_app_context_keeps_the_guest_and_conversation() {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let guest = Guest::new().unwrap();
         let agent = GuestAgent::mount_source(
@@ -665,13 +708,20 @@ mod tests {
         for prompt in ["before install", "after install"] {
             if prompt == "after install" {
                 agent
-                    .replace_tools(
+                    .replace_app_context(
                         &guest,
                         vec![serde_json::json!({
                             "name":"new.tool",
                             "description":"New App Tool",
                             "parameters":{"type":"object","properties":{}}
                         })],
+                        serde_json::json!({
+                            "new-app": {
+                                "title": "New App",
+                                "purpose": "Demonstrate refresh",
+                                "tools": ["new.tool"]
+                            }
+                        }),
                     )
                     .unwrap();
             }
@@ -695,6 +745,10 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0]["context"]["tools"][0]["name"], "echo");
         assert_eq!(requests[1]["context"]["tools"][0]["name"], "new.tool");
+        assert!(requests[1]["context"]["systemPrompt"]
+            .as_str()
+            .unwrap()
+            .contains("new-app"));
         assert!(requests[1]["context"]["messages"]
             .as_array()
             .unwrap()

@@ -6,6 +6,7 @@ type Config = {
   provider?: string;
   thinkingLevel?: "high" | "xhigh";
   systemPrompt?: string;
+  installedApps?: Record<string, unknown>;
   tools?: Array<{
     name: string;
     label?: string;
@@ -53,6 +54,23 @@ const pendingTools = new Map<
   { resolve: (value: any) => void; reject: (error: Error) => void }
 >();
 let agent: Agent | null = null;
+let baseSystemPrompt = "";
+let installedApps: Record<string, unknown> | undefined;
+
+const APP_ROUTING_GUIDANCE = `Decide what the user wants to change, not which verb they use.
+
+USE APP — Change a record or invoke a capability inside an installed App. Call its Tool; it operates the live Data shown by its View. Creating or updating an App record is still USE APP. Never checkout or edit App files.
+
+AUTHOR APP — Only when the App itself must change. Then choose exactly one:
+- CREATE APP — The App is absent from Installed Apps. Create apps/<id>/checkout.
+- UPDATE APP — The App is installed and its code, View, schema, Tools, or schedules must change. Call app.checkout; edit only the checkout; bump version.
+
+For either AUTHOR APP path, read .system/authoring/APP.md before editing; afterward, call app.validate, then app.submit.`;
+
+function systemPrompt(): string {
+  if (!installedApps) return baseSystemPrompt;
+  return `${baseSystemPrompt}\n\n${APP_ROUTING_GUIDANCE}\n\nInstalled Apps:\n${JSON.stringify(installedApps)}`;
+}
 
 function toolsFor(definitions: NonNullable<Config["tools"]>): any[] {
   return definitions.map((tool) => ({
@@ -106,7 +124,7 @@ function modelFor(config: Config): any {
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: deepseek ? 1_000_000 : 128_000,
-    maxTokens: deepseek ? 384_000 : 16_384,
+    maxTokens: 16_384,
   };
 }
 
@@ -324,10 +342,12 @@ function boot(configJson: string): void {
   const config = JSON.parse(configJson) as Config;
   const model = modelFor(config);
   const tools = toolsFor(config.tools || []);
+  baseSystemPrompt = config.systemPrompt || "You are Pocket Pi running on an embedded device.";
+  installedApps = config.installedApps;
 
   agent = new Agent({
     initialState: {
-      systemPrompt: config.systemPrompt || "You are Pocket Pi running on an embedded device.",
+      systemPrompt: systemPrompt(),
       model,
       thinkingLevel: model.reasoning ? config.thinkingLevel || "high" : "off",
       tools,
@@ -354,9 +374,23 @@ function boot(configJson: string): void {
   events.push({ type: "agent_ready" });
 }
 
+function discardCompletedToolTrace(): void {
+  if (!agent) return;
+  agent.state.messages = agent.state.messages.flatMap((message: any) => {
+    if (message.role === "toolResult") return [];
+    if (message.role !== "assistant") return [message];
+    if (message.content.some((block: any) => block.type === "toolCall")) return [];
+    const content = message.content.filter((block: any) => block.type === "text");
+    return content.length ? [{ ...message, content }] : [];
+  });
+}
+
 function prompt(text: string): void {
   if (!agent) throw new Error("prompt before boot");
-  void agent.prompt(text).catch((error) => events.push({ type: "agent_error", message: String(error) }));
+  void agent.prompt(text).then(discardCompletedToolTrace, (error) => {
+    discardCompletedToolTrace();
+    events.push({ type: "agent_error", message: String(error) });
+  });
 }
 
 function tick(): void {
@@ -408,12 +442,16 @@ function drain(): string {
   });
 }
 
-function replaceTools(definitionsJson: string): void {
-  if (!agent) throw new Error("replaceTools before boot");
+function replaceAppContext(definitionsJson: string, installedAppsJson: string): void {
+  if (!agent) throw new Error("replaceAppContext before boot");
   if (agent.state.isStreaming || pendingModels.size || pendingTools.size) {
-    throw new Error("replaceTools while Agent is busy");
+    throw new Error("replaceAppContext while Agent is busy");
   }
-  agent.state.tools = toolsFor(JSON.parse(definitionsJson));
+  const tools = toolsFor(JSON.parse(definitionsJson));
+  const nextInstalledApps = JSON.parse(installedAppsJson) as Record<string, unknown>;
+  agent.state.tools = tools;
+  installedApps = nextInstalledApps;
+  agent.state.systemPrompt = systemPrompt();
 }
 
-globalThis.PocketPiEmbedded = { boot, prompt, tick, drain, replaceTools };
+globalThis.PocketPiEmbedded = { boot, prompt, tick, drain, replaceAppContext };

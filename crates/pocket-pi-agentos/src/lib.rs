@@ -27,6 +27,7 @@ pub const POCKETJS_REVISION: &str = "e12cf12f82cc60b636368119d49a06eb9ed2a3d5";
 pub const SYSTEM_FRAMEWORK_API: u32 = 1;
 pub const MAX_POCKETAPP_BYTES: usize = 2 * 1024 * 1024;
 const APP_CHECKOUT_TOOL: &str = "app.checkout";
+const APP_VALIDATE_TOOL: &str = "app.validate";
 const APP_SUBMIT_TOOL: &str = "app.submit";
 const APP_EVENT_LIMIT: usize = 16;
 const APP_EVENT_ERROR_CHARS: usize = 2_048;
@@ -111,6 +112,9 @@ unsafe impl pocket_mod::qjs::allocator::Allocator for PsramAllocator {
 const PSRAM_CAPS: u32 = 4 | 1024;
 
 #[cfg(target_os = "espidf")]
+const MALLOC_CAP_8BIT: u32 = 4;
+
+#[cfg(target_os = "espidf")]
 unsafe extern "C" {
     fn heap_caps_malloc(size: usize, caps: u32) -> *mut core::ffi::c_void;
     fn heap_caps_calloc(count: usize, size: usize, caps: u32) -> *mut core::ffi::c_void;
@@ -121,6 +125,23 @@ unsafe extern "C" {
     ) -> *mut core::ffi::c_void;
     fn heap_caps_free(ptr: *mut core::ffi::c_void);
     fn heap_caps_get_allocated_size(ptr: *mut core::ffi::c_void) -> usize;
+    fn heap_caps_get_largest_free_block(caps: u32) -> usize;
+}
+
+#[cfg(target_os = "espidf")]
+fn ensure_view_sdk_capacity(bytes: usize) -> Result<()> {
+    let largest = unsafe { heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) };
+    let required = bytes.saturating_add(1);
+    anyhow::ensure!(
+        largest >= required,
+        "insufficient runtime memory: largest block is {largest} bytes, View SDK requires {required}"
+    );
+    Ok(())
+}
+
+#[cfg(not(target_os = "espidf"))]
+fn ensure_view_sdk_capacity(_bytes: usize) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(target_os = "espidf")]
@@ -236,6 +257,24 @@ pub struct AppInstallReview {
     pub update: bool,
     pub current_version: Option<String>,
     pub current_schema_version: Option<u32>,
+}
+
+struct ValidatedAppCandidate {
+    app: InstalledApp,
+    review: AppInstallReview,
+    screen_text: String,
+}
+
+struct AppValidationFailure {
+    stage: &'static str,
+    error: anyhow::Error,
+}
+
+fn validation_stage<T>(
+    stage: &'static str,
+    result: Result<T>,
+) -> std::result::Result<T, AppValidationFailure> {
+    result.map_err(|error| AppValidationFailure { stage, error })
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -470,6 +509,20 @@ pub const fn system_view_pak() -> &'static [u8] {
     include_bytes!("../../../system/view-sdk.pak")
 }
 
+const AUTHORING_FILES: [(&str, &str); 5] = [
+    ("APP.md", include_str!("../../../system/authoring/APP.md")),
+    (
+        "DATA_ACTIONS.md",
+        include_str!("../../../system/authoring/DATA_ACTIONS.md"),
+    ),
+    ("VIEW.md", include_str!("../../../system/authoring/VIEW.md")),
+    ("HTTP.md", include_str!("../../../system/authoring/HTTP.md")),
+    (
+        "pocketpi.d.ts",
+        include_str!("../../../system/authoring/pocketpi.d.ts"),
+    ),
+];
+
 #[derive(Clone, Debug)]
 struct InstalledApp {
     descriptor: AppDescriptor,
@@ -546,6 +599,28 @@ impl InstalledAppIndex {
             .values()
             .flat_map(|app| app.descriptor.tools.iter().map(public_tool_definition))
             .collect()
+    }
+
+    fn capability_catalog(
+        &self,
+        replacement: Option<&InstalledApp>,
+        removed: Option<&str>,
+    ) -> Value {
+        let index = self.inner.read().expect("installed App index lock");
+        let mut apps = BTreeMap::new();
+        for (id, app) in &index.apps {
+            if id == ROOT_APP_ID
+                || removed == Some(id.as_str())
+                || replacement.is_some_and(|replacement| replacement.descriptor.id == *id)
+            {
+                continue;
+            }
+            apps.insert(id.clone(), app_capability(app));
+        }
+        if let Some(app) = replacement.filter(|app| app.descriptor.id != ROOT_APP_ID) {
+            apps.insert(app.descriptor.id.clone(), app_capability(app));
+        }
+        json!(apps)
     }
 
     fn route_for_tool(&self, name: &str) -> Option<ToolRoute> {
@@ -737,7 +812,10 @@ fn validate_app_tools(app: &InstalledApp, routes: &BTreeMap<String, ToolRoute>) 
             .filter(|action| !action.is_empty())
             .ok_or_else(|| anyhow!("{name} tool is missing action"))?;
         anyhow::ensure!(
-            !matches!(name, APP_CHECKOUT_TOOL | APP_SUBMIT_TOOL),
+            !matches!(
+                name,
+                APP_CHECKOUT_TOOL | APP_VALIDATE_TOOL | APP_SUBMIT_TOOL
+            ),
             "App tool name is reserved: {name}"
         );
         anyhow::ensure!(!routes.contains_key(name), "duplicate App tool: {name}");
@@ -775,6 +853,20 @@ fn public_tool_definition(tool: &Value) -> Value {
         object.remove("action");
     }
     definition
+}
+
+fn app_capability(app: &InstalledApp) -> Value {
+    let tools = app
+        .descriptor
+        .tools
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("validated App tool name"))
+        .collect::<Vec<_>>();
+    json!({
+        "title": app.descriptor.title,
+        "purpose": app.descriptor.description,
+        "tools": tools,
+    })
 }
 
 fn declared_actions(descriptor: &AppDescriptor) -> BTreeSet<String> {
@@ -1237,6 +1329,9 @@ enum ActionCompletion {
 
 enum ActionMessage {
     Run(ActionRequest),
+    ClearRuntimes {
+        done: mpsc::Sender<()>,
+    },
     RemoveApp {
         app_id: String,
         done: mpsc::Sender<Result<()>>,
@@ -1528,6 +1623,11 @@ impl ActionRunner {
                 while let Ok(message) = rx.recv() {
                     let request = match message {
                         ActionMessage::Run(request) => request,
+                        ActionMessage::ClearRuntimes { done } => {
+                            runtimes.clear();
+                            let _ = done.send(());
+                            continue;
+                        }
                         ActionMessage::RemoveApp { app_id, done } => {
                             let result = worker_configs
                                 .lock()
@@ -1663,6 +1763,15 @@ impl ActionRunner {
         }
     }
 
+    fn clear_runtimes(&self) -> Result<()> {
+        anyhow::ensure!(!self.busy(), "App Actions are busy");
+        let (done, response) = mpsc::channel();
+        self.tx
+            .send(ActionMessage::ClearRuntimes { done })
+            .context("clear App Action runtimes")?;
+        response.recv().context("clear App Action runtime cache")
+    }
+
     fn remove_app(&self, app_id: &str) -> Result<()> {
         let (done, response) = mpsc::channel();
         self.tx
@@ -1681,6 +1790,39 @@ struct AppRuntimeAssets {
     net_sdk: Arc<str>,
     view_sdk: Arc<str>,
     view_pak: PathBuf,
+}
+
+#[derive(Deserialize)]
+struct ViewSnapshotNode {
+    id: i32,
+    parent: i32,
+    kind: String,
+    text: String,
+    pressable: bool,
+    clips: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ScreenRect {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+}
+
+impl ScreenRect {
+    fn intersect(self, other: Self) -> Option<Self> {
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+        let right = (self.x + self.w).min(other.x + other.w);
+        let bottom = (self.y + self.h).min(other.y + other.h);
+        (right > x && bottom > y).then_some(Self {
+            x,
+            y,
+            w: right - x,
+            h: bottom - y,
+        })
+    }
 }
 
 struct ViewRuntime {
@@ -1711,6 +1853,7 @@ impl ViewRuntime {
         let system = app.descriptor.id == ROOT_APP_ID;
         let pak = std::fs::read(&assets.view_pak).context("read Pocket Pi View resources")?;
         surface.feed_pak(&pak);
+        drop(pak);
         surface.mount(&guest)?;
 
         let fs = mount_app_fs(&guest, fs_root, tmp_root)?;
@@ -1721,6 +1864,7 @@ impl ViewRuntime {
             &assets.framework,
             &app.resources,
         )?;
+        ensure_view_sdk_capacity(assets.view_sdk.len())?;
         guest.eval("pocket-pi-view-sdk", &assets.view_sdk)?;
         if system {
             let text = std::fs::read_to_string(app.release_dir.join("text.js"))
@@ -1812,6 +1956,17 @@ impl ViewRuntime {
         self.surface.with_ui(f)
     }
 
+    fn screen_text(&self, viewport: Viewport) -> Result<String> {
+        let line: String = self.call_method("viewSnapshot", ())?;
+        let nodes: Vec<ViewSnapshotNode> =
+            serde_json::from_str(&line).context("parse View semantic snapshot")?;
+        anyhow::ensure!(!nodes.is_empty(), "View semantic snapshot is empty");
+        Ok(self.surface.with_ui(|ui| {
+            let _ = ui.draw();
+            render_screen_text(viewport, &nodes, ui)
+        }))
+    }
+
     fn call_method<A, R>(&self, name: &str, args: A) -> Result<R>
     where
         A: for<'js> pocket_mod::qjs::function::IntoArgs<'js>,
@@ -1831,6 +1986,155 @@ impl ViewRuntime {
                 .map_err(|error| anyhow!("PocketPiSystem.{name}: {error}"))
         })
     }
+}
+
+fn render_screen_text(
+    viewport: Viewport,
+    nodes: &[ViewSnapshotNode],
+    ui: &pocketjs_core::Ui,
+) -> String {
+    const COLUMNS: usize = 64;
+    const MAX_ELEMENTS: usize = 128;
+
+    let rows = ((viewport.height as f32 / viewport.width as f32) * COLUMNS as f32 / 2.0)
+        .round()
+        .clamp(12.0, 48.0) as usize;
+    let viewport_rect = ScreenRect {
+        x: 0.0,
+        y: 0.0,
+        w: viewport.width as f32,
+        h: viewport.height as f32,
+    };
+    let mut world = BTreeMap::new();
+    let mut clips = BTreeMap::new();
+    let mut parents = BTreeMap::new();
+    let mut pressables = BTreeMap::new();
+    for node in nodes {
+        parents.insert(node.id, node.parent);
+        if node.pressable {
+            let number = pressables.len() + 1;
+            pressables.insert(node.id, number);
+        }
+        let Some((x, y, w, h)) = ui.layout_of(node.id) else {
+            continue;
+        };
+        let (parent_x, parent_y) = world
+            .get(&node.parent)
+            .map_or((0.0, 0.0), |rect: &ScreenRect| (rect.x, rect.y));
+        let rect = ScreenRect {
+            x: parent_x + x,
+            y: parent_y + y,
+            w,
+            h,
+        };
+        let inherited = clips.get(&node.parent).copied().unwrap_or(viewport_rect);
+        world.insert(node.id, rect);
+        clips.insert(
+            node.id,
+            if node.clips {
+                inherited.intersect(rect).unwrap_or(ScreenRect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 0.0,
+                    h: 0.0,
+                })
+            } else {
+                inherited
+            },
+        );
+    }
+
+    let pressable_for = |node: &ViewSnapshotNode| {
+        let mut id = node.id;
+        while id != 0 {
+            if let Some(number) = pressables.get(&id) {
+                return Some(*number);
+            }
+            id = parents.get(&id).copied().unwrap_or(0);
+        }
+        None
+    };
+    let mut canvas = vec![vec![' '; COLUMNS]; rows];
+    let mut visible = Vec::new();
+    let mut hidden = Vec::new();
+    for node in nodes
+        .iter()
+        .filter(|node| node.kind == "text" && !node.text.is_empty())
+        .take(MAX_ELEMENTS)
+    {
+        let Some(rect) = world.get(&node.id).copied() else {
+            continue;
+        };
+        let inherited = clips.get(&node.parent).copied().unwrap_or(viewport_rect);
+        let Some(shown) = rect.intersect(inherited) else {
+            hidden.push(node.text.clone());
+            continue;
+        };
+        let partial = shown.x > rect.x || shown.y > rect.y || shown.w < rect.w || shown.h < rect.h;
+        let prefix = pressable_for(node).map_or_else(String::new, |number| format!("[{number}] "));
+        for (line_index, line) in node.text.lines().enumerate() {
+            let row = (((rect.y / viewport.height as f32) * rows as f32).floor() as isize
+                + line_index as isize)
+                .clamp(0, rows.saturating_sub(1) as isize) as usize;
+            let column = (((rect.x / viewport.width as f32) * COLUMNS as f32).floor() as isize)
+                .clamp(0, COLUMNS.saturating_sub(1) as isize) as usize;
+            for (offset, character) in format!("{prefix}{line}")
+                .chars()
+                .take(COLUMNS - column)
+                .enumerate()
+            {
+                canvas[row][column + offset] = character;
+            }
+        }
+        visible.push(format!(
+            "{}{} bounds=({},{},{},{}) text={}",
+            pressable_for(node).map_or_else(String::new, |number| format!("[{number}] ")),
+            if partial { "PARTIAL" } else { "TEXT" },
+            rect.x.round() as i32,
+            rect.y.round() as i32,
+            rect.w.round() as i32,
+            rect.h.round() as i32,
+            serde_json::to_string(&node.text).unwrap_or_else(|_| "\"\"".to_owned()),
+        ));
+    }
+
+    let mut output = format!(
+        "SCREEN {}x{} (spatial map, [n] = pressable)\n+{}+\n",
+        viewport.width,
+        viewport.height,
+        "-".repeat(COLUMNS)
+    );
+    for row in canvas {
+        output.push('|');
+        output.extend(row);
+        output.push_str("|\n");
+    }
+    output.push('+');
+    output.push_str(&"-".repeat(COLUMNS));
+    output.push_str("+\nELEMENTS\n");
+    if visible.is_empty() {
+        output.push_str("(no visible text)\n");
+    } else {
+        output.push_str(&visible.join("\n"));
+        output.push('\n');
+    }
+    if !hidden.is_empty() {
+        output.push_str("OFFSCREEN_OR_CLIPPED\n");
+        for text in hidden {
+            output.push_str(&serde_json::to_string(&text).unwrap_or_else(|_| "\"\"".to_owned()));
+            output.push('\n');
+        }
+    }
+    const MAX_SCREEN_TEXT_BYTES: usize = 16 * 1024;
+    if output.len() > MAX_SCREEN_TEXT_BYTES {
+        let mut end = MAX_SCREEN_TEXT_BYTES;
+        while !output.is_char_boundary(end) {
+            end -= 1;
+        }
+        output.truncate(end);
+        output.push_str("\n[screenText truncated]\n");
+    }
+    output
 }
 
 fn install_system_framework(
@@ -2180,17 +2484,16 @@ impl AppSupervisor {
     }
 
     pub fn submit_app_checkout(
-        &self,
+        &mut self,
         requested_path: &str,
         install_root: &Path,
     ) -> Result<(StagedApp, AppInstallReview)> {
-        let (app_id, checkout) = self.resolve_checkout(requested_path)?;
-        anyhow::ensure!(
-            checkout.symlink_metadata()?.file_type().is_dir(),
-            "App checkout is not a directory"
-        );
-        let candidate = load_source_release(&checkout, &app_id)?;
-        let review = self.validate_app_change(&candidate, &BTreeMap::new())?;
+        let validated = self
+            .validate_checkout_candidate(requested_path)
+            .map_err(|failure| anyhow!("{}: {:#}", failure.stage, failure.error))?;
+        let candidate = validated.app;
+        let review = validated.review;
+        let checkout = candidate.release_dir.clone();
         let staged = StagedApp {
             descriptor: candidate.descriptor,
             release_dir: checkout.clone(),
@@ -2220,6 +2523,135 @@ impl AppSupervisor {
         ))
     }
 
+    pub fn validate_app_checkout(&mut self, requested_path: &str) -> Value {
+        match self.validate_checkout_candidate(requested_path) {
+            Ok(validated) => json!({
+                "ok":true,
+                "screenText":validated.screen_text,
+            }),
+            Err(failure) => json!({
+                "ok":false,
+                "error":{
+                    "stage":failure.stage,
+                    "message":format!("{:#}", failure.error),
+                },
+            }),
+        }
+    }
+
+    fn validate_checkout_candidate(
+        &mut self,
+        requested_path: &str,
+    ) -> std::result::Result<ValidatedAppCandidate, AppValidationFailure> {
+        let (app_id, checkout) =
+            validation_stage("checkout", self.resolve_checkout(requested_path))?;
+        let metadata =
+            validation_stage("checkout", checkout.symlink_metadata().map_err(Into::into))?;
+        if !metadata.file_type().is_dir() {
+            return Err(AppValidationFailure {
+                stage: "checkout",
+                error: anyhow!("App checkout is not a directory"),
+            });
+        }
+        let candidate = validation_stage("source", load_source_release(&checkout, &app_id))?;
+        let review = validation_stage(
+            "contract",
+            self.validate_app_change(&candidate, &BTreeMap::new()),
+        )?;
+        validation_stage("runtime", self.action_runner.clear_runtimes())?;
+        self.runtimes.clear();
+
+        let scratch = self.workspace.join(".system/validate").join(&app_id);
+        if scratch.exists() {
+            validation_stage(
+                "scratch",
+                std::fs::remove_dir_all(&scratch).map_err(Into::into),
+            )?;
+        }
+        validation_stage(
+            "scratch",
+            std::fs::create_dir_all(&scratch).map_err(Into::into),
+        )?;
+        let data = (|| -> Result<_> {
+            let fs_root = scratch.join("data");
+            let db_root = scratch.join("database");
+            let tmp_root = scratch.join("tmp");
+            std::fs::create_dir_all(&fs_root)?;
+            std::fs::create_dir_all(&db_root)?;
+            std::fs::create_dir_all(&tmp_root)?;
+            if review.update {
+                let (_, live_database, _) = data_paths(&self.workspace, &app_id);
+                std::fs::copy(
+                    live_database.join(format!("{app_id}.sqlite")),
+                    db_root.join(format!("{app_id}.sqlite")),
+                )
+                .context("copy installed App database into validation scratch")?;
+            }
+            let database = Arc::new(Mutex::new(DbModule::new(DbStorage::Dir(db_root))));
+            if review.update {
+                migrate_source_database(&candidate, &database)?;
+            } else {
+                prepare_source_database(&candidate, &database)?;
+            }
+            let revision = Arc::new(AtomicU32::new(0));
+            Ok((fs_root, tmp_root, database, revision))
+        })();
+        let (fs_root, tmp_root, database, revision) = match validation_stage("data", data) {
+            Ok(data) => data,
+            Err(failure) => {
+                let _ = std::fs::remove_dir_all(&scratch);
+                return Err(failure);
+            }
+        };
+
+        let actions = (|| -> Result<()> {
+            let action = self.action_config_at(
+                &candidate,
+                database.clone(),
+                revision.clone(),
+                &fs_root,
+                &tmp_root,
+            );
+            let action_runtime = ActionRuntime::load(&action, self.services.clone())?;
+            validate_action_contract(&candidate.descriptor, &action_runtime)?;
+            Ok(())
+        })();
+        if let Err(failure) = validation_stage("actions", actions) {
+            let _ = std::fs::remove_dir_all(&scratch);
+            return Err(failure);
+        }
+
+        let view = (|| -> Result<String> {
+            let runtime = ViewRuntime::load(
+                &candidate,
+                &self.assets,
+                self.viewport,
+                &fs_root,
+                &tmp_root,
+                database,
+                revision,
+            )?;
+            runtime.advance(true)?;
+            runtime.screen_text(self.viewport)
+        })();
+        let screen_text = match validation_stage("view", view) {
+            Ok(screen_text) => screen_text,
+            Err(failure) => {
+                let _ = std::fs::remove_dir_all(&scratch);
+                return Err(failure);
+            }
+        };
+        validation_stage(
+            "cleanup",
+            std::fs::remove_dir_all(&scratch).map_err(Into::into),
+        )?;
+        Ok(ValidatedAppCandidate {
+            app: candidate,
+            review,
+            screen_text,
+        })
+    }
+
     fn resolve_checkout(&self, requested_path: &str) -> Result<(String, PathBuf)> {
         let path = Path::new(requested_path);
         let relative = if path.is_absolute() {
@@ -2231,7 +2663,7 @@ impl AppSupervisor {
         let components = relative.components().collect::<Vec<_>>();
         anyhow::ensure!(
             matches!(components.as_slice(), [Component::Normal(apps), Component::Normal(_), Component::Normal(checkout)] if *apps == "apps" && *checkout == "checkout"),
-            "app.submit requires apps/<id>/checkout"
+            "App candidate path must be apps/<id>/checkout"
         );
         let Component::Normal(app_id) = components[1] else {
             unreachable!()
@@ -2241,10 +2673,7 @@ impl AppSupervisor {
             .ok_or_else(|| anyhow!("App id is not UTF-8"))?
             .to_owned();
         ensure_safe_component(&app_id, "App id")?;
-        anyhow::ensure!(
-            app_id != ROOT_APP_ID && self.catalog.app(&app_id).is_some(),
-            "unknown App: {app_id}"
-        );
+        anyhow::ensure!(app_id != ROOT_APP_ID, "cannot author the System App");
         Ok((
             app_id.clone(),
             self.workspace.join("apps").join(app_id).join("checkout"),
@@ -2440,7 +2869,11 @@ impl AppSupervisor {
             let mut next = tools.definitions();
             next.extend(app.descriptor.tools.iter().map(public_tool_definition));
             agent
-                .replace_tools(&self.system.guest, next)
+                .replace_app_context(
+                    &self.system.guest,
+                    next,
+                    self.catalog.capability_catalog(Some(&app), None),
+                )
                 .map_err(anyhow::Error::msg)?;
         }
 
@@ -2566,7 +2999,11 @@ impl AppSupervisor {
                     .map(public_tool_definition),
             );
             agent
-                .replace_tools(&self.system.guest, next)
+                .replace_app_context(
+                    &self.system.guest,
+                    next,
+                    self.catalog.capability_catalog(Some(&candidate), None),
+                )
                 .map_err(anyhow::Error::msg)?;
         }
 
@@ -2593,6 +3030,18 @@ impl AppSupervisor {
         database: SharedDb,
         revision: AppRevision,
     ) -> ActionConfig {
+        let (fs_root, _, tmp_root) = data_paths(&self.workspace, &app.descriptor.id);
+        self.action_config_at(app, database, revision, &fs_root, &tmp_root)
+    }
+
+    fn action_config_at(
+        &self,
+        app: &InstalledApp,
+        database: SharedDb,
+        revision: AppRevision,
+        fs_root: &Path,
+        tmp_root: &Path,
+    ) -> ActionConfig {
         let net = app
             .descriptor
             .capabilities
@@ -2604,7 +3053,12 @@ impl AppSupervisor {
             framework: self.assets.framework.clone(),
             net_sdk: net.then(|| self.assets.net_sdk.clone()),
             resources: app.resources.clone(),
-            fs_paths: app_fs_paths(&self.workspace, &app.descriptor),
+            fs_paths: app
+                .descriptor
+                .capabilities
+                .iter()
+                .any(|capability| capability == "data.fs")
+                .then(|| (fs_root.to_owned(), tmp_root.to_owned())),
             database,
             revision,
             net,
@@ -2664,7 +3118,11 @@ impl AppSupervisor {
                 })
                 .collect();
             agent
-                .replace_tools(&self.system.guest, next)
+                .replace_app_context(
+                    &self.system.guest,
+                    next,
+                    self.catalog.capability_catalog(None, Some(app_id)),
+                )
                 .map_err(anyhow::Error::msg)?;
         }
 
@@ -2747,10 +3205,19 @@ impl AppSupervisor {
             .release_dir;
         let source = std::fs::read_to_string(release.join("agent.js"))
             .context("read Pi Agent System App loop bundle")?;
+        let mut config: Value =
+            serde_json::from_str(config_json).context("parse Pi Agent config")?;
+        config
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("Pi Agent config must be a JSON object"))?
+            .insert(
+                "installedApps".to_owned(),
+                self.catalog.capability_catalog(None, None),
+            );
         self.agent = Some(
             GuestAgent::mount_source(
                 &self.system.guest,
-                config_json,
+                &serde_json::to_string(&config)?,
                 backend,
                 tools.clone(),
                 &source,
@@ -3249,7 +3716,14 @@ fn seed_system_runtime(workspace: &Path) -> Result<()> {
         &workspace.join("system/view-sdk.js"),
         system_view_sdk().as_bytes(),
     )?;
-    atomic_write(&workspace.join("system/view-sdk.pak"), system_view_pak())
+    atomic_write(&workspace.join("system/view-sdk.pak"), system_view_pak())?;
+    for (name, content) in AUTHORING_FILES {
+        atomic_write(
+            &workspace.join(".system/authoring").join(name),
+            content.as_bytes(),
+        )?;
+    }
+    Ok(())
 }
 
 fn app_events_relative_path(app_id: &str) -> String {
@@ -3370,8 +3844,10 @@ impl ToolHost for RoutedToolHost {
     }
 
     fn execute(&self, call_id: &str, name: &str, args_json: &str) -> ToolResult {
-        if !matches!(name, APP_CHECKOUT_TOOL | APP_SUBMIT_TOOL)
-            && self.catalog.route_for_tool(name).is_none()
+        if !matches!(
+            name,
+            APP_CHECKOUT_TOOL | APP_VALIDATE_TOOL | APP_SUBMIT_TOOL
+        ) && self.catalog.route_for_tool(name).is_none()
         {
             return self.native.execute(call_id, name, args_json);
         }
@@ -3423,6 +3899,11 @@ impl AgentToolRequest {
                 });
                 let _ = self.response.send(tool_result(result));
             }
+            APP_VALIDATE_TOOL => {
+                let result = required_tool_string(&self.args_json, "path")
+                    .map(|path| supervisor.validate_app_checkout(&path));
+                let _ = self.response.send(tool_result(result));
+            }
             APP_SUBMIT_TOOL => {
                 let result = required_tool_string(&self.args_json, "path")
                     .and_then(|path| submit(supervisor, &path));
@@ -3438,17 +3919,22 @@ impl AgentToolRequest {
     }
 }
 
-fn agent_app_tool_definitions() -> [Value; 2] {
+fn agent_app_tool_definitions() -> [Value; 3] {
     [
         json!({
             "name":APP_CHECKOUT_TOOL,
-            "description":"Create or reopen an editable copy of an installed ordinary App at apps/<id>/checkout. The result also provides its recent install and update events file. Read those events before editing, then edit only the checkout path with the normal file tools; App data is not copied.",
+            "description":"Create or reopen an installed ordinary App's source checkout. Returns its editable path and recent events path; live App data is not copied.",
             "parameters":{"type":"object","properties":{"id":{"type":"string","description":"Installed ordinary App id"}},"required":["id"],"additionalProperties":false}
         }),
         json!({
+            "name":APP_VALIDATE_TOOL,
+            "description":"Validate a new or updated ordinary App checkout against scratch Data and the real Action/View runtimes. Returns the first real error or screenText without changing live Data.",
+            "parameters":{"type":"object","properties":{"path":{"type":"string","description":"Canonical apps/<id>/checkout path"}},"required":["path"],"additionalProperties":false}
+        }),
+        json!({
             "name":APP_SUBMIT_TOOL,
-            "description":"After all edits are complete, validate and submit the canonical apps/<id>/checkout directory for physical user confirmation. Update app.json version before submitting. Change schemaVersion and add migrations/<n>.sql only when the SQLite schema changes.",
-            "parameters":{"type":"object","properties":{"path":{"type":"string","description":"The path returned by app.checkout"}},"required":["path"],"additionalProperties":false}
+            "description":"Submit a validated new or updated ordinary App checkout to the existing physical confirmation flow.",
+            "parameters":{"type":"object","properties":{"path":{"type":"string","description":"Canonical apps/<id>/checkout path"}},"required":["path"],"additionalProperties":false}
         }),
     ]
 }
@@ -4532,6 +5018,28 @@ mod tests {
     }
 
     #[test]
+    fn capability_catalog_groups_tool_names_by_app() {
+        let temp = tempfile::tempdir().unwrap();
+        install_fixture(
+            temp.path(),
+            "search",
+            r#"{"id":"search","title":"Research","description":"Find local references","version":"1","toolNamespace":"research","tools":[{"name":"research.query","action":"query","description":"Search references","parameters":{"type":"object"}}],"schedules":[]}"#,
+        );
+        let catalog = InstalledAppIndex::load(temp.path(), system_app_bundle()).unwrap();
+
+        assert_eq!(
+            catalog.capability_catalog(None, None),
+            json!({
+                "search": {
+                    "title": "Fixture",
+                    "purpose": "Find local references",
+                    "tools": ["research.query"]
+                }
+            })
+        );
+    }
+
+    #[test]
     fn missed_schedules_advance_in_constant_time() {
         let hour = 60 * 60;
         let ten_years = 10 * 365 * 24 * hour;
@@ -4806,6 +5314,108 @@ mod tests {
             supervisor.catalog().descriptor("notes").unwrap().version,
             "1.0.0"
         );
+    }
+
+    #[test]
+    fn new_app_validation_installs_and_runs_declared_tools() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("device");
+        let catalog = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
+        let mut supervisor =
+            AppSupervisor::new(&workspace, TEST_VIEWPORT, catalog, Arc::new(NoServices)).unwrap();
+        let checkout = workspace.join("apps/todo/checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+        for (name, source) in [
+            (
+                "app.json",
+                include_str!("../../../hosts/esp32-sim/demo/app-authoring/app.json"),
+            ),
+            (
+                "schema.sql",
+                include_str!("../../../hosts/esp32-sim/demo/app-authoring/schema.sql"),
+            ),
+            (
+                "actions.js",
+                include_str!("../../../hosts/esp32-sim/demo/app-authoring/actions.js"),
+            ),
+            (
+                "view.js",
+                include_str!("../../../hosts/esp32-sim/demo/app-authoring/view.js"),
+            ),
+        ] {
+            std::fs::write(checkout.join(name), source).unwrap();
+        }
+
+        let invalid = supervisor.validate_app_checkout("apps/todo/checkout");
+        assert_eq!(invalid["ok"], false);
+        assert_eq!(invalid["error"]["stage"], "view");
+        assert!(invalid["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown font size 2xl"));
+        assert!(!workspace.join("apps/todo/data").exists());
+        assert!(!workspace.join(".system/validate/todo").exists());
+
+        let view = std::fs::read_to_string(checkout.join("view.js"))
+            .unwrap()
+            .replace("fontSize: \"2xl\"", "fontSize: \"xl\"");
+        std::fs::write(checkout.join("view.js"), view).unwrap();
+        let valid = supervisor.validate_app_checkout("apps/todo/checkout");
+        assert_eq!(valid["ok"], true, "{valid:#}");
+        let screen = valid["screenText"].as_str().unwrap();
+        assert!(screen.contains("TODO LIST"));
+        assert!(screen.contains("NO TASKS YET"));
+        assert!(screen.contains("[1]"));
+        assert!(!workspace.join("apps/todo/data").exists());
+
+        let install_root = workspace.join(".system/install");
+        let (staged, review) = supervisor
+            .submit_app_checkout("apps/todo/checkout", &install_root)
+            .unwrap();
+        assert!(!review.update);
+        assert!(!checkout.exists());
+        supervisor
+            .apply_app(&staged.release_dir, BTreeMap::new())
+            .unwrap();
+        assert_eq!(
+            supervisor.catalog().descriptor("todo").unwrap().title,
+            "Todo List"
+        );
+        assert!(workspace.join("apps/todo/data/todo.sqlite").is_file());
+
+        let (response, result) = mpsc::channel();
+        supervisor.begin_agent_tool(
+            "todo.create",
+            r#"{"title":"Review Pocket Pi demo"}"#,
+            new_action_deadline(),
+            response,
+        );
+        let created = result.recv_timeout(APP_ACTION_TIMEOUT).unwrap();
+        assert!(!created.is_error, "{}", created.text);
+        assert_eq!(
+            serde_json::from_str::<Value>(&created.text).unwrap()["id"],
+            1
+        );
+
+        let (response, result) = mpsc::channel();
+        supervisor.begin_agent_tool(
+            "todo.update",
+            r#"{"id":1,"title":"Ship the Todo App","completed":true}"#,
+            new_action_deadline(),
+            response,
+        );
+        let updated = result.recv_timeout(APP_ACTION_TIMEOUT).unwrap();
+        assert!(!updated.is_error, "{}", updated.text);
+
+        let mut database = supervisor.databases["todo"].lock().unwrap();
+        let handle = database.open("todo");
+        let rows: Value = serde_json::from_str(&database.query(
+            handle,
+            "SELECT title, completed FROM todos WHERE id = 1",
+            "[]",
+        ))
+        .unwrap();
+        assert_eq!(rows["rows"][0], json!(["Ship the Todo App", 1]));
     }
 
     #[test]
@@ -5108,6 +5718,10 @@ mod tests {
                 .as_str()
                 .unwrap_or("")
                 .starts_with("portfolio.")));
+        assert!(!requests[0]["context"]["systemPrompt"]
+            .as_str()
+            .unwrap()
+            .contains("\"robinhood\""));
         drop(requests);
 
         let restarted = InstalledAppIndex::load(&workspace, system_app_bundle()).unwrap();
@@ -5252,7 +5866,7 @@ mod tests {
     }
 
     #[test]
-    fn actions_keep_the_three_most_recent_runtimes() {
+    fn actions_cache_and_clear_runtimes() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("actions.js");
         std::fs::write(
@@ -5291,7 +5905,7 @@ PocketPi.defineActions({ run() { return "ok"; } });
             .collect();
         let runner = ActionRunner::start(configs, Arc::new(NoServices)).unwrap();
 
-        for app_id in ["one", "two", "three", "one", "four", "two"] {
+        let run = |app_id| {
             let (response, rx) = mpsc::channel();
             runner
                 .enqueue(
@@ -5304,6 +5918,10 @@ PocketPi.defineActions({ run() { return "ok"; } });
                 )
                 .unwrap();
             assert!(!rx.recv_timeout(Duration::from_secs(2)).unwrap().is_error);
+        };
+
+        for app_id in ["one", "two", "three", "one", "four", "two"] {
+            run(app_id);
         }
 
         let load_count = |app_id: &str| {
@@ -5318,6 +5936,10 @@ PocketPi.defineActions({ run() { return "ok"; } });
         assert_eq!(load_count("two"), 2);
         assert_eq!(load_count("three"), 1);
         assert_eq!(load_count("four"), 1);
+
+        runner.clear_runtimes().unwrap();
+        run("one");
+        assert_eq!(load_count("one"), 2);
     }
 
     const SOURCE_APP_JSON: &str = r#"{
