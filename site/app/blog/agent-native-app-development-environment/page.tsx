@@ -13,6 +13,7 @@ export const metadata: Metadata = {
     title,
     description,
     publishedTime: "2026-08-25T00:00:00+08:00",
+    modifiedTime: "2026-08-27T00:00:00+08:00",
     authors: ["Siwei \"Jerry\" Yuan"],
     images: [
       {
@@ -44,8 +45,8 @@ function DevelopmentLoopDiagram() {
       <title id="development-loop-title">PocketPi minimal on-device development loop</title>
       <desc id="development-loop-description">
         Pi Agent inspects ordinary App source from its privileged workspace, modifies an isolated
-        checkout, validates it through human review and rehearsal, and commits one coherent App
-        version.
+        candidate, validates and refines it in scratch state, then submits it for human review and
+        commits one coherent App version.
       </desc>
       <rect width="760" height="540" rx="12" fill="#080c14" />
       <text x="20" y="32" fill="#718198" fontSize="12">POCKETPI / MINIMAL ON-DEVICE DEVELOPMENT LOOP</text>
@@ -68,8 +69,8 @@ function DevelopmentLoopDiagram() {
 
       <rect x="206" y="58" width="160" height="262" rx="10" fill="#0f1623" stroke="#5da8d1" strokeWidth="1.5" />
       <text x="222" y="86" fill="#5da8d1" fontSize="10" fontWeight="700">MODIFY</text>
-      <text x="222" y="113" fill="#e8eef7" fontSize="16" fontWeight="700">App checkout</text>
-      <text x="222" y="133" fill="#8f9db0" fontSize="9">release → candidate</text>
+      <text x="222" y="113" fill="#e8eef7" fontSize="16" fontWeight="700">App candidate</text>
+      <text x="222" y="133" fill="#8f9db0" fontSize="9">new or checked out</text>
       <line x1="222" y1="150" x2="350" y2="150" stroke="#263248" />
       <text x="222" y="174" fill="#cbd6e2" fontSize="9">app.json</text>
       <text x="222" y="193" fill="#a9d9c6" fontSize="9">schema · migrations</text>
@@ -84,21 +85,21 @@ function DevelopmentLoopDiagram() {
 
       <rect x="394" y="58" width="160" height="262" rx="10" fill="#0f1623" stroke="#9f8bd8" strokeWidth="1.5" />
       <text x="410" y="86" fill="#9f8bd8" fontSize="10" fontWeight="700">VALIDATE</text>
-      <text x="410" y="113" fill="#e8eef7" fontSize="16" fontWeight="700">Review +</text>
-      <text x="410" y="133" fill="#e8eef7" fontSize="16" fontWeight="700">rehearse</text>
+      <text x="410" y="113" fill="#e8eef7" fontSize="16" fontWeight="700">Rehearse +</text>
+      <text x="410" y="133" fill="#e8eef7" fontSize="16" fontWeight="700">refine</text>
       <line x1="410" y1="150" x2="538" y2="150" stroke="#263248" />
       <circle cx="421" cy="168" r="8" fill="#171c31" stroke="#9f8bd8" />
       <text x="421" y="171" fill="#c1b3e7" fontSize="7" textAnchor="middle">1</text>
-      <text x="437" y="171" fill="#cbd6e2" fontSize="8">app.submit</text>
+      <text x="437" y="171" fill="#cbd6e2" fontSize="8">app.validate</text>
       <circle cx="421" cy="199" r="8" fill="#171c31" stroke="#9f8bd8" />
       <text x="421" y="202" fill="#c1b3e7" fontSize="7" textAnchor="middle">2</text>
-      <text x="437" y="202" fill="#cbd6e2" fontSize="8">human review</text>
+      <text x="437" y="202" fill="#cbd6e2" fontSize="8">SQLite rehearsal</text>
       <circle cx="421" cy="230" r="8" fill="#171c31" stroke="#9f8bd8" />
       <text x="421" y="233" fill="#c1b3e7" fontSize="7" textAnchor="middle">3</text>
-      <text x="437" y="233" fill="#cbd6e2" fontSize="8">SQLite rehearsal</text>
+      <text x="437" y="233" fill="#cbd6e2" fontSize="8">load Actions + View</text>
       <circle cx="421" cy="261" r="8" fill="#171c31" stroke="#9f8bd8" />
       <text x="421" y="264" fill="#c1b3e7" fontSize="7" textAnchor="middle">4</text>
-      <text x="437" y="264" fill="#cbd6e2" fontSize="8">load Actions + View</text>
+      <text x="437" y="264" fill="#cbd6e2" fontSize="8">screenText → refine</text>
       <text x="474" y="294" fill="#9f8bd8" fontSize="8" textAnchor="middle">NO LIVE MUTATION</text>
 
       <path d="M560 187 H578" stroke="#536981" strokeWidth="1.5" />
@@ -110,16 +111,16 @@ function DevelopmentLoopDiagram() {
       <text x="598" y="133" fill="#e8eef7" fontSize="16" fontWeight="700">version</text>
       <line x1="598" y1="150" x2="726" y2="150" stroke="#263248" />
       <rect x="598" y="166" width="128" height="31" rx="6" fill="#10201e" />
-      <text x="662" y="186" fill="#add9c7" fontSize="9" fontWeight="700" textAnchor="middle">LIVE MIGRATION</text>
+      <text x="662" y="186" fill="#add9c7" fontSize="9" fontWeight="700" textAnchor="middle">APP.SUBMIT</text>
       <rect x="598" y="205" width="128" height="31" rx="6" fill="#10201e" />
-      <text x="662" y="225" fill="#add9c7" fontSize="9" fontWeight="700" textAnchor="middle">RELEASE RENAME</text>
+      <text x="662" y="225" fill="#add9c7" fontSize="9" fontWeight="700" textAnchor="middle">HUMAN REVIEW</text>
       <rect x="598" y="244" width="128" height="31" rx="6" fill="#10201e" />
-      <text x="662" y="264" fill="#add9c7" fontSize="9" fontWeight="700" textAnchor="middle">NEW GUESTS</text>
+      <text x="662" y="264" fill="#add9c7" fontSize="9" fontWeight="700" textAnchor="middle">ACTIVATE RELEASE</text>
       <text x="662" y="293" fill="#8f9db0" fontSize="8" textAnchor="middle">Tools + Schedules refresh</text>
 
       <rect x="18" y="344" width="724" height="68" rx="9" fill="#0c1622" stroke="#65c3a0" strokeWidth="1.25" />
       <text x="36" y="369" fill="#65c3a0" fontSize="10" fontWeight="700">DURABLE APP DATA</text>
-      <text x="36" y="391" fill="#c9d5df" fontSize="11">Current SQLite stays outside release/ and checkout/</text>
+      <text x="36" y="391" fill="#c9d5df" fontSize="11">App-owned SQLite stays outside release/ and checkout/</text>
       <path d="M450 379 H706" stroke="#65c3a0" strokeWidth="1.5" />
       <path d="M698 373 L706 379 L698 385" fill="none" stroke="#8ad2b7" strokeWidth="1.5" />
       <text x="578" y="368" fill="#718f87" fontSize="8" textAnchor="middle">REHEARSAL COPY → LIVE TRANSACTION</text>
@@ -143,12 +144,13 @@ export default function AgentNativeDevelopmentEnvironmentArticle() {
           <h1>{title}</h1>
           <p className="blog-article-deck">
             An ESP32-S3 cannot host a conventional JavaScript toolchain. PocketPi becomes a
-            development environment by closing a smaller, stricter loop around the App already
-            running on the board.
+            development environment by closing a smaller, stricter loop around the App boundary
+            on the board.
           </p>
           <div className="blog-article-byline">
             <span>Siwei &quot;Jerry&quot; Yuan</span>
-            <time dateTime="2026-08-25">August 25, 2026</time>
+            <time dateTime="2026-08-25">Published August 25, 2026</time>
+            <time dateTime="2026-08-27">Modified August 27, 2026</time>
             <span>7 min read</span>
           </div>
         </header>
@@ -170,9 +172,9 @@ export default function AgentNativeDevelopmentEnvironmentArticle() {
             </blockquote>
             <p>The answer is four responsibilities:</p>
             <ol>
-              <li>inspect the source that defines the running App;</li>
-              <li>modify that source without mutating the live App;</li>
-              <li>validate the candidate against the App&apos;s current Data;</li>
+              <li>inspect the source and contract that define an App;</li>
+              <li>modify an isolated candidate without mutating a live App;</li>
+              <li>validate the candidate against scratch Data;</li>
               <li>commit it as one coherent new App version.</li>
             </ol>
             <p>
@@ -208,8 +210,8 @@ export default function AgentNativeDevelopmentEnvironmentArticle() {
         <figure className="blog-article-figure architecture-figure">
           <DevelopmentLoopDiagram />
           <figcaption>
-            The four responsibilities stay distinct. Human review and runtime rehearsal are the
-            two validation gates before commit.
+            The four responsibilities stay distinct. Runtime rehearsal guides iteration before
+            submission; human review gates activation.
           </figcaption>
         </figure>
 
@@ -246,9 +248,10 @@ export default function AgentNativeDevelopmentEnvironmentArticle() {
               workspace, and native credentials remain outside the source tree.
             </p>
             <p>
-              Inspection therefore needs no checkout. The running definition is already legible
-              in <code>apps/&lt;id&gt;/release</code>. Checkout is needed only when Pi Agent intends to
-              change that definition.
+              The resident context also exposes a compact installed-App capability catalog and a
+              version-bound authoring contract under <code>.system/authoring</code>. An installed
+              definition is already legible in <code>apps/&lt;id&gt;/release</code>; Pi Agent creates or
+              checks out a candidate only when it intends to author an App.
             </p>
           </section>
         </article>
@@ -286,11 +289,10 @@ export default function AgentNativeDevelopmentEnvironmentArticle() {
           <section>
             <h2>Modify: edit a bounded candidate</h2>
             <p>
-              Reading live source is safe; editing it in place is not. The first App-iteration
-              lifecycle boundary is therefore <code>app.checkout({`{ id }`})</code>. It copies the
-              complete installed <code>release/</code> source once into an isolated{" "}
-              <code>checkout/</code> and returns that canonical path. Calling it again reopens the
-              same candidate instead of overwriting work already in progress.
+              Reading live source is safe; editing it in place is not. For an installed App,
+              <code>app.checkout({`{ id }`})</code> copies the complete <code>release/</code> source once
+              into an isolated <code>checkout/</code>. A new App begins directly in that same
+              candidate location. Reopening either candidate preserves work already in progress.
             </p>
             <p>
               Checkout copies source only. The live SQLite database, temporary files and native
@@ -299,7 +301,7 @@ export default function AgentNativeDevelopmentEnvironmentArticle() {
               cloning its live state.
             </p>
             <p>The candidate is small enough to understand as a directory, not as a build graph:</p>
-            <pre><code>{`apps/demo/checkout/
+            <pre><code>{`apps/<id>/checkout/
 ├── app.json                 identity, version, capabilities, Tools, Schedules
 ├── schema.sql               initial SQLite shape for a new installation
 ├── migrations/N.sql        forward Data changes for an existing installation
@@ -308,7 +310,7 @@ export default function AgentNativeDevelopmentEnvironmentArticle() {
 └── assets/*.json            manifest-declared static resources`}</code></pre>
             <p>
               The existing bounded <code>write</code> and exact-replacement <code>edit</code> Tools do
-              the actual modification. Pi Agent advances the App version in <code>app.json</code>,
+              the actual modification. Pi Agent sets or advances the App version in <code>app.json</code>,
               changes behavior in <code>actions.js</code>, and changes presentation in{" "}
               <code>view.js</code>. If the durable data shape changes, it also advances{" "}
               <code>schemaVersion</code> and adds the next migration. If only values or behavior
@@ -331,9 +333,8 @@ export default function AgentNativeDevelopmentEnvironmentArticle() {
             </p>
             <p>
               There is no on-device TypeScript transform, npm installation or cross-module
-              compile. The files Pi Agent edits are already the files PocketJS will evaluate. The
-              second lifecycle boundary, <code>app.submit</code>, begins only after that candidate is
-              ready to be validated.
+              compile. The files Pi Agent edits are already the files PocketJS will evaluate. Pi
+              Agent validates that candidate with <code>app.validate</code> before submitting it.
             </p>
           </section>
         </article>
@@ -344,33 +345,26 @@ export default function AgentNativeDevelopmentEnvironmentArticle() {
             <p>
               A candidate is not valid merely because its JavaScript parses. The requested change
               must make sense to the human who owns the device, and the implementation must work
-              against the state accumulated by the App already running there.
+              against the state it will own on the device.
             </p>
             <p>
-              <code>app.submit({`{ path }`})</code> first verifies that Pi Agent is submitting the
-              canonical checkout for that App. It validates the manifest identity, source layout,
-              App version, Framework API and schema-update contract, then stages the complete
-              candidate as an update request.
+              <code>app.validate({`{ path }`})</code> verifies the manifest, source and schema-update
+              contract, then prepares scratch Data. It initializes a new schema or copies the
+              installed SQLite database and rehearses its migrations before loading the candidate
+              Actions and View. Scratch state is always removed; the live release and Data remain
+              untouched.
             </p>
             <p>
-              That request is deliberately human-in-the-loop. The user reviews what Pi Agent is
-              asking to replace and either confirms it or rejects it and asks for a revision. The
-              human answers the product question: is this the change we want? Native validation
-              answers a different question: can this candidate safely become the running App?
+              Validation returns real runtime errors and <code>screenText</code>: a bounded textual
+              view of the first rendered frame, including layout bounds and clipped or offscreen
+              text. Pi Agent is expected to inspect that result and refine the candidate
+              iteratively until validation succeeds.
             </p>
             <p>
-              After confirmation, PocketPi performs a rehearsal before any live mutation. This is
-              possible because durable App state has one explicit owner: an App-local SQLite
-              database outside every View and Action Guest heap. The updater copies the quiescent
-              database into a rehearsal directory, applies the candidate migrations to that copy,
-              and loads the candidate Actions and View against the rehearsed Data.
-            </p>
-            <p>
-              Missing migration steps, invalid Action routes, Framework errors and View
-              construction failures stop the update while the installed release and its Data
-              remain untouched. Source-only updates keep the same <code>schemaVersion</code>. A real
-              SQLite shape change supplies the corresponding <code>migrations/N.sql</code> steps,
-              while PocketPi owns the transaction and SQLite <code>user_version</code>.
+              Once validation succeeds, <code>app.submit({`{ path }`})</code> repeats only the startup
+              subset without building <code>screenText</code>, stages the complete candidate and opens
+              the physical review UI. The human answers the product question—whether this is the
+              App they want—before PocketPi is allowed to activate it.
             </p>
           </section>
 
@@ -378,15 +372,14 @@ export default function AgentNativeDevelopmentEnvironmentArticle() {
             <h2>Commit: activate one coherent App version</h2>
             <p>
               Once the human has approved the request and the rehearsal has succeeded, commit
-              advances the whole App. It does not copy individual edited files over the running
+              activates the whole App. It does not copy individual edited files over a running
               directory.
             </p>
             <p>
-              The updater moves the complete candidate under <code>.update/release</code>, then
-              applies the rehearsed migrations to the live SQLite database in one transaction.
-              It quiesces the old Action and View runtimes, preserves the old source temporarily,
-              and uses same-filesystem directory renames to place the complete candidate at the
-              one canonical <code>release/</code> path.
+              For an update, PocketPi applies the rehearsed migrations to the live SQLite database
+              in one transaction and preserves the old source temporarily. A new App initializes
+              its owned Data from <code>schema.sql</code>. Both paths activate the complete candidate
+              at the one canonical <code>release/</code> path rather than copying individual files.
             </p>
             <p>
               Atomicity follows the actual ownership boundaries. SQLite migration is atomic in a
@@ -403,10 +396,9 @@ export default function AgentNativeDevelopmentEnvironmentArticle() {
               Firmware is rebuilt.
             </p>
             <p>
-              Finally, PocketPi replaces the App&apos;s Tool routes and Schedules, publishes the new
-              catalog entry and removes the temporary old source. The App id, native credentials
-              and SQLite owner remain stable. Data is preserved or migrated; Actions and View are
-              replaced; runtime Guests are recreated. That is one coherent transition of{" "}
+              Finally, PocketPi publishes the App&apos;s Tool routes and Schedules and removes any
+              temporary old source. Data is initialized, preserved or migrated; Actions and View
+              become directly executable in fresh runtime Guests. That is one coherent transition of{" "}
               <code>Data + Actions + View</code> rather than a set of unrelated patches.
             </p>
           </section>
@@ -440,14 +432,15 @@ export default function AgentNativeDevelopmentEnvironmentArticle() {
             </p>
             <p>
               What it can do is more precise: Pi Agent can inspect, modify, validate and commit the
-              complete source boundary of an admitted App on the device where that App is running.
+              complete source boundary of an admitted App on the device, whether creating it or
+              evolving an installed version.
               That is possible because earlier architecture decisions line up with the four
               responsibilities:
             </p>
             <ul>
               <li>workspace ownership and App isolation make source inspectable;</li>
               <li>bounded file and lifecycle Tools make a candidate editable;</li>
-              <li>App-owned SQLite and forward migrations make current Data testable;</li>
+              <li>App-owned SQLite, schema and migrations make candidates testable without live mutation;</li>
               <li>raw JavaScript, the View SDK and one PocketJS substrate make a coherent version directly executable.</li>
             </ul>
             <p className="article-closing">
