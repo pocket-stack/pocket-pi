@@ -9,6 +9,12 @@ use pocket_pi_protocols::model::{ModelStreamEvent, WirelessProvider};
 use pocket_pi_protocols::{anthropic_messages, codex_decision, openai_chat};
 use serde_json::{json, Value};
 
+#[derive(Clone, Copy)]
+pub enum DemoKind {
+    AppIteration,
+    AppAuthoring,
+}
+
 pub enum BackendChoice {
     Wireless {
         provider: WirelessProvider,
@@ -19,7 +25,7 @@ pub enum BackendChoice {
     Codex {
         model: Option<String>,
     },
-    Demo,
+    Demo(DemoKind),
 }
 
 impl BackendChoice {
@@ -70,13 +76,14 @@ impl BackendChoice {
                 ..
             } => (provider.id(), model.as_str(), thinking_level.as_str()),
             Self::Codex { model } => ("codex", model.as_deref().unwrap_or("coding-plan"), "high"),
-            Self::Demo => ("demo", "app-iteration", "high"),
+            Self::Demo(DemoKind::AppIteration) => ("demo", "app-iteration", "high"),
+            Self::Demo(DemoKind::AppAuthoring) => ("demo", "app-authoring", "high"),
         };
         json!({
             "provider": provider,
             "model": model,
             "thinkingLevel": thinking_level,
-            "systemPrompt": "You are Pocket Pi in the ESP32 simulator. To iterate an installed ordinary App, call app.checkout, edit only its returned checkout with the normal file tools, update app.json version, then call app.submit after all edits are complete; it opens physical confirmation. Change schemaVersion and add the matching numbered migration only when the SQLite schema changes. Be concise."
+            "systemPrompt": "You are Pocket Pi in the ESP32 simulator. Be concise."
         })
         .to_string()
     }
@@ -87,7 +94,8 @@ impl BackendChoice {
                 provider, api_key, ..
             } => Arc::new(WirelessBackend { provider, api_key }),
             Self::Codex { model } => Arc::new(CodexBackend { model }),
-            Self::Demo => Arc::new(DemoBackend {
+            Self::Demo(kind) => Arc::new(DemoBackend {
+                kind,
                 calls: AtomicUsize::new(0),
             }),
         }
@@ -95,6 +103,7 @@ impl BackendChoice {
 }
 
 struct DemoBackend {
+    kind: DemoKind,
     calls: AtomicUsize,
 }
 
@@ -116,6 +125,20 @@ impl ModelBackend for DemoBackend {
             })
             .to_string()
         };
+        match self.kind {
+            DemoKind::AppIteration => self.app_iteration(call, on_event, tool_call),
+            DemoKind::AppAuthoring => self.app_authoring(call, on_event, tool_call),
+        }
+    }
+}
+
+impl DemoBackend {
+    fn app_iteration(
+        &self,
+        call: usize,
+        on_event: &mut dyn FnMut(ModelStreamEvent),
+        tool_call: impl Fn(&str, Value) -> String,
+    ) -> Result<String, String> {
         match call {
             0 => Ok(tool_call("app.checkout", json!({"id":"demo"}))),
             1 => Ok(tool_call(
@@ -186,6 +209,135 @@ impl ModelBackend for DemoBackend {
                 .to_string())
             }
             _ => Err("the app-iteration demo turn is already complete".into()),
+        }
+    }
+
+    fn app_authoring(
+        &self,
+        call: usize,
+        on_event: &mut dyn FnMut(ModelStreamEvent),
+        tool_call: impl Fn(&str, Value) -> String,
+    ) -> Result<String, String> {
+        match call {
+            0 => Ok(tool_call(
+                "read",
+                json!({"path":".system/authoring/APP.md"}),
+            )),
+            1 => Ok(tool_call(
+                "read",
+                json!({"path":".system/authoring/DATA_ACTIONS.md"}),
+            )),
+            2 => Ok(tool_call(
+                "read",
+                json!({"path":".system/authoring/VIEW.md"}),
+            )),
+            3 => Ok(tool_call(
+                "grep",
+                json!({
+                    "path":".system/authoring/pocketpi.d.ts",
+                    "pattern":"fontSize",
+                    "literal":true
+                }),
+            )),
+            4 => Ok(tool_call(
+                "write",
+                json!({
+                    "path":"apps/todo/checkout/app.json",
+                    "content":include_str!("../demo/app-authoring/app.json")
+                }),
+            )),
+            5 => Ok(tool_call(
+                "write",
+                json!({
+                    "path":"apps/todo/checkout/schema.sql",
+                    "content":include_str!("../demo/app-authoring/schema.sql")
+                }),
+            )),
+            6 => Ok(tool_call(
+                "write",
+                json!({
+                    "path":"apps/todo/checkout/actions.js",
+                    "content":include_str!("../demo/app-authoring/actions.js")
+                }),
+            )),
+            7 => Ok(tool_call(
+                "write",
+                json!({
+                    "path":"apps/todo/checkout/view.js",
+                    "content":include_str!("../demo/app-authoring/view.js")
+                }),
+            )),
+            8 => Ok(tool_call(
+                "app.validate",
+                json!({"path":"apps/todo/checkout"}),
+            )),
+            9 => Ok(tool_call(
+                "edit",
+                json!({
+                    "path":"apps/todo/checkout/view.js",
+                    "edits":[{"oldText":"fontSize: \"2xl\"","newText":"fontSize: \"xl\""}]
+                }),
+            )),
+            10 => Ok(tool_call(
+                "app.validate",
+                json!({"path":"apps/todo/checkout"}),
+            )),
+            11 => Ok(tool_call(
+                "app.submit",
+                json!({"path":"apps/todo/checkout"}),
+            )),
+            12 => {
+                std::thread::sleep(Duration::from_millis(1_800));
+                let parts = [
+                    "Todo List is ready for review. ",
+                    "I validated its Data, Actions, and rendered View, ",
+                    "including the corrected xl font size.",
+                ];
+                for part in parts {
+                    on_event(ModelStreamEvent::Text(part.into()));
+                    std::thread::sleep(Duration::from_millis(180));
+                }
+                Ok(json!({
+                    "thinking":"",
+                    "text":parts.concat(),
+                    "toolCalls":[],
+                    "usage":{"input":0,"output":0,"totalTokens":0},
+                    "stopReason":"stop"
+                })
+                .to_string())
+            }
+            13 => Ok(tool_call(
+                "todo.create",
+                json!({"title":"Review Pocket Pi demo"}),
+            )),
+            14 => Ok(tool_call(
+                "todo.update",
+                json!({
+                    "id":1,
+                    "title":"Ship the Todo App",
+                    "completed":true
+                }),
+            )),
+            15 => {
+                let parts = [
+                    "I created the first task, ",
+                    "renamed it to Ship the Todo App, ",
+                    "and marked it complete.",
+                ];
+                for part in parts {
+                    on_event(ModelStreamEvent::Text(part.into()));
+                    std::thread::sleep(Duration::from_millis(180));
+                }
+                Ok(json!({
+                    "thinking":"",
+                    "text":parts.concat(),
+                    "toolCalls":[],
+                    "usage":{"input":0,"output":0,"totalTokens":0},
+                    "stopReason":"stop"
+                })
+                .to_string())
+            }
+            _ => Err("the app-authoring demo turn is already complete".into()),
         }
     }
 }
