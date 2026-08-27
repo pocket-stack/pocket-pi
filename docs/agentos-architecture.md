@@ -321,10 +321,12 @@ Tools for source work. The runtime adds three lifecycle Tools:
    host-side `ViewRuntime` combines it with PocketJS Core's existing
    `Ui::layout_of`. It is a private runtime ABI, not an App API or Agent Tool;
    `app.validate` is its only host caller.
-6. `app.submit({path})` repeats the same validation, renames the new or updated
-   candidate to `.system/install/<job>/release`, and opens the existing physical
-   review UI. Confirmation runs `AppSupervisor::apply_app`; dismissal discards
-   the staged candidate.
+6. `app.submit({path})` repeats only the startup subset: source and update
+   contracts, scratch schema or migration, Action load, View load and its first
+   frame. It does not build `screenText`. Submission then renames the candidate
+   to `.system/install/<job>/release` and opens the existing physical review UI.
+   Confirmation runs `AppSupervisor::apply_app`; dismissal discards the staged
+   candidate.
 
 The ordinary App root therefore has only four meaningful locations:
 

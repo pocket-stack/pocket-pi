@@ -262,7 +262,7 @@ pub struct AppInstallReview {
 struct ValidatedAppCandidate {
     app: InstalledApp,
     review: AppInstallReview,
-    screen_text: String,
+    screen_text: Option<String>,
 }
 
 struct AppValidationFailure {
@@ -2489,7 +2489,7 @@ impl AppSupervisor {
         install_root: &Path,
     ) -> Result<(StagedApp, AppInstallReview)> {
         let validated = self
-            .validate_checkout_candidate(requested_path)
+            .validate_checkout_candidate(requested_path, false)
             .map_err(|failure| anyhow!("{}: {:#}", failure.stage, failure.error))?;
         let candidate = validated.app;
         let review = validated.review;
@@ -2524,10 +2524,10 @@ impl AppSupervisor {
     }
 
     pub fn validate_app_checkout(&mut self, requested_path: &str) -> Value {
-        match self.validate_checkout_candidate(requested_path) {
+        match self.validate_checkout_candidate(requested_path, true) {
             Ok(validated) => json!({
                 "ok":true,
-                "screenText":validated.screen_text,
+                "screenText":validated.screen_text.expect("inspection requested"),
             }),
             Err(failure) => json!({
                 "ok":false,
@@ -2542,6 +2542,7 @@ impl AppSupervisor {
     fn validate_checkout_candidate(
         &mut self,
         requested_path: &str,
+        include_screen_text: bool,
     ) -> std::result::Result<ValidatedAppCandidate, AppValidationFailure> {
         let (app_id, checkout) =
             validation_stage("checkout", self.resolve_checkout(requested_path))?;
@@ -2621,7 +2622,7 @@ impl AppSupervisor {
             return Err(failure);
         }
 
-        let view = (|| -> Result<String> {
+        let view = (|| -> Result<Option<String>> {
             let runtime = ViewRuntime::load(
                 &candidate,
                 &self.assets,
@@ -2632,7 +2633,9 @@ impl AppSupervisor {
                 revision,
             )?;
             runtime.advance(true)?;
-            runtime.screen_text(self.viewport)
+            include_screen_text
+                .then(|| runtime.screen_text(self.viewport))
+                .transpose()
         })();
         let screen_text = match validation_stage("view", view) {
             Ok(screen_text) => screen_text,

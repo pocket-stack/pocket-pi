@@ -392,7 +392,7 @@ AUTHOR APP \u2014 Only when the App itself must change. Then choose exactly one:
 - CREATE APP \u2014 The App is absent from Installed Apps. Create apps/<id>/checkout.
 - UPDATE APP \u2014 The App is installed and its code, View, schema, Tools, or schedules must change. Call app.checkout; edit only the checkout; bump version.
 
-For either AUTHOR APP path, read .system/authoring/APP.md before editing; afterward, call app.validate, then app.submit.`;function systemPrompt(){if(!installedApps)return baseSystemPrompt;return`${baseSystemPrompt}
+For either AUTHOR APP path, read .system/authoring/APP.md before editing. Expect to work iteratively: refine your work based on app.validate errors and screenText, and call app.submit only after app.validate succeeds.`;function systemPrompt(){if(!installedApps)return baseSystemPrompt;return`${baseSystemPrompt}
 
 ${APP_ROUTING_GUIDANCE}
 
