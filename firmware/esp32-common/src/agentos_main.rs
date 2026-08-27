@@ -785,7 +785,7 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
 
         // The loading facts is rendered before activation enters QuickJS,
         // SQLite and flash. Touch and prompts remain locked by InstallScreen.
-        if install_requested {
+        if install_requested && !busy {
             install_requested = false;
             if let Some(staged) = pending_install.take() {
                 let operation = if install_ui.as_ref().is_some_and(|ui| ui.update) {

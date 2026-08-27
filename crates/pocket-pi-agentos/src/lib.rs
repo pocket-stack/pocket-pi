@@ -112,9 +112,6 @@ unsafe impl pocket_mod::qjs::allocator::Allocator for PsramAllocator {
 const PSRAM_CAPS: u32 = 4 | 1024;
 
 #[cfg(target_os = "espidf")]
-const MALLOC_CAP_8BIT: u32 = 4;
-
-#[cfg(target_os = "espidf")]
 unsafe extern "C" {
     fn heap_caps_malloc(size: usize, caps: u32) -> *mut core::ffi::c_void;
     fn heap_caps_calloc(count: usize, size: usize, caps: u32) -> *mut core::ffi::c_void;
@@ -130,7 +127,7 @@ unsafe extern "C" {
 
 #[cfg(target_os = "espidf")]
 fn ensure_view_sdk_capacity(bytes: usize) -> Result<()> {
-    let largest = unsafe { heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) };
+    let largest = unsafe { heap_caps_get_largest_free_block(PSRAM_CAPS) };
     let required = bytes.saturating_add(1);
     anyhow::ensure!(
         largest >= required,
@@ -2560,6 +2557,7 @@ impl AppSupervisor {
             self.validate_app_change(&candidate, &BTreeMap::new()),
         )?;
         validation_stage("runtime", self.action_runner.clear_runtimes())?;
+        self.active_app = None;
         self.runtimes.clear();
 
         let scratch = self.workspace.join(".system/validate").join(&app_id);
@@ -5866,6 +5864,28 @@ mod tests {
             ["three", "one", "four"]
         );
         assert_eq!(supervisor.active_id(), "four");
+    }
+
+    #[test]
+    fn validation_returns_to_system_before_releasing_view_runtimes() {
+        let temp = tempfile::tempdir().unwrap();
+        install_view_fixture(temp.path(), "notes");
+        let catalog = InstalledAppIndex::load(temp.path(), system_app_bundle()).unwrap();
+        let mut supervisor =
+            AppSupervisor::new(temp.path(), TEST_VIEWPORT, catalog, Arc::new(NoServices)).unwrap();
+        supervisor.open("notes").unwrap();
+
+        let checkout = temp.path().join(supervisor.checkout_app("notes").unwrap());
+        let descriptor_path = checkout.join("app.json");
+        let mut descriptor: Value =
+            serde_json::from_slice(&std::fs::read(&descriptor_path).unwrap()).unwrap();
+        descriptor["version"] = json!("2");
+        std::fs::write(descriptor_path, serde_json::to_vec(&descriptor).unwrap()).unwrap();
+
+        let result = supervisor.validate_app_checkout("apps/notes/checkout");
+        assert_eq!(result["ok"], true, "{result:#}");
+        assert_eq!(supervisor.active_id(), ROOT_APP_ID);
+        supervisor.frame_render(true).unwrap();
     }
 
     #[test]

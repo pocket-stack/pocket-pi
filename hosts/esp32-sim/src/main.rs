@@ -633,7 +633,7 @@ impl Product {
     }
 
     fn run_pending_install(&mut self) {
-        if !self.install_requested {
+        if !self.install_requested || self.busy {
             return;
         }
         self.install_requested = false;
@@ -1072,7 +1072,6 @@ impl DemoPlayback {
             DemoStep::WaitFor(DemoCondition::InstallState("review")),
             DemoStep::Pause(Duration::from_millis(250)),
             DemoStep::MoveTo((240, 722), Duration::from_millis(450)),
-            DemoStep::WaitFor(DemoCondition::AgentIdle),
             DemoStep::Click((240, 722)),
             DemoStep::WaitFor(DemoCondition::InstallState("success")),
             DemoStep::Pause(Duration::from_millis(350)),
