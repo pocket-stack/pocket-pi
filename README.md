@@ -102,6 +102,9 @@ cd pocket-pi
 cargo xtask run esp32-sim \
   --backend codex \
   --workspace target/esp32-workspace
+
+# Deterministic: one sentence -> new validated App -> physical review
+cargo xtask run esp32-sim --demo app-authoring
 ```
 
 Reuse the workspace path to preserve agent files, installed apps and app data

@@ -293,23 +293,38 @@ Migration files contain only schema/data statements. The runtime owns the
 transaction and `PRAGMA user_version`; Apps must not put transaction control or
 set `user_version` inside `migrations/N.sql`.
 
-### Agent-driven App iteration
+### Agent-driven App authoring
 
-The Pi Agent gets two lifecycle Tools; ordinary file editing continues to use
-the existing workspace Tools:
+The Pi Agent uses the existing `read`, `write`, `edit`, `find`, `grep` and `ls`
+Tools for source work. The runtime adds three lifecycle Tools:
 
-1. `app.checkout({id})` copies the installed source release once to
-   `apps/<id>/checkout` and returns that path together with
-   `.system/app-events/<id>.json`. Calling it again reopens the same checkout
-   without overwriting Agent work.
-2. The Agent reads and edits that directory, advances `app.json` `version`, and
-   changes `schemaVersion` plus `migrations/N.sql` only for a SQLite shape
-   change.
-3. `app.submit({path})` validates the canonical checkout against the installed
-   App, then renames it to `.system/install/<job>/release` and opens the same
-   physical review UI used by HTTP and UART packages.
-4. Confirmation runs the existing `AppSupervisor::apply_app` update path.
-   Dismissal discards the staged candidate.
+1. The resident prompt first separates use of an installed App from creation or
+   update of the App itself. A compact generated catalog groups Tool names under
+   each installed App's title and purpose; descriptions and parameters remain in
+   the normal Tool definitions. Installation, update and uninstall replace both
+   together without restarting the Agent or losing its conversation.
+2. For a new App, the Agent creates `apps/<id>/checkout` with `write`. For an
+   installed App, `app.checkout({id})` copies the source release once and
+   returns the same path plus `.system/app-events/<id>.json` without
+   overwriting an existing checkout.
+3. Version-bound knowledge under `.system/authoring/` defines the App file
+   contract, Data/Actions, the complete View API, conditional HTTP and one
+   searchable `pocketpi.d.ts` index. The prompt points to this package only for
+   App creation or update.
+4. `app.validate({path})` loads the real schema, Actions, projections, View and
+   PocketJS layout in `.system/validate/<id>`. Updates use a scratch copy of the
+   installed SQLite file. Validation always removes the scratch state and never
+   changes the live release or Data.
+5. A successful validation returns `screenText`: a bounded spatial character
+   map plus semantic text, pressable numbers, real layout bounds and clipped or
+   offscreen text. The private View SDK supplies retained node identity/text;
+   host-side `ViewRuntime` combines it with PocketJS Core's existing
+   `Ui::layout_of`. It is a private runtime ABI, not an App API or Agent Tool;
+   `app.validate` is its only host caller.
+6. `app.submit({path})` repeats the same validation, renames the new or updated
+   candidate to `.system/install/<job>/release`, and opens the existing physical
+   review UI. Confirmation runs `AppSupervisor::apply_app`; dismissal discards
+   the staged candidate.
 
 The ordinary App root therefore has only four meaningful locations:
 
@@ -323,10 +338,9 @@ apps/<id>/
 
 Checkout never copies `data/`, `tmp/` or credentials. Submit is a same-filesystem
 rename, not another source copy. `.update/` is still created only after physical
-confirmation by the existing crash-safe updater. The generic workspace Tools
-remain capable of writing under `apps/`; that capability is not a second update
-contract, and the Agent reads the returned recent events before iterating through
-checkout and submit. Event timestamps are UTC when the device clock is
+confirmation by the existing crash-safe updater. Validation errors contain only
+their real stage and runtime error chain; the runtime does not invent error codes
+or remediation hints. Event timestamps are UTC when the device clock is
 synchronized and `null` before then; the runtime never invents an epoch time.
 
 ## Minimal native capability surface

@@ -309,7 +309,7 @@ Resident guest → PocketPi
   prompt(text)
   tick()
   drain()
-  replaceTools(definitions)`}</Code>
+  replaceAppContext(definitions, installedApps)`}</Code>
       <p>
         Model requests/results, Tool definitions/results and Agent events cross this narrow boundary.
         AppSupervisor, native Tool/App routing, provider codecs, workspace, schedules, Root View and
