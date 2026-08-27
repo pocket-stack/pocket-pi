@@ -1,0 +1,43 @@
+{
+  "format": 1,
+  "frameworkApi": 1,
+  "id": "todo",
+  "title": "Todo List",
+  "description": "Create, edit, and complete local tasks",
+  "version": "1.0.0",
+  "schemaVersion": 1,
+  "capabilities": ["data.sqlite"],
+  "resources": {},
+  "toolNamespace": "todo",
+  "tools": [
+    {
+      "name": "todo.create",
+      "action": "createTodo",
+      "description": "Create a todo item.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string", "description": "Todo title" }
+        },
+        "required": ["title"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "todo.update",
+      "action": "updateTodo",
+      "description": "Change a todo title or completed state.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer", "description": "Todo id" },
+          "title": { "type": "string", "description": "New title" },
+          "completed": { "type": "boolean", "description": "Whether the todo is complete" }
+        },
+        "required": ["id"],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "schedules": []
+}

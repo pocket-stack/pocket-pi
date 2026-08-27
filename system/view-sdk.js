@@ -448,6 +448,23 @@
     return id ? pressables.get(id).onPress() ?? "" : "";
   }
 
+  function snapshot() {
+    const nodes = [];
+    function visit(node, parent) {
+      nodes.push({
+        id: node.id,
+        parent,
+        kind: node.type === NODE_TEXT ? "text" : "view",
+        text: node.text ?? "",
+        pressable: pressables.has(node.id),
+        clips: node.style[PROP.overflow] === 1,
+      });
+      for (const child of node.children) visit(child, node.id);
+    }
+    if (rootNode) visit(rootNode, 0);
+    return nodes;
+  }
+
   function mount(render, onDataChanged) {
     if (renderView) fail("View already mounted");
     if (typeof render !== "function") fail("View.mount requires a render function");
@@ -460,6 +477,7 @@
       pointerDown,
       pointerUp,
       tap(x, y) { return pressAt(x, y); },
+      snapshot,
     });
     renderIfDirty();
   }
@@ -526,6 +544,37 @@
       minHeight: Math.max(requested.minHeight ?? 0, 48 / geometryScale),
     };
     return props.disabled ? Box({ style, children: content }) : Pressable({ onPress: props.onPress, style, children: content });
+  }
+
+  function Checkbox(props = {}) {
+    if (typeof props.label !== "string" || !props.label) fail("Checkbox requires label");
+    if (!props.disabled && typeof props.onChange !== "function") fail("Checkbox requires onChange");
+    const checked = props.checked === true;
+    const style = {
+      minHeight: landscape ? 48 : 68,
+      paddingX: 12,
+      gap: 14,
+      direction: "row",
+      align: "center",
+      ...props.style,
+    };
+    const indicator = Box({
+      style: {
+        width: 36,
+        height: 36,
+        align: "center",
+        justify: "center",
+        radius: 6,
+        borderWidth: 2,
+        borderColor: props.disabled ? "disabled" : checked ? "success" : "subtle",
+        background: props.disabled ? "disabled" : checked ? "successSoft" : "surface",
+      },
+      children: checked ? Text({ text: "X", style: { color: props.disabled ? "muted" : "success", fontWeight: "bold" } }) : null,
+    });
+    const content = [indicator, Text({ text: props.label, style: { grow: 1, color: props.disabled ? "muted" : "text" } })];
+    return props.disabled
+      ? Box({ style, children: content })
+      : Pressable({ onPress: () => props.onChange(!checked), style, children: content });
   }
 
   function Badge(props = {}) {
@@ -668,6 +717,7 @@
     PageIntro,
     SectionHeading,
     ActionButton,
+    Checkbox,
     Badge,
     EmptyState,
     MetricCard,

@@ -278,7 +278,7 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
         "provider":provider,
         "model":resolved_model,
         "thinkingLevel":model_settings.thinking_level.id(),
-        "systemPrompt":format!("You are Pi Agent, the first-class system App in Pocket Pi AgentOS on {}. You can manage the top-level /workspace and use installed App tools. Use /workspace for durable memory, notes, plans, and artifacts; read and update relevant files when continuity matters. Installed Apps own their Data, Actions, and Views. To iterate an installed ordinary App, call app.checkout, edit only its returned checkout with the normal file tools, update app.json version, then call app.submit after all edits are complete; it opens physical confirmation. Change schemaVersion and add the matching numbered migration only when the SQLite schema changes. Be concise.", H::BOARD_NAME)
+        "systemPrompt":format!("You are Pi Agent, the first-class system App in Pocket Pi AgentOS on {}. You can manage the top-level /workspace. Use it for durable memory, notes, plans, and artifacts; read and update relevant files when continuity matters. Be concise.", H::BOARD_NAME)
     });
     with_psram_pthread_config(MODEL_WORKER_STACK_BYTES, H::MODEL_WORKER_CORE, || {
         supervisor
@@ -785,7 +785,7 @@ pub fn run<H: DeviceHost>() -> anyhow::Result<()> {
 
         // The loading facts is rendered before activation enters QuickJS,
         // SQLite and flash. Touch and prompts remain locked by InstallScreen.
-        if install_requested {
+        if install_requested && !busy {
             install_requested = false;
             if let Some(staged) = pending_install.take() {
                 let operation = if install_ui.as_ref().is_some_and(|ui| ui.update) {

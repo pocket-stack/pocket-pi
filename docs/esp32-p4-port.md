@@ -30,10 +30,11 @@ adapters only receive a complete `.pocketapp` and hand it to the shared Installe
 in `pocket-pi-agentos`; neither writes App storage, credentials or runtime state
 itself.
 
-The resident Agent uses that same lifecycle: `app.checkout` creates the editable
-source under `apps/<id>/checkout`, and `app.submit` moves it into the shared
-Installer staging before opening physical confirmation. The host does not gain
-a second Agent-specific updater.
+The resident Agent uses that same lifecycle: normal file Tools create a new
+source candidate under `apps/<id>/checkout`, `app.checkout` starts an installed
+App update, `app.validate` rehearses either candidate in scratch state, and
+`app.submit` moves it into shared Installer staging before physical
+confirmation. The host does not gain a second Agent-specific updater.
 
 ```sh
 cargo xtask build esp32-p4
@@ -41,6 +42,14 @@ cargo xtask build esp32-s3
 cargo xtask build esp32-sim
 cargo xtask run esp32-sim
 cargo xtask snapshot esp32-sim
+```
+
+Run the deterministic end-to-end authoring replay to watch Pi read its SDK
+knowledge, create a new App, catch and repair a real View error, validate the
+rendered UI, submit it, and open the installed App:
+
+```sh
+cargo xtask run esp32-sim --demo app-authoring
 ```
 
 Use the simulator to exercise another logical display without forking an App:

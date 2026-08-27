@@ -216,6 +216,9 @@
       refreshBindings();
       return event(view?.dataChanged?.());
     },
+    viewSnapshot() {
+      return event(view?.snapshot?.());
+    },
     updateView(line) {
       return event(systemHooks?.update(JSON.parse(line)));
     },

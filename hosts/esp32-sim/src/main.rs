@@ -24,7 +24,7 @@ use winit::window::{Window, WindowId};
 
 mod backend;
 
-use backend::BackendChoice;
+use backend::{BackendChoice, DemoKind};
 
 const DEFAULT_VIEWPORT: Viewport = Viewport::new(720, 1280);
 
@@ -36,16 +36,16 @@ struct Args {
     root_tap: Option<(u16, u16)>,
     viewport: Viewport,
     backend: BackendChoice,
-    demo: bool,
+    demo: Option<DemoKind>,
 }
 
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = parse_args()?;
-    if args.demo {
-        prepare_app_iteration_demo(&args.workspace)?;
-    } else {
-        prepare_workspace(&args.workspace)?;
+    match args.demo {
+        Some(DemoKind::AppIteration) => prepare_app_iteration_demo(&args.workspace)?,
+        Some(DemoKind::AppAuthoring) => prepare_app_authoring_demo(&args.workspace)?,
+        None => prepare_workspace(&args.workspace)?,
     }
     if let Some(path) = args.screenshot {
         headless(
@@ -72,17 +72,31 @@ fn main() -> Result<()> {
 
 fn parse_args() -> Result<Args> {
     let raw_args = std::env::args().skip(1).collect::<Vec<_>>();
-    if raw_args == ["--demo", "app-iteration"] {
+    if matches!(
+        raw_args.as_slice(),
+        [flag, name] if flag == "--demo" && matches!(name.as_str(), "app-iteration" | "app-authoring")
+    ) {
+        let kind = if raw_args[1] == "app-iteration" {
+            DemoKind::AppIteration
+        } else {
+            DemoKind::AppAuthoring
+        };
+        let name = raw_args[1].clone();
         return Ok(Args {
             screenshot: None,
             prompt: None,
             workspace: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../target/esp32-sim/demos/app-iteration"),
-            app: "demo".into(),
+                .join("../../target/esp32-sim/demos")
+                .join(name),
+            app: if matches!(kind, DemoKind::AppIteration) {
+                "demo".into()
+            } else {
+                ROOT_APP_ID.into()
+            },
             root_tap: None,
             viewport: Viewport::new(480, 800),
-            backend: BackendChoice::Demo,
-            demo: true,
+            backend: BackendChoice::Demo(kind),
+            demo: Some(kind),
         });
     }
     let mut screenshot = None;
@@ -127,7 +141,7 @@ fn parse_args() -> Result<Args> {
         root_tap,
         viewport,
         backend: BackendChoice::from_name(&backend, model).map_err(anyhow::Error::msg)?,
-        demo: false,
+        demo: None,
     })
 }
 
@@ -193,6 +207,13 @@ fn prepare_app_iteration_demo(workspace: &Path) -> Result<()> {
     )?;
     supervisor.apply_app(&staging, BTreeMap::new())?;
     Ok(())
+}
+
+fn prepare_app_authoring_demo(workspace: &Path) -> Result<()> {
+    if workspace.exists() {
+        std::fs::remove_dir_all(workspace)?;
+    }
+    prepare_workspace(workspace)
 }
 
 struct SimPlatform;
@@ -428,7 +449,7 @@ impl Product {
             BackendChoice::Codex { model } => {
                 format!("Codex / {}", model.as_deref().unwrap_or("coding-plan"))
             }
-            BackendChoice::Demo => "DEMO REPLAY".into(),
+            BackendChoice::Demo(_) => "DEMO REPLAY".into(),
         };
         let services: Arc<dyn AppServiceHost> = Arc::new(SimAppServices);
         let catalog = InstalledAppIndex::load(&workspace, system_app_bundle())?;
@@ -612,7 +633,7 @@ impl Product {
     }
 
     fn run_pending_install(&mut self) {
-        if !self.install_requested {
+        if !self.install_requested || self.busy {
             return;
         }
         self.install_requested = false;
@@ -1008,7 +1029,7 @@ enum DemoStep {
     Pause(Duration),
     MoveTo((u16, u16), Duration),
     Click((u16, u16)),
-    SendPrompt,
+    SendPrompt(&'static str),
     WaitFor(DemoCondition),
 }
 
@@ -1028,25 +1049,38 @@ struct DemoPlayback {
 }
 
 impl DemoPlayback {
-    fn new() -> Self {
-        Self {
-            steps: VecDeque::from([
+    fn new(kind: DemoKind) -> Self {
+        let mut steps = match kind {
+            DemoKind::AppIteration => vec![
                 DemoStep::Pause(Duration::from_millis(4_000)),
                 DemoStep::MoveTo((28, 42), Duration::from_millis(450)),
                 DemoStep::Click((28, 42)),
                 DemoStep::Pause(Duration::from_millis(350)),
-                DemoStep::SendPrompt,
-                DemoStep::Pause(Duration::from_millis(600)),
-                DemoStep::WaitFor(DemoCondition::InstallState("review")),
-                DemoStep::Pause(Duration::from_millis(250)),
-                DemoStep::MoveTo((240, 722), Duration::from_millis(450)),
-                DemoStep::WaitFor(DemoCondition::AgentIdle),
-                DemoStep::Click((240, 722)),
-                DemoStep::WaitFor(DemoCondition::InstallState("success")),
-                DemoStep::Pause(Duration::from_millis(350)),
-                DemoStep::MoveTo((240, 722), Duration::from_millis(250)),
-                DemoStep::Click((240, 722)),
-                DemoStep::WaitFor(DemoCondition::InstallDismissed),
+                DemoStep::SendPrompt(
+                    "Change the button to store updated instead of clicked, and make the Built by Pi badge green.",
+                ),
+            ],
+            DemoKind::AppAuthoring => vec![
+                DemoStep::Pause(Duration::from_millis(4_000)),
+                DemoStep::SendPrompt(
+                    "Create a Todo List App where I can create, edit, and complete tasks.",
+                ),
+            ],
+        };
+        steps.extend([
+            DemoStep::Pause(Duration::from_millis(600)),
+            DemoStep::WaitFor(DemoCondition::InstallState("review")),
+            DemoStep::Pause(Duration::from_millis(250)),
+            DemoStep::MoveTo((240, 722), Duration::from_millis(450)),
+            DemoStep::Click((240, 722)),
+            DemoStep::WaitFor(DemoCondition::InstallState("success")),
+            DemoStep::Pause(Duration::from_millis(350)),
+            DemoStep::MoveTo((240, 722), Duration::from_millis(250)),
+            DemoStep::Click((240, 722)),
+            DemoStep::WaitFor(DemoCondition::InstallDismissed),
+        ]);
+        match kind {
+            DemoKind::AppIteration => steps.extend([
                 DemoStep::Pause(Duration::from_secs(5)),
                 DemoStep::MoveTo((300, 760), Duration::from_millis(450)),
                 DemoStep::Click((300, 760)),
@@ -1060,6 +1094,24 @@ impl DemoPlayback {
                 DemoStep::WaitFor(DemoCondition::ServicesIdle),
                 DemoStep::Pause(Duration::from_millis(1_800)),
             ]),
+            DemoKind::AppAuthoring => steps.extend([
+                DemoStep::Pause(Duration::from_secs(1)),
+                DemoStep::SendPrompt(
+                    "Create a todo called Review Pocket Pi demo, then rename it to Ship the Todo App and mark it complete.",
+                ),
+                DemoStep::WaitFor(DemoCondition::AgentIdle),
+                DemoStep::Pause(Duration::from_secs(2)),
+                DemoStep::MoveTo((300, 760), Duration::from_millis(450)),
+                DemoStep::Click((300, 760)),
+                DemoStep::Pause(Duration::from_millis(350)),
+                DemoStep::MoveTo((240, 170), Duration::from_millis(450)),
+                DemoStep::Click((240, 170)),
+                DemoStep::WaitFor(DemoCondition::ActiveApp("todo")),
+                DemoStep::Pause(Duration::from_millis(1_800)),
+            ]),
+        }
+        Self {
+            steps: VecDeque::from(steps),
             started: Instant::now(),
             cursor_origin: (240, 400),
             pressed: false,
@@ -1099,11 +1151,8 @@ impl DemoPlayback {
                     false
                 }
             }
-            DemoStep::SendPrompt => {
-                state.product.send_prompt(
-                    "Change the button to store updated instead of clicked, and make the Built by Pi badge green."
-                        .into(),
-                );
+            DemoStep::SendPrompt(prompt) => {
+                state.product.send_prompt((*prompt).into());
                 true
             }
             DemoStep::WaitFor(condition) => match condition {
@@ -1158,7 +1207,7 @@ struct WindowApp {
     initial_root_tap: Option<(u16, u16)>,
     viewport: Viewport,
     backend: Option<BackendChoice>,
-    demo: bool,
+    demo: Option<DemoKind>,
     state: Option<WindowState>,
     error: Option<anyhow::Error>,
 }
@@ -1170,7 +1219,7 @@ fn windowed(
     root_tap: Option<(u16, u16)>,
     viewport: Viewport,
     backend: BackendChoice,
-    demo: bool,
+    demo: Option<DemoKind>,
 ) -> Result<()> {
     let event_loop = EventLoop::new()?;
     let mut app = WindowApp {
@@ -1238,9 +1287,13 @@ impl WindowApp {
             renderer,
             product,
             viewport: self.viewport,
-            cursor: if self.demo { (240, 400) } else { (0, 0) },
+            cursor: if self.demo.is_some() {
+                (240, 400)
+            } else {
+                (0, 0)
+            },
             touch_down: false,
-            demo: self.demo.then(DemoPlayback::new),
+            demo: self.demo.map(DemoPlayback::new),
         })
     }
 
